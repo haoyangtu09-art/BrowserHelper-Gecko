@@ -18,8 +18,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
-import mozilla.components.concept.engine.webextension.WebExtension
 import mozilla.components.concept.engine.webextension.WebExtensionRuntime
+import mozilla.components.support.webextensions.WebExtensionController
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -38,34 +38,25 @@ object CookieExportHelper {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var port: Port? = null
     private var registered = false
-    private var installing = false
     private var runtime: WebExtensionRuntime? = null
     private var appContext: Context? = null
     private val pending = LinkedHashMap<String, PendingRequest>()
 
+    private val controller = WebExtensionController(EXTENSION_ID, EXTENSION_URL, NATIVE_APP)
+
     fun install(runtime: WebExtensionRuntime, context: Context) {
         this.runtime = runtime
         this.appContext = context.applicationContext
-        if (installing) return
-        installing = true
-        runtime.installBuiltInWebExtension(
-            id = EXTENSION_ID,
-            url = EXTENSION_URL,
-            onSuccess = { extension ->
-                installing = false
-                register(extension)
-            },
-            onError = {
-                installing = false
-                runtime.listInstalledWebExtensions(
-                    onSuccess = { extensions ->
-                        val installed = extensions.firstOrNull { extension -> extension.id == EXTENSION_ID }
-                        if (installed != null) {
-                            register(installed)
-                        }
-                    },
-                    onError = {},
-                )
+        registerHandler()
+        controller.install(
+            runtime,
+            onSuccess = {},
+            onError = { throwable ->
+                mainHandler.post {
+                    appContext?.let {
+                        Toast.makeText(it, "Cookie extension install failed: ${throwable.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
             },
         )
     }
@@ -90,11 +81,11 @@ object CookieExportHelper {
             }
         }, 10_000)
         val activePort = port
-        if (activePort == null) {
+        if (activePort != null) {
+            postRequest(activePort, requestId, url)
+        } else {
             Toast.makeText(context, "正在连接 Cookie 通道", Toast.LENGTH_SHORT).show()
             ensureInstalled(context)
-        } else {
-            postRequest(activePort, requestId, url)
         }
     }
 
@@ -107,15 +98,13 @@ object CookieExportHelper {
         install(currentRuntime, appContext ?: context.applicationContext)
     }
 
-    private fun register(extension: WebExtension) {
+    private fun registerHandler() {
         if (registered) return
         registered = true
-        extension.registerBackgroundMessageHandler(
-            NATIVE_APP,
+        controller.registerBackgroundMessageHandler(
             object : MessageHandler {
                 override fun onPortConnected(port: Port) {
                     this@CookieExportHelper.port = port
-                    port.postMessage(JSONObject().put("type", "connected"))
                     flushPending(port)
                 }
 
@@ -129,6 +118,7 @@ object CookieExportHelper {
                     handlePortMessage(message)
                 }
             },
+            NATIVE_APP,
         )
     }
 
