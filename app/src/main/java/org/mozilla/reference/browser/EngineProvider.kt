@@ -28,6 +28,13 @@ object EngineProvider {
             // About config it's no longer enabled by default
             builder.aboutConfigEnabled(true)
             builder.extensionsWebAPIEnabled(true)
+
+            // Render web content slightly smaller than the device default so
+            // pages show more at once. displayDensityOverride takes an absolute
+            // density, so scale the device density rather than hardcoding.
+            val deviceDensity = context.resources.displayMetrics.density
+            builder.displayDensityOverride(deviceDensity * 0.85f)
+
             runtime = GeckoRuntime.create(context, builder.build())
         }
 
