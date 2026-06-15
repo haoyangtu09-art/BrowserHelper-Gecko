@@ -8,8 +8,13 @@ import android.app.Application
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import mozilla.components.browser.state.action.SystemAction
+import mozilla.components.browser.state.state.searchEngines
+import mozilla.components.lib.state.ext.flow
 import mozilla.components.concept.engine.webextension.isUnsupported
 import mozilla.components.concept.push.PushProcessor
 import mozilla.components.feature.addons.update.GlobalAddonDependencyProvider
@@ -93,6 +98,8 @@ open class BrowserApplication : Application() {
 
         CookieExportHelper.install(components.core.engine, this)
 
+        setupGoogleDefaultSearch()
+
         components.push.feature?.let {
             Logger.info("AutoPushFeature is configured, initializing it...")
 
@@ -120,6 +127,29 @@ open class BrowserApplication : Application() {
             components.core.icons.onTrimMemory(level)
         }
     }
+
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun setupGoogleDefaultSearch() =
+        GlobalScope.launch(Dispatchers.Main) {
+            val store = components.core.store
+
+            // Wait until the search region/engines have finished loading.
+            val searchState = store.flow()
+                .map { it.search }
+                .filter { it.complete && it.searchEngines.isNotEmpty() }
+                .first()
+
+            // Respect an explicit user choice if one already exists.
+            if (searchState.userSelectedSearchEngineId != null) {
+                return@launch
+            }
+
+            val google = searchState.searchEngines.firstOrNull {
+                it.name.contains("Google", ignoreCase = true)
+            } ?: return@launch
+
+            components.useCases.searchUseCases.selectSearchEngine(google)
+        }
 
     @OptIn(DelicateCoroutinesApi::class)
     private fun restoreBrowserState() =

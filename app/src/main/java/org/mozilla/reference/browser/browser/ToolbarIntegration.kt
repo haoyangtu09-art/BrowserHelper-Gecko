@@ -69,7 +69,7 @@ class ToolbarIntegration(
         val tint = ContextCompat.getColor(context, R.color.icons)
 
         val forward = SmallMenuCandidate(
-            contentDescription = "Forward",
+            contentDescription = "前进",
             icon = DrawableMenuIcon(
                 context,
                 mozilla.components.ui.icons.R.drawable.mozac_ic_forward_24,
@@ -83,7 +83,7 @@ class ToolbarIntegration(
         }
 
         val refresh = SmallMenuCandidate(
-            contentDescription = "Refresh",
+            contentDescription = "刷新",
             icon = DrawableMenuIcon(
                 context,
                 mozilla.components.ui.icons.R.drawable.mozac_ic_arrow_clockwise_24,
@@ -94,7 +94,7 @@ class ToolbarIntegration(
         }
 
         val stop = SmallMenuCandidate(
-            contentDescription = "Stop",
+            contentDescription = "停止",
             icon = DrawableMenuIcon(
                 context,
                 mozilla.components.ui.icons.R.drawable.mozac_ic_cross_24,
@@ -110,7 +110,7 @@ class ToolbarIntegration(
     private fun sessionMenuItems(sessionState: SessionState): List<MenuCandidate> =
         listOfNotNull(
             menuToolbar(sessionState),
-            TextMenuCandidate("Share") {
+            TextMenuCandidate("分享") {
                 val url = sessionState.content.url
                 context.share(url)
             },
@@ -127,7 +127,7 @@ class ToolbarIntegration(
                 CookieExportHelper.request(context, CookieAction.EXPORT_TO_DOWNLOADER, sessionState.content.url)
             },
             CompoundMenuCandidate(
-                text = "Request desktop site",
+                text = "请求桌面版网站",
                 isChecked = sessionState.content.desktopMode,
                 end = CompoundMenuCandidate.ButtonType.SWITCH,
             ) { checked ->
@@ -135,7 +135,7 @@ class ToolbarIntegration(
             },
             if (webAppUseCases.isPinningSupported()) {
                 TextMenuCandidate(
-                    text = "Add to homescreen",
+                    text = "添加到主屏幕",
                     containerStyle = ContainerStyle(
                         isVisible = webAppUseCases.isPinningSupported(),
                     ),
@@ -146,7 +146,7 @@ class ToolbarIntegration(
                 null
             },
             TextMenuCandidate(
-                text = "Find in Page",
+                text = "在页面中查找",
             ) {
                 FindInPageIntegration.launch?.invoke()
             },
@@ -160,22 +160,22 @@ class ToolbarIntegration(
         }
 
         return sessionMenuItems + listOf(
-            TextMenuCandidate(text = "Add-ons") {
+            TextMenuCandidate(text = "附加组件") {
                 val intent = Intent(context, AddonsActivity::class.java)
                 intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 context.startActivity(intent)
             },
-            TextMenuCandidate(text = "Synced Tabs") {
+            TextMenuCandidate(text = "同步的标签页") {
                 val intent = Intent(context, SyncedTabsActivity::class.java)
                 intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 context.startActivity(intent)
             },
-            TextMenuCandidate(text = "Report issue") {
+            TextMenuCandidate(text = "报告问题") {
                 tabsUseCases.addTab(
                     url = "https://github.com/mozilla-mobile/reference-browser/issues/new",
                 )
             },
-            TextMenuCandidate(text = "Settings") {
+            TextMenuCandidate(text = "设置") {
                 val intent = Intent(context, SettingsActivity::class.java)
                 intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 context.startActivity(intent)
