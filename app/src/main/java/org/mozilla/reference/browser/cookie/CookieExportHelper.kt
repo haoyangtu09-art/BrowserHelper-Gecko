@@ -35,6 +35,7 @@ object CookieExportHelper {
     private const val COOKIE_DIR_NAME = "Cookie"
 
     private var port: Port? = null
+    private var registered = false
     private val pending = LinkedHashMap<String, PendingRequest>()
 
     fun install(runtime: WebExtensionRuntime, context: Context) {
@@ -43,7 +44,19 @@ object CookieExportHelper {
             url = EXTENSION_URL,
             onSuccess = { extension -> register(extension, context.applicationContext) },
             onError = {
-                Toast.makeText(context, "Cookie extension install failed", Toast.LENGTH_SHORT).show()
+                runtime.listInstalledWebExtensions(
+                    onSuccess = { extensions ->
+                        val installed = extensions.firstOrNull { extension -> extension.id == EXTENSION_ID }
+                        if (installed != null) {
+                            register(installed, context.applicationContext)
+                        } else {
+                            Toast.makeText(context, "Cookie extension install failed", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onError = {
+                        Toast.makeText(context, "Cookie extension install failed", Toast.LENGTH_SHORT).show()
+                    },
+                )
             },
         )
     }
@@ -51,7 +64,7 @@ object CookieExportHelper {
     fun request(context: Context, action: CookieAction, url: String) {
         val activePort = port
         if (activePort == null) {
-            Toast.makeText(context, "Cookie extension is not ready", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Cookie extension is starting, try again in a moment", Toast.LENGTH_SHORT).show()
             return
         }
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
@@ -68,6 +81,8 @@ object CookieExportHelper {
     }
 
     private fun register(extension: WebExtension, appContext: Context) {
+        if (registered) return
+        registered = true
         extension.registerBackgroundMessageHandler(
             NATIVE_APP,
             object : MessageHandler {

@@ -1,4 +1,4 @@
-const port = browser.runtime.connectNative("cookie_export");
+let port = null;
 
 function normalizeSameSite(value) {
   if (value === "strict") {
@@ -10,7 +10,7 @@ function normalizeSameSite(value) {
   return "Lax";
 }
 
-port.onMessage.addListener(async (message) => {
+async function handleMessage(message) {
   try {
     const cookies = await browser.cookies.getAll({ url: message.url });
     port.postMessage({
@@ -31,4 +31,20 @@ port.onMessage.addListener(async (message) => {
       error: String(error && error.message ? error.message : error)
     });
   }
-});
+}
+
+function connect() {
+  try {
+    port = browser.runtime.connectNative("cookie_export");
+    port.onMessage.addListener(handleMessage);
+    port.onDisconnect.addListener(() => {
+      port = null;
+      setTimeout(connect, 1000);
+    });
+  } catch (error) {
+    port = null;
+    setTimeout(connect, 1000);
+  }
+}
+
+connect();
