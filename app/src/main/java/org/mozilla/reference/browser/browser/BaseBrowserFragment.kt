@@ -374,7 +374,10 @@ abstract class BaseBrowserFragment :
                 context = requireContext(),
                 attrs = null,
                 engineViewParent = swipeRefresh,
-                topToolbarHeight = toolbar.height,
+                // toolbar.height is still 0 here because the view has not been
+                // laid out yet. Use the fixed toolbar dimension so the behavior
+                // actually offsets the engine view below the top toolbar.
+                topToolbarHeight = resources.getDimensionPixelSize(R.dimen.browser_toolbar_height),
                 bottomToolbarHeight = BOTTOM_TOOLBAR_HEIGHT,
             )
         }
