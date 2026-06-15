@@ -41,6 +41,7 @@ import mozilla.components.support.base.feature.UserInteractionHandler
 import mozilla.components.support.ktx.android.view.ImeInsetsSynchronizer
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.AddonsActivity
+import org.mozilla.reference.browser.cookie.CookieExportScripts
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
 import org.mozilla.reference.browser.settings.SettingsActivity
@@ -113,6 +114,18 @@ class ToolbarIntegration(
             TextMenuCandidate("Share") {
                 val url = sessionState.content.url
                 context.share(url)
+            },
+            TextMenuCandidate("查看 Cookie") {
+                sessionUseCases.loadUrl(CookieExportScripts.viewCookies())
+            },
+            TextMenuCandidate("导出 Cookie(JSON)") {
+                sessionUseCases.loadUrl(CookieExportScripts.exportFile(format = "json"))
+            },
+            TextMenuCandidate("导出 Cookie(完整)") {
+                sessionUseCases.loadUrl(CookieExportScripts.exportFile(format = "full"))
+            },
+            TextMenuCandidate("导出 Cookie 到下载器") {
+                sessionUseCases.loadUrl(CookieExportScripts.exportToDownloader())
             },
             CompoundMenuCandidate(
                 text = "Request desktop site",

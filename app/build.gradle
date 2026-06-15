@@ -94,7 +94,7 @@ androidComponents {
 
 android {
     defaultConfig {
-        applicationId "org.mozilla.reference.browser"
+        applicationId "com.example.videodownloader.browserhelper.gecko"
         buildToolsVersion Config.buildToolsVersion
         compileSdk {
             version = release(Config.compileSdkMajorVersion) {
