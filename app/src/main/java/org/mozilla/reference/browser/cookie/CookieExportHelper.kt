@@ -19,7 +19,7 @@ import androidx.appcompat.app.AlertDialog
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
 import mozilla.components.concept.engine.webextension.WebExtensionRuntime
-import mozilla.components.support.webextensions.WebExtensionController
+import mozilla.components.support.webextensions.BuiltInWebExtensionController
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -42,7 +42,7 @@ object CookieExportHelper {
     private var appContext: Context? = null
     private val pending = LinkedHashMap<String, PendingRequest>()
 
-    private val controller = WebExtensionController(EXTENSION_ID, EXTENSION_URL, NATIVE_APP)
+    private val controller = BuiltInWebExtensionController(EXTENSION_ID, EXTENSION_URL, NATIVE_APP)
 
     fun install(runtime: WebExtensionRuntime, context: Context) {
         this.runtime = runtime
