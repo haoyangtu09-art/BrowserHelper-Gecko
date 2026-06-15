@@ -9,12 +9,13 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.text.method.ScrollingMovementMethod
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
-import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
 import mozilla.components.concept.engine.webextension.WebExtension
@@ -34,16 +35,28 @@ object CookieExportHelper {
     private const val DOWNLOADER_PACKAGE = "com.example.videodownloader"
     private const val COOKIE_DIR_NAME = "Cookie"
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var port: Port? = null
     private var registered = false
+    private var installing = false
+    private var runtime: WebExtensionRuntime? = null
+    private var appContext: Context? = null
     private val pending = LinkedHashMap<String, PendingRequest>()
 
     fun install(runtime: WebExtensionRuntime, context: Context) {
+        this.runtime = runtime
+        this.appContext = context.applicationContext
+        if (installing) return
+        installing = true
         runtime.installBuiltInWebExtension(
             id = EXTENSION_ID,
             url = EXTENSION_URL,
-            onSuccess = { extension -> register(extension, context.applicationContext) },
+            onSuccess = { extension ->
+                installing = false
+                register(extension, context.applicationContext)
+            },
             onError = {
+                installing = false
                 runtime.listInstalledWebExtensions(
                     onSuccess = { extensions ->
                         val installed = extensions.firstOrNull { extension -> extension.id == EXTENSION_ID }
@@ -62,22 +75,34 @@ object CookieExportHelper {
     }
 
     fun request(context: Context, action: CookieAction, url: String) {
-        val activePort = port
-        if (activePort == null) {
-            Toast.makeText(context, "Cookie extension is starting, try again in a moment", Toast.LENGTH_SHORT).show()
-            return
-        }
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             Toast.makeText(context, "Current page is not exportable", Toast.LENGTH_SHORT).show()
             return
         }
         val requestId = System.currentTimeMillis().toString()
         pending[requestId] = PendingRequest(context, action, url)
-        activePort.postMessage(
-            JSONObject()
-                .put("id", requestId)
-                .put("url", url),
-        )
+        mainHandler.postDelayed({
+            val expired = pending.remove(requestId)
+            if (expired != null) {
+                Toast.makeText(expired.context, "Cookie extension is not ready", Toast.LENGTH_SHORT).show()
+            }
+        }, 10_000)
+        val activePort = port
+        if (activePort == null) {
+            Toast.makeText(context, "Cookie extension is starting", Toast.LENGTH_SHORT).show()
+            ensureInstalled(context)
+        } else {
+            postRequest(activePort, requestId, url)
+        }
+    }
+
+    private fun ensureInstalled(context: Context) {
+        val currentRuntime = runtime
+        if (currentRuntime == null) {
+            Toast.makeText(context, "Cookie extension is not initialized", Toast.LENGTH_SHORT).show()
+            return
+        }
+        install(currentRuntime, appContext ?: context.applicationContext)
     }
 
     private fun register(extension: WebExtension, appContext: Context) {
@@ -88,6 +113,7 @@ object CookieExportHelper {
             object : MessageHandler {
                 override fun onPortConnected(port: Port) {
                     this@CookieExportHelper.port = port
+                    flushPending(port)
                 }
 
                 override fun onPortDisconnected(port: Port) {
@@ -124,6 +150,20 @@ object CookieExportHelper {
             },
         )
         Toast.makeText(appContext, "Cookie export ready", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun flushPending(port: Port) {
+        pending.forEach { (requestId, request) ->
+            postRequest(port, requestId, request.url)
+        }
+    }
+
+    private fun postRequest(port: Port, requestId: String, url: String) {
+        port.postMessage(
+            JSONObject()
+                .put("id", requestId)
+                .put("url", url),
+        )
     }
 
     private fun viewCookies(context: Context, bundle: CookieBundle) {
