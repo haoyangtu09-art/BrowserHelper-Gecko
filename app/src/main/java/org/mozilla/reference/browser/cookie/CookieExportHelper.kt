@@ -29,7 +29,7 @@ import java.util.Date
 import java.util.Locale
 
 object CookieExportHelper {
-    private const val EXTENSION_ID = "cookie-export-helper@videodownloader.local"
+    private const val EXTENSION_ID = "cookie-export-helper-v2@videodownloader.local"
     private const val EXTENSION_URL = "resource://android/assets/extensions/cookie_export_helper/"
     private const val NATIVE_APP = "cookie_export"
     private const val ACTION_EXPORT_COOKIE = "com.example.videodownloader.IMPORT_COOKIE"
@@ -90,7 +90,7 @@ object CookieExportHelper {
         mainHandler.postDelayed({
             val expired = pending.remove(requestId)
             if (expired != null) {
-                Toast.makeText(expired.context, "Cookie extension is not ready", Toast.LENGTH_SHORT).show()
+                Toast.makeText(expired.context, "Cookie 脚本未注入，请刷新页面后重试", Toast.LENGTH_LONG).show()
             }
         }, 10_000)
         val activePort = extension?.getConnectedPort(NATIVE_APP, engineSession) ?: port
@@ -98,6 +98,9 @@ object CookieExportHelper {
             Toast.makeText(context, "正在连接 Cookie 通道", Toast.LENGTH_SHORT).show()
             registerContentHandler(engineSession)
             ensureInstalled(context)
+            if (extension != null) {
+                engineSession.reload()
+            }
         } else {
             postRequest(activePort, requestId, url)
         }
@@ -139,7 +142,10 @@ object CookieExportHelper {
         pending.values
             .map { request -> request.engineSession }
             .distinct()
-            .forEach { session -> registerContentHandler(session) }
+            .forEach { session ->
+                registerContentHandler(session)
+                session.reload()
+            }
     }
 
     private fun flushPending(port: Port) {

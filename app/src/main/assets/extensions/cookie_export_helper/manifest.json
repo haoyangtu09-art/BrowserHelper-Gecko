@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Cookie Export Helper",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Exports cookies for the native browser helper.",
   "permissions": [
     "cookies",
@@ -27,7 +27,7 @@
   ],
   "applications": {
     "gecko": {
-      "id": "cookie-export-helper@videodownloader.local"
+      "id": "cookie-export-helper-v2@videodownloader.local"
     }
   }
 }
