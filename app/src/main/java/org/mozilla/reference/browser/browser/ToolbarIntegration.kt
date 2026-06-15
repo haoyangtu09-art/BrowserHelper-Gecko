@@ -7,7 +7,6 @@ package org.mozilla.reference.browser.browser
 import android.content.Context
 import android.content.Intent
 import android.view.View
-import android.view.ViewGroup
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
 import kotlinx.coroutines.MainScope
@@ -38,10 +37,10 @@ import mozilla.components.feature.toolbar.ToolbarFeature
 import mozilla.components.lib.state.ext.flow
 import mozilla.components.support.base.feature.LifecycleAwareFeature
 import mozilla.components.support.base.feature.UserInteractionHandler
-import mozilla.components.support.ktx.android.view.ImeInsetsSynchronizer
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.AddonsActivity
-import org.mozilla.reference.browser.cookie.CookieExportScripts
+import org.mozilla.reference.browser.cookie.CookieAction
+import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
 import org.mozilla.reference.browser.settings.SettingsActivity
@@ -116,16 +115,16 @@ class ToolbarIntegration(
                 context.share(url)
             },
             TextMenuCandidate("查看 Cookie") {
-                sessionUseCases.loadUrl(CookieExportScripts.viewCookies())
+                CookieExportHelper.request(context, CookieAction.VIEW, sessionState.content.url)
             },
             TextMenuCandidate("导出 Cookie(JSON)") {
-                sessionUseCases.loadUrl(CookieExportScripts.exportFile(format = "json"))
+                CookieExportHelper.request(context, CookieAction.EXPORT_JSON, sessionState.content.url)
             },
             TextMenuCandidate("导出 Cookie(完整)") {
-                sessionUseCases.loadUrl(CookieExportScripts.exportFile(format = "full"))
+                CookieExportHelper.request(context, CookieAction.EXPORT_FULL, sessionState.content.url)
             },
             TextMenuCandidate("导出 Cookie 到下载器") {
-                sessionUseCases.loadUrl(CookieExportScripts.exportToDownloader())
+                CookieExportHelper.request(context, CookieAction.EXPORT_TO_DOWNLOADER, sessionState.content.url)
             },
             CompoundMenuCandidate(
                 text = "Request desktop site",
@@ -210,29 +209,6 @@ class ToolbarIntegration(
                 listOf(historyStorage, shippedDomainsProvider),
             )
         }
-
-        ImeInsetsSynchronizer.setup(
-            targetView = toolbar,
-            onIMEAnimationStarted = { isKeyboardShowingUp, keyboardHeight ->
-                // If the keyboard is hiding have the engine view immediately expand to the entire height of the
-                // screen and ensure the toolbar is shown above keyboard before both would be animated down.
-                if (!isKeyboardShowingUp) {
-                    (toolbarParentView.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = 0
-                    (toolbar.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = keyboardHeight
-                    toolbarParentView.requestLayout()
-                }
-            },
-            onIMEAnimationFinished = { isKeyboardShowingUp, keyboardHeight ->
-                // If the keyboard is showing up keep the engine view covering the entire height
-                // of the screen until the animation is finished to avoid reflowing the web content
-                // together with the keyboard animation in a short burst of updates.
-                if (isKeyboardShowingUp || keyboardHeight == 0) {
-                    (toolbarParentView.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = keyboardHeight
-                    (toolbar.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = 0
-                    toolbarParentView.requestLayout()
-                }
-            },
-        )
 
         scope.launch {
             store

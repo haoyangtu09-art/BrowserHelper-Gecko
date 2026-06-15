@@ -193,7 +193,7 @@ abstract class BaseBrowserFragment :
             behavior = EngineViewScrollingGesturesBehavior(
                 engineView = engineView,
                 dependency = toolbar,
-                dependencyGravity = DependencyGravity.Bottom,
+                dependencyGravity = DependencyGravity.Top,
             )
         }
 
@@ -425,9 +425,6 @@ abstract class BaseBrowserFragment :
             composeView.visibility = View.VISIBLE
             composeView.setContent { BrowserToolbar() }
 
-            val params = swipeRefresh.layoutParams as CoordinatorLayout.LayoutParams
-            params.topMargin = resources.getDimensionPixelSize(R.dimen.browser_toolbar_height)
-            swipeRefresh.layoutParams = params
         }
     }
 

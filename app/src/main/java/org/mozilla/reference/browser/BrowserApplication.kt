@@ -21,6 +21,7 @@ import mozilla.components.support.ktx.android.content.isMainProcess
 import mozilla.components.support.ktx.android.content.runOnlyInMainProcess
 import mozilla.components.support.rusthttp.RustHttpConfig
 import mozilla.components.support.webextensions.WebExtensionSupport
+import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.push.PushFxaIntegration
 import org.mozilla.reference.browser.push.WebPushEngineIntegration
 import java.util.concurrent.TimeUnit
@@ -89,6 +90,8 @@ open class BrowserApplication : Application() {
             },
             onUpdatePermissionRequest = components.core.addonUpdater::onUpdatePermissionRequest,
         )
+
+        CookieExportHelper.install(components.core.engine, this)
 
         components.push.feature?.let {
             Logger.info("AutoPushFeature is configured, initializing it...")

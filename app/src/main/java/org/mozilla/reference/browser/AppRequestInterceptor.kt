@@ -14,7 +14,6 @@ import mozilla.components.browser.errorpages.ErrorType
 import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.request.RequestInterceptor
 import org.mozilla.reference.browser.ext.components
-import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.tabs.PrivatePage
 
 /**
@@ -36,13 +35,6 @@ class AppRequestInterceptor(
         isSubframeRequest: Boolean,
     ): RequestInterceptor.InterceptionResponse? =
         when (uri) {
-            else -> if (uri.startsWith("cookieexport-file://") || uri.startsWith("cookieexport-downloader://")) {
-                CookieExportHelper.handle(context, uri)
-                RequestInterceptor.InterceptionResponse.Url(lastUri ?: "about:blank")
-            } else {
-                null
-            }
-        } ?: when (uri) {
             "about:privatebrowsing" -> {
                 val page = PrivatePage.createPrivateBrowsingPage(context, uri)
                 RequestInterceptor.InterceptionResponse.Content(page, encoding = "base64")

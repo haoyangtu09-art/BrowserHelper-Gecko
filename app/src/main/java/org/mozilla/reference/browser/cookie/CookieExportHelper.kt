@@ -7,11 +7,18 @@ package org.mozilla.reference.browser.cookie
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.text.method.ScrollingMovementMethod
+import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import mozilla.components.concept.engine.EngineSession
+import mozilla.components.concept.engine.webextension.MessageHandler
+import mozilla.components.concept.engine.webextension.Port
+import mozilla.components.concept.engine.webextension.WebExtension
+import mozilla.components.concept.engine.webextension.WebExtensionRuntime
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -20,37 +27,115 @@ import java.util.Date
 import java.util.Locale
 
 object CookieExportHelper {
+    private const val EXTENSION_ID = "cookie-export-helper@videodownloader.local"
+    private const val EXTENSION_URL = "resource://android/assets/extensions/cookie_export_helper/"
+    private const val NATIVE_APP = "cookie_export"
     private const val ACTION_EXPORT_COOKIE = "com.example.videodownloader.IMPORT_COOKIE"
     private const val DOWNLOADER_PACKAGE = "com.example.videodownloader"
     private const val COOKIE_DIR_NAME = "Cookie"
 
-    fun handle(context: Context, uri: String): Boolean {
-        val parsed = Uri.parse(uri)
-        val bundle = CookieBundle.fromUri(parsed)
-        if (bundle.cookie.isBlank()) {
-            Toast.makeText(context, "No cookie found for this page", Toast.LENGTH_SHORT).show()
-            return true
-        }
+    private var port: Port? = null
+    private val pending = LinkedHashMap<String, PendingRequest>()
 
-        return when (parsed.scheme) {
-            "cookieexport-file" -> {
-                exportFile(context, bundle, parsed.getQueryParameter("format").orEmpty())
-                true
-            }
-            "cookieexport-downloader" -> {
-                exportToDownloader(context, bundle)
-                true
-            }
-            else -> false
+    fun install(runtime: WebExtensionRuntime, context: Context) {
+        runtime.installBuiltInWebExtension(
+            id = EXTENSION_ID,
+            url = EXTENSION_URL,
+            onSuccess = { extension -> register(extension, context.applicationContext) },
+            onError = {
+                Toast.makeText(context, "Cookie extension install failed", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+
+    fun request(context: Context, action: CookieAction, url: String) {
+        val activePort = port
+        if (activePort == null) {
+            Toast.makeText(context, "Cookie extension is not ready", Toast.LENGTH_SHORT).show()
+            return
         }
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            Toast.makeText(context, "Current page is not exportable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val requestId = System.currentTimeMillis().toString()
+        pending[requestId] = PendingRequest(context, action, url)
+        activePort.postMessage(
+            JSONObject()
+                .put("id", requestId)
+                .put("url", url),
+        )
+    }
+
+    private fun register(extension: WebExtension, appContext: Context) {
+        extension.registerBackgroundMessageHandler(
+            NATIVE_APP,
+            object : MessageHandler {
+                override fun onPortConnected(port: Port) {
+                    this@CookieExportHelper.port = port
+                }
+
+                override fun onPortDisconnected(port: Port) {
+                    if (this@CookieExportHelper.port == port) {
+                        this@CookieExportHelper.port = null
+                    }
+                }
+
+                override fun onPortMessage(message: Any, port: Port) {
+                    val data = message as? JSONObject ?: return
+                    val requestId = data.optString("id")
+                    val request = pending.remove(requestId) ?: return
+                    val error = data.optString("error")
+                    if (error.isNotBlank()) {
+                        Toast.makeText(request.context, error, Toast.LENGTH_SHORT).show()
+                        return
+                    }
+                    val cookies = data.optJSONArray("cookies") ?: JSONArray()
+                    if (cookies.length() == 0) {
+                        Toast.makeText(request.context, "No cookie found for this page", Toast.LENGTH_SHORT).show()
+                        return
+                    }
+                    val bundle = CookieBundle(
+                        url = request.url,
+                        cookies = cookies,
+                    )
+                    when (request.action) {
+                        CookieAction.VIEW -> viewCookies(request.context, bundle)
+                        CookieAction.EXPORT_JSON -> exportFile(request.context, bundle, json = true)
+                        CookieAction.EXPORT_FULL -> exportFile(request.context, bundle, json = false)
+                        CookieAction.EXPORT_TO_DOWNLOADER -> exportToDownloader(request.context, bundle)
+                    }
+                }
+            },
+        )
+        Toast.makeText(appContext, "Cookie export ready", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun viewCookies(context: Context, bundle: CookieBundle) {
+        val text = bundle.cookieHeader()
+        AlertDialog.Builder(context)
+            .setTitle("查看 Cookie")
+            .setMessage(text)
+            .setPositiveButton("复制 Cookie") { _, _ ->
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Cookie", text))
+                Toast.makeText(context, "Cookie 已复制", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.ok, null)
+            .show()
+            .findViewById<TextView>(android.R.id.message)
+            ?.apply {
+                setTextIsSelectable(true)
+                movementMethod = ScrollingMovementMethod()
+            }
     }
 
     private fun exportToDownloader(context: Context, bundle: CookieBundle) {
         val intent = Intent(ACTION_EXPORT_COOKIE).apply {
             setPackage(DOWNLOADER_PACKAGE)
             putExtra("domain", bundle.domain)
-            putExtra("name", bundle.host)
-            putExtra("cookie", bundle.cookie)
+            putExtra("name", bundle.domain)
+            putExtra("cookie", bundle.cookieHeader())
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runCatching {
@@ -61,14 +146,9 @@ object CookieExportHelper {
         }
     }
 
-    private fun exportFile(context: Context, bundle: CookieBundle, format: String) {
-        val isJson = format == "json"
-        val fileName = "${sanitizeFileName(bundle.host)}_cookie_${System.currentTimeMillis()}.${if (isJson) "json" else "txt"}"
-        val content = if (isJson) {
-            bundle.toCookieEditorJson().toString(2)
-        } else {
-            bundle.toFullText()
-        }
+    private fun exportFile(context: Context, bundle: CookieBundle, json: Boolean) {
+        val fileName = "${sanitizeFileName(bundle.domain)}_cookie_${System.currentTimeMillis()}.${if (json) "json" else "txt"}"
+        val content = if (json) bundle.cookies.toString(2) else bundle.toFullText()
         val path = runCatching {
             writeDirect(fileName, content)
         }.recoverCatching {
@@ -133,74 +213,57 @@ object CookieExportHelper {
     }
 }
 
+enum class CookieAction {
+    VIEW,
+    EXPORT_JSON,
+    EXPORT_FULL,
+    EXPORT_TO_DOWNLOADER,
+}
+
+private data class PendingRequest(
+    val context: Context,
+    val action: CookieAction,
+    val url: String,
+)
+
 private data class CookieBundle(
     val url: String,
-    val host: String,
-    val secure: Boolean,
-    val cookie: String,
+    val cookies: JSONArray,
 ) {
-    val domain: String = host.removePrefix("www.")
+    val domain: String = runCatching { java.net.URL(url).host.removePrefix("www.") }.getOrDefault("cookies")
 
-    fun toCookieEditorJson(): JSONArray {
-        val items = JSONArray()
-        entries().forEach { entry ->
-            items.put(
-                JSONObject()
-                    .put("name", entry.name)
-                    .put("value", entry.value)
-                    .put("domain", domain)
-                    .put("path", "/")
-                    .put("secure", secure)
-                    .put("httpOnly", false)
-                    .put("sameSite", "Lax"),
-            )
+    fun cookieHeader(): String {
+        val items = mutableListOf<String>()
+        for (i in 0 until cookies.length()) {
+            val cookie = cookies.optJSONObject(i) ?: continue
+            val name = cookie.optString("name")
+            val value = cookie.optString("value")
+            if (name.isNotBlank()) {
+                items += "$name=$value"
+            }
         }
-        return items
+        return items.joinToString("; ")
     }
 
     fun toFullText(): String {
         return buildString {
             appendLine("URL: $url")
-            appendLine("Host: $host")
             appendLine("Domain: $domain")
             appendLine("Exported-At: ${timestamp()}")
             appendLine()
-            appendLine(cookie)
+            appendLine(cookieHeader())
             appendLine()
             appendLine("Cookies:")
-            entries().forEach { entry ->
-                appendLine("${entry.name}=${entry.value}; domain=$domain; path=/")
+            for (i in 0 until cookies.length()) {
+                val cookie = cookies.optJSONObject(i) ?: continue
+                appendLine(
+                    "${cookie.optString("name")}=${cookie.optString("value")}; " +
+                        "domain=${cookie.optString("domain")}; path=${cookie.optString("path", "/")}",
+                )
             }
         }
     }
 
-    private fun entries(): List<CookieEntry> =
-        cookie.split(';').mapNotNull { part ->
-            val item = part.trim()
-            val eq = item.indexOf('=')
-            if (eq <= 0) return@mapNotNull null
-            CookieEntry(
-                name = item.substring(0, eq).trim(),
-                value = item.substring(eq + 1).trim(),
-            )
-        }.filter { it.name.isNotEmpty() && it.value.isNotEmpty() }
-            .distinctBy { it.name }
-
     private fun timestamp(): String =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(Date())
-
-    companion object {
-        fun fromUri(uri: Uri): CookieBundle =
-            CookieBundle(
-                url = uri.getQueryParameter("url").orEmpty(),
-                host = uri.getQueryParameter("host").orEmpty(),
-                secure = uri.getQueryParameter("secure").toBoolean(),
-                cookie = uri.getQueryParameter("cookie").orEmpty(),
-            )
-    }
 }
-
-private data class CookieEntry(
-    val name: String,
-    val value: String,
-)
