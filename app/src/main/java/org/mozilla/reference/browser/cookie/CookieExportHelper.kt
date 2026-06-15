@@ -80,7 +80,13 @@ object CookieExportHelper {
         mainHandler.postDelayed({
             val expired = pending.remove(requestId)
             if (expired != null) {
-                Toast.makeText(expired.context, "Cookie 通道未就绪，请稍后重试", Toast.LENGTH_LONG).show()
+                val state = if (port != null) "通道已连接但未返回结果" else "未能连接到 Cookie 通道(background 未连上)"
+                showError(
+                    expired.context,
+                    "Cookie 通道超时",
+                    "等待 10 秒仍无响应。\n状态: $state",
+                    JSONObject().put("portConnected", port != null).put("url", url),
+                )
             }
         }, 10_000)
         val activePort = port
@@ -109,6 +115,7 @@ object CookieExportHelper {
             object : MessageHandler {
                 override fun onPortConnected(port: Port) {
                     this@CookieExportHelper.port = port
+                    port.postMessage(JSONObject().put("type", "connected"))
                     flushPending(port)
                 }
 
@@ -137,12 +144,12 @@ object CookieExportHelper {
         val request = pending.remove(requestId) ?: return
         val error = data.optString("error")
         if (error.isNotBlank()) {
-            Toast.makeText(request.context, error, Toast.LENGTH_SHORT).show()
+            showError(request.context, "Cookie 读取失败", error, data)
             return
         }
         val cookies = data.optJSONArray("cookies") ?: JSONArray()
         if (cookies.length() == 0) {
-            Toast.makeText(request.context, "No cookie found for this page", Toast.LENGTH_SHORT).show()
+            showError(request.context, "未读到 Cookie", "该页面没有返回任何 Cookie。", data)
             return
         }
         val bundle = CookieBundle(
@@ -155,6 +162,30 @@ object CookieExportHelper {
             CookieAction.EXPORT_FULL -> exportFile(request.context, bundle, json = false)
             CookieAction.EXPORT_TO_DOWNLOADER -> exportToDownloader(request.context, bundle)
         }
+    }
+
+    private fun showError(context: Context, title: String, summary: String, raw: JSONObject) {
+        val detail = buildString {
+            appendLine(summary)
+            appendLine()
+            appendLine("原始返回:")
+            append(runCatching { raw.toString(2) }.getOrDefault(raw.toString()))
+        }
+        AlertDialog.Builder(context)
+            .setTitle(title)
+            .setMessage(detail)
+            .setPositiveButton("复制") { _, _ ->
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("error", detail))
+                Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.ok, null)
+            .show()
+            .findViewById<TextView>(android.R.id.message)
+            ?.apply {
+                setTextIsSelectable(true)
+                movementMethod = ScrollingMovementMethod()
+            }
     }
 
     private fun postRequest(port: Port, requestId: String, url: String) {

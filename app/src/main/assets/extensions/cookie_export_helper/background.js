@@ -1,4 +1,6 @@
 let port = null;
+let connected = false;
+let ackTimer = null;
 
 function normalizeSameSite(value) {
   if (value === "strict") {
@@ -10,7 +12,7 @@ function normalizeSameSite(value) {
   return "Lax";
 }
 
-async function handleMessage(message) {
+async function handleCookieRequest(message) {
   try {
     const cookies = await browser.cookies.getAll({ url: message.url });
     port.postMessage({
@@ -33,18 +35,58 @@ async function handleMessage(message) {
   }
 }
 
+function handleMessage(message) {
+  // Control messages from the native side carry a "type" field.
+  if (message && message.type === "connected") {
+    connected = true;
+    if (ackTimer) {
+      clearTimeout(ackTimer);
+      ackTimer = null;
+    }
+    return;
+  }
+  if (message && message.id) {
+    handleCookieRequest(message);
+  }
+}
+
+function cleanup() {
+  connected = false;
+  if (ackTimer) {
+    clearTimeout(ackTimer);
+    ackTimer = null;
+  }
+  port = null;
+}
+
 function connect() {
+  if (port) {
+    return;
+  }
   try {
     port = browser.runtime.connectNative("cookie_export");
     port.onMessage.addListener(handleMessage);
     port.onDisconnect.addListener(() => {
-      port = null;
-      setTimeout(connect, 1000);
+      cleanup();
     });
+    // The native side acknowledges via {type:"connected"} from onPortConnected.
+    // If no ack arrives the port never reached the handler (registered too late
+    // or a zombie connection); drop it so the watchdog can reconnect.
+    ackTimer = setTimeout(() => {
+      ackTimer = null;
+      if (!connected && port) {
+        try {
+          port.disconnect();
+        } catch (error) {
+          // ignore
+        }
+        cleanup();
+      }
+    }, 2000);
   } catch (error) {
-    port = null;
-    setTimeout(connect, 1000);
+    cleanup();
   }
 }
 
+setInterval(connect, 1000);
 connect();
