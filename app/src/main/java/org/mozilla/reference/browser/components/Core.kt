@@ -85,6 +85,11 @@ class Core(
                 context.getPreferenceKey(R.string.pref_key_global_privacy_control),
                 false,
             ),
+            // Render pages at their standard size instead of scaling text with the
+            // system font size. automaticFontSizeAdjustment must be disabled before
+            // fontSizeFactor can be set, otherwise GeckoView throws.
+            automaticFontSizeAdjustment = false,
+            fontSizeFactor = 1.0f,
         )
         EngineProvider.createEngine(context, defaultSettings)
     }
