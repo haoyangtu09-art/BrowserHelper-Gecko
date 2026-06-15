@@ -16,6 +16,7 @@ import android.text.method.ScrollingMovementMethod
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
 import mozilla.components.concept.engine.webextension.WebExtension
@@ -41,6 +42,7 @@ object CookieExportHelper {
     private var installing = false
     private var runtime: WebExtensionRuntime? = null
     private var appContext: Context? = null
+    private var extension: WebExtension? = null
     private val pending = LinkedHashMap<String, PendingRequest>()
 
     fun install(runtime: WebExtensionRuntime, context: Context) {
@@ -74,22 +76,27 @@ object CookieExportHelper {
         )
     }
 
-    fun request(context: Context, action: CookieAction, url: String) {
+    fun request(context: Context, action: CookieAction, url: String, engineSession: EngineSession?) {
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             Toast.makeText(context, "Current page is not exportable", Toast.LENGTH_SHORT).show()
             return
         }
+        if (engineSession == null) {
+            Toast.makeText(context, "Current page is not ready", Toast.LENGTH_SHORT).show()
+            return
+        }
         val requestId = System.currentTimeMillis().toString()
-        pending[requestId] = PendingRequest(context, action, url)
+        pending[requestId] = PendingRequest(context, action, url, engineSession)
         mainHandler.postDelayed({
             val expired = pending.remove(requestId)
             if (expired != null) {
                 Toast.makeText(expired.context, "Cookie extension is not ready", Toast.LENGTH_SHORT).show()
             }
         }, 10_000)
-        val activePort = port
+        val activePort = extension?.getConnectedPort(NATIVE_APP, engineSession) ?: port
         if (activePort == null) {
-            Toast.makeText(context, "Cookie extension is starting", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "正在连接 Cookie 通道", Toast.LENGTH_SHORT).show()
+            registerContentHandler(engineSession)
             ensureInstalled(context)
         } else {
             postRequest(activePort, requestId, url)
@@ -106,6 +113,7 @@ object CookieExportHelper {
     }
 
     private fun register(extension: WebExtension, appContext: Context) {
+        this.extension = extension
         if (registered) return
         registered = true
         extension.registerBackgroundMessageHandler(
@@ -123,38 +131,66 @@ object CookieExportHelper {
                 }
 
                 override fun onPortMessage(message: Any, port: Port) {
-                    val data = message as? JSONObject ?: return
-                    val requestId = data.optString("id")
-                    val request = pending.remove(requestId) ?: return
-                    val error = data.optString("error")
-                    if (error.isNotBlank()) {
-                        Toast.makeText(request.context, error, Toast.LENGTH_SHORT).show()
-                        return
-                    }
-                    val cookies = data.optJSONArray("cookies") ?: JSONArray()
-                    if (cookies.length() == 0) {
-                        Toast.makeText(request.context, "No cookie found for this page", Toast.LENGTH_SHORT).show()
-                        return
-                    }
-                    val bundle = CookieBundle(
-                        url = request.url,
-                        cookies = cookies,
-                    )
-                    when (request.action) {
-                        CookieAction.VIEW -> viewCookies(request.context, bundle)
-                        CookieAction.EXPORT_JSON -> exportFile(request.context, bundle, json = true)
-                        CookieAction.EXPORT_FULL -> exportFile(request.context, bundle, json = false)
-                        CookieAction.EXPORT_TO_DOWNLOADER -> exportToDownloader(request.context, bundle)
-                    }
+                    handlePortMessage(message)
                 }
             },
         )
         Toast.makeText(appContext, "Cookie export ready", Toast.LENGTH_SHORT).show()
+        pending.values
+            .map { request -> request.engineSession }
+            .distinct()
+            .forEach { session -> registerContentHandler(session) }
     }
 
     private fun flushPending(port: Port) {
-        pending.forEach { (requestId, request) ->
-            postRequest(port, requestId, request.url)
+        pending
+            .filter { (_, request) -> port.engineSession == null || request.engineSession == port.engineSession }
+            .forEach { (requestId, request) ->
+                postRequest(port, requestId, request.url)
+            }
+    }
+
+    private fun registerContentHandler(engineSession: EngineSession) {
+        val currentExtension = extension ?: return
+        if (currentExtension.hasContentMessageHandler(engineSession, NATIVE_APP)) return
+        currentExtension.registerContentMessageHandler(
+            engineSession,
+            NATIVE_APP,
+            object : MessageHandler {
+                override fun onPortConnected(port: Port) {
+                    flushPending(port)
+                }
+
+                override fun onPortMessage(message: Any, port: Port) {
+                    handlePortMessage(message)
+                }
+            },
+        )
+    }
+
+    private fun handlePortMessage(message: Any) {
+        val data = message as? JSONObject ?: return
+        val requestId = data.optString("id")
+        val request = pending.remove(requestId) ?: return
+        val error = data.optString("error")
+        if (error.isNotBlank()) {
+            Toast.makeText(request.context, error, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cookies = data.optJSONArray("cookies") ?: JSONArray()
+        if (cookies.length() == 0) {
+            Toast.makeText(request.context, "No cookie found for this page", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val bundle = CookieBundle(
+            url = request.url,
+            cookies = cookies,
+        )
+        when (request.action) {
+            CookieAction.VIEW -> viewCookies(request.context, bundle)
+            CookieAction.EXPORT_JSON -> exportFile(request.context, bundle, json = true)
+            CookieAction.EXPORT_FULL -> exportFile(request.context, bundle, json = false)
+            CookieAction.EXPORT_TO_DOWNLOADER -> exportToDownloader(request.context, bundle)
         }
     }
 
@@ -279,6 +315,7 @@ private data class PendingRequest(
     val context: Context,
     val action: CookieAction,
     val url: String,
+    val engineSession: EngineSession,
 )
 
 private data class CookieBundle(

@@ -115,16 +115,16 @@ class ToolbarIntegration(
                 context.share(url)
             },
             TextMenuCandidate("查看 Cookie") {
-                CookieExportHelper.request(context, CookieAction.VIEW, sessionState.content.url)
+                CookieExportHelper.request(context, CookieAction.VIEW, sessionState.content.url, sessionState.engineState.engineSession)
             },
             TextMenuCandidate("导出 Cookie(JSON)") {
-                CookieExportHelper.request(context, CookieAction.EXPORT_JSON, sessionState.content.url)
+                CookieExportHelper.request(context, CookieAction.EXPORT_JSON, sessionState.content.url, sessionState.engineState.engineSession)
             },
             TextMenuCandidate("导出 Cookie(完整)") {
-                CookieExportHelper.request(context, CookieAction.EXPORT_FULL, sessionState.content.url)
+                CookieExportHelper.request(context, CookieAction.EXPORT_FULL, sessionState.content.url, sessionState.engineState.engineSession)
             },
             TextMenuCandidate("导出 Cookie 到下载器") {
-                CookieExportHelper.request(context, CookieAction.EXPORT_TO_DOWNLOADER, sessionState.content.url)
+                CookieExportHelper.request(context, CookieAction.EXPORT_TO_DOWNLOADER, sessionState.content.url, sessionState.engineState.engineSession)
             },
             CompoundMenuCandidate(
                 text = "Request desktop site",

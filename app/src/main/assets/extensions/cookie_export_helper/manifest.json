@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Cookie Export Helper",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Exports cookies for the native browser helper.",
   "permissions": [
     "cookies",
@@ -13,6 +13,18 @@
       "background.js"
     ]
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "applications": {
     "gecko": {
       "id": "cookie-export-helper@videodownloader.local"
