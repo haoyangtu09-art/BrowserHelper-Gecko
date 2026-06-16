@@ -140,9 +140,7 @@
       '#eruda{z-index:2147483647!important;}',
       '#eruda .eruda-container{position:fixed!important;left:0!important;top:0!important;width:100vw!important;height:100vh!important;z-index:2147483647!important;pointer-events:none!important;}',
       '#eruda .eruda-entry-btn{visibility:visible!important;display:flex!important;pointer-events:auto!important;z-index:2147483647!important;}',
-      '#eruda .eruda-dev-tools{position:absolute!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:80vh!important;max-height:100vh!important;background:#fff!important;opacity:1!important;color:#111!important;pointer-events:auto!important;box-sizing:border-box!important;}',
-      '#eruda .eruda-tools,#eruda .eruda-tool{background:#fff!important;}',
-      '#eruda .eruda-tab,#eruda .eruda-notification,#eruda .eruda-modal{background:#fff!important;}',
+      '#eruda .eruda-dev-tools{pointer-events:auto!important;}',
     ].join('\n');
     (document.head || document.documentElement).appendChild(style);
   }
@@ -181,29 +179,10 @@
       'pointer-events': 'auto',
       'z-index': '2147483647',
     });
-    applyStyles(host.querySelector('.eruda-dev-tools'), {
-      position: 'absolute',
-      left: '0',
-      right: '0',
-      bottom: '0',
-      width: '100vw',
-      height: '80vh',
-      'max-height': '100vh',
-      background: '#fff',
-      color: '#111',
-      opacity: '1',
-      'pointer-events': 'auto',
-      'box-sizing': 'border-box',
-      'backdrop-filter': 'none',
-      '-webkit-backdrop-filter': 'none',
-    });
     Array.prototype.forEach.call(
       host.querySelectorAll('.eruda-tools,.eruda-tool,.eruda-tab,.eruda-notification,.eruda-modal'),
       function (el) {
-        applyStyles(el, {
-          background: '#fff',
-          opacity: '1',
-        });
+        applyStyles(el, { 'pointer-events': 'auto' });
       }
     );
   }
