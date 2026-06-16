@@ -1,5 +1,4 @@
-// Content script: eruda.min.js is loaded before this file by the manifest,
-// so `eruda` is available directly in this content script context.
+// Content script: eruda.min.js is loaded before this file by the manifest.
 (function () {
   var port = null;
   var erudaActive = false;
@@ -9,7 +8,16 @@
       try { eruda.destroy(); } catch (e) {}
       erudaActive = false;
     } else {
-      try { eruda.init(); erudaActive = true; } catch (e) {}
+      try {
+        // Force reset in case _isInit is stale from a previous context
+        if (typeof eruda !== 'undefined' && eruda._isInit) {
+          eruda._isInit = false;
+          eruda._container = null;
+          eruda._shadowRoot = null;
+        }
+        eruda.init();
+        erudaActive = true;
+      } catch (e) {}
     }
   }
 

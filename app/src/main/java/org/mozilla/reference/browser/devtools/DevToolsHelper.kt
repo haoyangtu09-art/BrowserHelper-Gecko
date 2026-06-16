@@ -79,13 +79,18 @@ object DevToolsHelper {
             Toast.makeText(context, "没有活动的页面", Toast.LENGTH_SHORT).show()
             return
         }
-        if (controller.portConnected(engineSession, CONTENT_PORT)) {
+        val connected = controller.portConnected(engineSession, CONTENT_PORT)
+        val registered = registeredSessions.contains(engineSession)
+        if (connected) {
             sendToggle(engineSession)
+            Toast.makeText(context, "DevTools 指令已发送", Toast.LENGTH_SHORT).show()
         } else {
-            // Content script not yet connected — reload the page so the content
-            // script runs and connects. The toggle fires automatically on connect.
             pendingToggle = true
-            Toast.makeText(context, "正在加载开发者工具，页面将刷新…", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                context,
+                "通道未就绪(已注册:$registered)，刷新页面中…",
+                Toast.LENGTH_SHORT,
+            ).show()
             sessionUseCases?.reload?.invoke()
         }
     }
