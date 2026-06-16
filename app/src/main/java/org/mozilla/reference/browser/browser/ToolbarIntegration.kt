@@ -316,6 +316,18 @@ class ToolbarIntegration(
             addView(favicon)
             addView(title)
             if (selected) {
+                val close = TextView(context).apply {
+                    text = "×"
+                    textSize = 16f
+                    includeFontPadding = false
+                    setTextColor(Color.rgb(190, 190, 190))
+                    gravity = android.view.Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(dp(24), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                        marginStart = dp(2)
+                    }
+                    setOnClickListener { tabsUseCases.removeTab(tab.id) }
+                }
+                addView(close)
                 scaleX = 0.96f
                 scaleY = 0.96f
                 animate().scaleX(1f).scaleY(1f).setDuration(160).start()
