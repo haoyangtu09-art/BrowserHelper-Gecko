@@ -136,12 +136,9 @@
 
     var style = document.createElement('style');
     style.id = fixStyleId;
-    style.textContent = [
-      '#eruda{z-index:2147483647!important;}',
-      '#eruda .eruda-container{position:fixed!important;left:0!important;top:0!important;width:100vw!important;height:100vh!important;z-index:2147483647!important;pointer-events:none!important;}',
-      '#eruda .eruda-entry-btn{visibility:visible!important;display:flex!important;pointer-events:auto!important;z-index:2147483647!important;}',
-      '#eruda .eruda-dev-tools{pointer-events:auto!important;}',
-    ].join('\n');
+    // Shadow DOM isolates Eruda internals from page CSS, so only the host
+    // element (#eruda) needs overrides here.
+    style.textContent = '#eruda{z-index:2147483647!important;position:fixed!important;}';
     (document.head || document.documentElement).appendChild(style);
   }
 
@@ -225,7 +222,7 @@
       '      window.eruda._container=null;' +
       '      window.eruda._shadowRoot=null;' +
       '    }' +
-      '    window.eruda.init({useShadowDom:false,tool:["console","elements","resources","sources","info"]});' +
+      '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});' +
       '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}' +
       '    function centerEntry(){' +
       '      try{' +
@@ -272,7 +269,7 @@
           self.eruda._shadowRoot = null;
         }
         self.eruda.init({
-          useShadowDom: false,
+          useShadowDom: true,
           tool: tools,
         });
         resetIsolatedPanel();
