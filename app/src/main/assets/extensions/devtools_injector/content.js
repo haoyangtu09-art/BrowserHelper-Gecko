@@ -1,58 +1,66 @@
-// Content script: dynamically loads eruda via fetch+Function.
-// eruda.min.js has the window.fetch patch removed to avoid
-// read-only errors in the content script isolated world.
+// Content script: loads patched eruda into the page's real window.
+// Uses fetch (from content script, which bypasses page CSP) to get the
+// eruda source, creates a Blob URL, and injects it via <script src>.
+// This runs eruda in the page's true window, avoiding isolated-world limits.
 (function () {
   var port = null;
+  var blobUrl = null;
   var erudaReady = false;
   var erudaActive = false;
 
   function loadEruda(cb) {
     if (erudaReady) { cb(null); return; }
+
+    // fetch() in content script bypasses page CSP.
     fetch(browser.runtime.getURL('eruda.min.js'))
-      .then(function (r) { return r.text(); })
-      .then(function (code) {
-        try {
-          // Bind globals that lose their `this` context inside new Function scope
-          var preamble = [
-            'var getComputedStyle=window.getComputedStyle.bind(window);',
-            'var getSelection=window.getSelection?window.getSelection.bind(window):function(){return null;};',
-            'var matchMedia=window.matchMedia?window.matchMedia.bind(window):function(){return{matches:false,addListener:function(){},removeListener:function(){}};};',
-          ].join('');
-          var fn = new Function(preamble + code + '\nreturn typeof eruda!=="undefined"?eruda:null;');
-          var result = fn();
-          if (result && !self.eruda) self.eruda = result;
-          erudaReady = typeof self.eruda !== 'undefined';
-          cb(erudaReady ? null : 'eruda undefined after exec');
-        } catch (e) {
-          cb('exec error: ' + String(e && e.message ? e.message : e));
-        }
+      .then(function (r) { return r.blob(); })
+      .then(function (blob) {
+        blobUrl = URL.createObjectURL(blob);
+        var script = document.createElement('script');
+        script.src = blobUrl;
+        script.onload = function () {
+          script.remove();
+          erudaReady = true;
+          cb(null);
+        };
+        script.onerror = function () {
+          script.remove();
+          cb('blob script blocked');
+        };
+        (document.head || document.documentElement).appendChild(script);
       })
       .catch(function (e) { cb('fetch error: ' + e); });
   }
 
+  function runInPage(js) {
+    var s = document.createElement('script');
+    s.textContent = js;
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  }
+
   function toggle() {
     if (erudaActive) {
-      try { self.eruda.destroy(); } catch (e) {}
+      runInPage('try{eruda.destroy();}catch(e){}');
       erudaActive = false;
       port.postMessage({ status: 'destroyed' });
     } else {
       loadEruda(function (err) {
         if (err) { port.postMessage({ status: 'load error: ' + err }); return; }
-        try {
-          if (self.eruda._isInit) {
-            self.eruda._isInit = false;
-            self.eruda._container = null;
-            self.eruda._shadowRoot = null;
-          }
-          self.eruda.init({
-            useShadowDom: false,
-            tool: ['console', 'elements', 'resources', 'sources', 'info'],
-          });
-          erudaActive = true;
-          port.postMessage({ status: 'ok' });
-        } catch (e) {
-          port.postMessage({ status: 'init error: ' + String(e && e.message ? e.message : e) });
-        }
+        runInPage(
+          '(function(){' +
+          '  try{' +
+          '    if(window.eruda&&window.eruda._isInit){' +
+          '      window.eruda._isInit=false;' +
+          '      window.eruda._container=null;' +
+          '      window.eruda._shadowRoot=null;' +
+          '    }' +
+          '    window.eruda.init({useShadowDom:false,tool:["console","elements","resources","sources","info"]});' +
+          '  }catch(e){}' +
+          '})();'
+        );
+        erudaActive = true;
+        port.postMessage({ status: 'ok' });
       });
     }
   }
