@@ -7,12 +7,16 @@ package org.mozilla.reference.browser.cookie
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.text.method.ScrollingMovementMethod
+import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -161,8 +165,8 @@ object CookieExportHelper {
             appendLine("原始返回:")
             append(runCatching { raw.toString(2) }.getOrDefault(raw.toString()))
         }
-        AlertDialog.Builder(context)
-            .setTitle(title)
+        val dialog = AlertDialog.Builder(context)
+            .setCustomTitle(dialogTitle(context, title))
             .setMessage(detail)
             .setPositiveButton("复制") { _, _ ->
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -171,11 +175,11 @@ object CookieExportHelper {
             }
             .setNegativeButton(android.R.string.ok, null)
             .show()
-            .findViewById<TextView>(android.R.id.message)
-            ?.apply {
-                setTextIsSelectable(true)
-                movementMethod = ScrollingMovementMethod()
-            }
+        styleDialog(dialog)
+        dialog.findViewById<TextView>(android.R.id.message)?.apply {
+            setTextIsSelectable(true)
+            movementMethod = ScrollingMovementMethod()
+        }
     }
 
     private fun postRequest(port: Port, requestId: String, url: String) {
@@ -188,8 +192,8 @@ object CookieExportHelper {
 
     private fun viewCookies(context: Context, bundle: CookieBundle) {
         val text = bundle.cookieHeader()
-        AlertDialog.Builder(context)
-            .setTitle("查看 Cookie")
+        val dialog = AlertDialog.Builder(context)
+            .setCustomTitle(dialogTitle(context, "查看 Cookie"))
             .setMessage(text)
             .setPositiveButton("复制 Cookie") { _, _ ->
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -198,12 +202,38 @@ object CookieExportHelper {
             }
             .setNegativeButton(android.R.string.ok, null)
             .show()
-            .findViewById<TextView>(android.R.id.message)
-            ?.apply {
-                setTextIsSelectable(true)
-                movementMethod = ScrollingMovementMethod()
-            }
+        styleDialog(dialog)
+        dialog.findViewById<TextView>(android.R.id.message)?.apply {
+            setTextIsSelectable(true)
+            movementMethod = ScrollingMovementMethod()
+        }
     }
+
+    private fun dialogTitle(context: Context, title: String): View =
+        TextView(context).apply {
+            text = title
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(context, 24), dp(context, 20), dp(context, 24), dp(context, 8))
+        }
+
+    private fun styleDialog(dialog: AlertDialog) {
+        val background = GradientDrawable().apply {
+            setColor(Color.rgb(43, 43, 43))
+            cornerRadius = dp(dialog.context, 18).toFloat()
+        }
+        dialog.window?.setBackgroundDrawable(background)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(Color.WHITE)
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(Color.WHITE)
+        dialog.findViewById<TextView>(android.R.id.message)?.apply {
+            setTextColor(Color.rgb(238, 238, 238))
+            setPadding(dp(context, 24), dp(context, 8), dp(context, 24), dp(context, 4))
+        }
+    }
+
+    private fun dp(context: Context, value: Int): Int =
+        (value * context.resources.displayMetrics.density).toInt()
 
     private fun exportToDownloader(context: Context, bundle: CookieBundle) {
         val intent = Intent(ACTION_EXPORT_COOKIE).apply {

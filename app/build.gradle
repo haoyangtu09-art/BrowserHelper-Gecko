@@ -103,7 +103,7 @@ android {
         }
         minSdkVersion Config.minSdkVersion
         targetSdkVersion Config.targetSdkVersion
-        versionCode 5
+        versionCode 6
         versionName Config.generateDebugVersionName()
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -132,7 +132,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
-            versionNameSuffix "-defaulticon1"
+            versionNameSuffix "-dialogstyle1"
         }
         nightly releaseTemplate >> {
             buildConfigField "boolean", "IS_RELEASED", "true"
