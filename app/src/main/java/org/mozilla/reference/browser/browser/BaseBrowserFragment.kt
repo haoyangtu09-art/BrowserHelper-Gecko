@@ -16,6 +16,7 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.CallSuper
 import androidx.compose.ui.platform.ComposeView
+import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
@@ -365,9 +366,6 @@ abstract class BaseBrowserFragment :
                 context = requireContext(),
                 attrs = null,
                 engineViewParent = swipeRefresh,
-                // toolbar.height is still 0 here because the view has not been
-                // laid out yet. Use the fixed toolbar dimension so the behavior
-                // actually offsets the engine view below the top toolbar.
                 topToolbarHeight = 0,
                 bottomToolbarHeight = BOTTOM_TOOLBAR_HEIGHT,
             )
