@@ -424,7 +424,9 @@
       '    var t0=Date.now();',
       '    send({type:"req",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody});',
       '    var args=arguments;',
-      '    return _origFetch.apply(this,args).then(function(resp){',
+      '    var thr=window.__bhThrottle;',
+      '    var delay=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
+      '    var doFetch=function(){return _origFetch.apply(this,args).then(function(resp){',
       '      var status=resp.status;',
       '      var respHeaders=headersToObj(resp.headers);',
       '      var clone=resp.clone();',
@@ -439,7 +441,8 @@
       '    }).catch(function(err){',
       '      send({type:"resp",reqId:reqId,status:0,error:String(err),duration:Date.now()-t0});',
       '      throw err;',
-      '    });',
+      '    });}.bind(this);',
+      '    return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();',
       '  };',
 
       // ── XHR 拦截 ──
@@ -456,6 +459,7 @@
       '      _reqBody=body!=null?String(body):null;',
       '      _t0=Date.now();',
       '      send({type:"req",reqId:_reqId,url:_url,method:_method,reqHeaders:_reqHeaders,reqBody:_reqBody});',
+      '      var doSend=function(){',
       '      xhr.addEventListener("readystatechange",function(){',
       '        if(xhr.readyState!==4)return;',
       '        var respHeaders={};',
@@ -469,7 +473,9 @@
       '          respHeaders:respHeaders,respBody:(xhr.responseText||"").slice(0,102400),',
       '          duration:Date.now()-_t0});',
       '      });',
-      '      return origSend.apply(xhr,arguments);',
+      '      origSend.apply(xhr,arguments);};',
+      '      var thr=window.__bhThrottle;var d=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
+      '      if(d>0){setTimeout(doSend,d);}else{doSend();}',
       '    };',
       '    return xhr;',
       '  };',
@@ -670,8 +676,10 @@
     '.bh-dtab{padding:6px 10px;font-size:12px;cursor:pointer;white-space:nowrap;color:#111;',
     '  border-bottom:2px solid transparent;}',
     '.bh-dtab.active{border-bottom-color:#2563eb;font-weight:700;}',
+    // textarea 代替 div：原生支持长按选中复制、单点光标编辑
     '#bh-detail-body{flex:1;overflow-y:auto;padding:8px;font-size:12px;color:#111;',
-    '  white-space:pre-wrap;word-break:break-all;font-family:monospace;background:#fff;}',
+    '  white-space:pre;word-break:break-all;font-family:monospace;background:#fff;',
+    '  border:none;outline:none;resize:none;width:100%;}',
     '#bh-detail-acts{display:flex;gap:6px;padding:6px 8px;flex-wrap:wrap;',
     '  border-top:1px solid #d0d7de;background:#f6f8fa;}',
     '#bh-detail-acts button{font-size:12px;padding:4px 8px;border-radius:4px;',
@@ -842,7 +850,7 @@
         content = '(等待响应…)';
       }
     }
-    netDetailBody.textContent = content;
+    netDetailBody.value = content;
   }
 
   // ── 功能：重放 ──
@@ -1039,19 +1047,65 @@
   }
 
   // ── 功能：弱网模拟 ──
-  function openThrottleModal() {
-    openModal('弱网模拟',
-      '<label>延迟 (ms, 0=关闭)</label><input id="bh-thr-lat" type="number" value="' + netThrottle.latencyMs + '">' +
+  var THROTTLE_PRESETS = [
+    { label: '关闭', latencyMs: 0, kbps: 0 },
+    { label: '2G (300ms/50KB)', latencyMs: 300, kbps: 50 },
+    { label: '3G (100ms/200KB)', latencyMs: 100, kbps: 200 },
+    { label: '4G (20ms/1500KB)', latencyMs: 20, kbps: 1500 },
+    { label: '自定义…', latencyMs: -1, kbps: -1 },
+  ];
+
+  function applyThrottle(cfg) {
+    netThrottle.latencyMs = cfg.latencyMs;
+    netThrottle.kbps = cfg.kbps;
+    netThrottle.enabled = cfg.latencyMs > 0 || cfg.kbps > 0;
+    runInPage('(function(){window.__bhThrottle=' + JSON.stringify(netThrottle) + ';})();');
+    updateThrottleBtn();
+  }
+
+  function updateThrottleBtn() {
+    var btn = document.getElementById('bh-thr-btn');
+    if (!btn) return;
+    btn.textContent = netThrottle.enabled ? '弱网●' : '弱网';
+    btn.style.color = netThrottle.enabled ? '#ea580c' : '';
+  }
+
+  function openThrottleCustom() {
+    openModal('自定义弱网',
+      '<label>延迟 (ms)</label><input id="bh-thr-lat" type="number" value="' + netThrottle.latencyMs + '">' +
       '<label>限速 (KB/s, 0=不限)</label><input id="bh-thr-kbps" type="number" value="' + netThrottle.kbps + '">',
       function (el) {
-        netThrottle.latencyMs = parseInt(el.querySelector('#bh-thr-lat').value) || 0;
-        netThrottle.kbps = parseInt(el.querySelector('#bh-thr-kbps').value) || 0;
-        netThrottle.enabled = netThrottle.latencyMs > 0 || netThrottle.kbps > 0;
-        var cfg = JSON.stringify(netThrottle);
-        runInPage('(function(){window.__bhThrottle=' + cfg + ';})();');
+        var lat = parseInt(el.querySelector('#bh-thr-lat').value) || 0;
+        var kbps = parseInt(el.querySelector('#bh-thr-kbps').value) || 0;
         closeModal();
+        applyThrottle({ latencyMs: lat, kbps: kbps });
       }
     );
+  }
+
+  function openThrottleMenu() {
+    var items = THROTTLE_PRESETS.map(function (p, i) {
+      var active = netThrottle.latencyMs === p.latencyMs && netThrottle.kbps === p.kbps;
+      return '<button style="display:block;width:100%;text-align:left;padding:10px 12px;' +
+        'font-size:13px;border:none;border-bottom:1px solid #d0d7de;background:' +
+        (active ? '#dbeafe' : '#fff') + ';cursor:pointer;" data-pi="' + i + '">' +
+        (active ? '✓ ' : '') + p.label + '</button>';
+    }).join('');
+    openModal('弱网模拟', items, function () { closeModal(); });
+    setTimeout(function () {
+      if (!netModal) return;
+      // 隐藏确认按钮（点预设即生效）
+      var ok = netModal.querySelector('#bh-btn-ok');
+      if (ok) ok.style.display = 'none';
+      Array.prototype.forEach.call(netModal.querySelectorAll('[data-pi]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var p = THROTTLE_PRESETS[parseInt(btn.getAttribute('data-pi'))];
+          closeModal();
+          if (p.latencyMs === -1) { openThrottleCustom(); return; }
+          applyThrottle(p);
+        });
+      });
+    }, 30);
   }
 
   // ── 构建面板根 DOM ──
@@ -1093,7 +1147,17 @@
     bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
-    bar.querySelector('#bh-thr-btn').addEventListener('click', openThrottleModal);
+    bar.querySelector('#bh-thr-btn').addEventListener('click', openThrottleMenu);
+    bar.querySelector('#bh-thr-btn').addEventListener('contextmenu', function (e) {
+      e.preventDefault(); openThrottleCustom();
+    });
+    bar.querySelector('#bh-thr-btn').addEventListener('pointerdown', function () {
+      var btn = this;
+      btn._longT = setTimeout(function () { btn._longT = null; openThrottleCustom(); }, 600);
+    });
+    bar.querySelector('#bh-thr-btn').addEventListener('pointerup', function () {
+      if (this._longT) { clearTimeout(this._longT); this._longT = null; }
+    });
     netFilterEl.addEventListener('input', renderNetList);
 
     // 请求列表
@@ -1108,7 +1172,7 @@
     netDetailEl.style.display = 'none';
     netDetailEl.innerHTML =
       '<div id="bh-detail-tabs"></div>' +
-      '<div id="bh-detail-body"></div>' +
+      '<textarea id="bh-detail-body" spellcheck="false"></textarea>' +
       '<div id="bh-detail-acts">' +
         '<button id="bh-act-replay">重放</button>' +
         '<button id="bh-act-edit">编辑重发</button>' +
@@ -1120,7 +1184,14 @@
     wrap.appendChild(netDetailEl);
 
     netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
-      if (netSelReq) replayReq(netSelReq);
+      if (!netSelReq) return;
+      // 如果当前在"请求体"tab 且用户编辑了内容，用编辑后的内容重放
+      if (netDetailTab === 1 && netDetailBody) {
+        var editedBody = netDetailBody.value;
+        replayReq(Object.assign({}, netSelReq, { reqBody: editedBody || null }), '重放');
+      } else {
+        replayReq(netSelReq);
+      }
     });
     netDetailActs.querySelector('#bh-act-edit').addEventListener('click', function () {
       if (netSelReq) editReplay(netSelReq);
