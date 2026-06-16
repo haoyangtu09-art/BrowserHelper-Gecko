@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2,
+  "name": "DevTools Injector",
+  "version": "1.0.0",
+  "description": "Injects Eruda DevTools into the current page.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "devtools-injector@browserhelper.local"
+    }
+  },
+  "permissions": [
+    "mozillaAddons",
+    "geckoViewAddons",
+    "nativeMessaging",
+    "tabs",
+    "<all_urls>"
+  ],
+  "background": {
+    "persistent": false,
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [],
+  "web_accessible_resources": [
+    "eruda.min.js"
+  ]
+}

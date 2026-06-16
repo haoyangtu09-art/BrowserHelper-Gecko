@@ -52,6 +52,7 @@ import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.AddonsActivity
 import org.mozilla.reference.browser.cookie.CookieAction
 import org.mozilla.reference.browser.cookie.CookieExportHelper
+import org.mozilla.reference.browser.devtools.DevToolsHelper
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
 import org.mozilla.reference.browser.settings.SettingsActivity
@@ -189,6 +190,9 @@ class ToolbarIntegration(
                 tabsUseCases.addTab(
                     url = "https://github.com/mozilla-mobile/reference-browser/issues/new",
                 )
+            },
+            TextMenuCandidate(text = "开发者工具") {
+                DevToolsHelper.toggle(context)
             },
             TextMenuCandidate(text = "设置") {
                 val intent = Intent(context, SettingsActivity::class.java)
