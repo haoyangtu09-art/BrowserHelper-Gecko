@@ -377,7 +377,7 @@ abstract class BaseBrowserFragment :
                 // toolbar.height is still 0 here because the view has not been
                 // laid out yet. Use the fixed toolbar dimension so the behavior
                 // actually offsets the engine view below the top toolbar.
-                topToolbarHeight = resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height),
+                topToolbarHeight = 0,
                 bottomToolbarHeight = BOTTOM_TOOLBAR_HEIGHT,
             )
         }
@@ -436,12 +436,24 @@ abstract class BaseBrowserFragment :
             activity?.enterImmersiveMode()
             toolbar.visibility = View.GONE
             view?.findViewById<View>(R.id.topTabScroll)?.visibility = View.GONE
+            setTopChromeContentOffset(0)
             engineView.setDynamicToolbarMaxHeight(0)
         } else {
             activity?.exitImmersiveMode()
             toolbar.visibility = View.VISIBLE
             view?.findViewById<View>(R.id.topTabScroll)?.visibility = View.VISIBLE
+            setTopChromeContentOffset(resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height))
             engineView.setDynamicToolbarMaxHeight(resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height))
+        }
+    }
+
+    private fun setTopChromeContentOffset(topMargin: Int) {
+        listOf<View?>(swipeRefresh, view?.findViewById(R.id.awesomeBar)).forEach { target ->
+            val params = target?.layoutParams as? ViewGroup.MarginLayoutParams ?: return@forEach
+            if (params.topMargin != topMargin) {
+                params.topMargin = topMargin
+                target.layoutParams = params
+            }
         }
     }
 

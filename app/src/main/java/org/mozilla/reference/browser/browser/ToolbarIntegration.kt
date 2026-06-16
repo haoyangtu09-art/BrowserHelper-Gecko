@@ -13,10 +13,12 @@ import android.text.TextUtils
 import android.view.View
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
+import androidx.core.graphics.drawable.DrawableCompat
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -247,6 +249,24 @@ class ToolbarIntegration(
     private fun renderTopTabs(tabs: List<TabSessionState>, selectedTabId: String?) {
         val strip = tabStrip ?: return
         strip.removeAllViews()
+        val selectedTab = tabs.firstOrNull { tab -> tab.id == selectedTabId }
+        strip.addView(navButton(R.drawable.ic_home_24, "主页", enabled = true) {
+            sessionUseCases.loadUrl("about:blank")
+        })
+        strip.addView(navButton(
+            R.drawable.ic_back_24,
+            "后退",
+            enabled = selectedTab?.content?.canGoBack == true,
+        ) {
+            sessionUseCases.goBack.invoke()
+        })
+        strip.addView(navButton(
+            R.drawable.ic_forward_24,
+            "前进",
+            enabled = selectedTab?.content?.canGoForward == true,
+        ) {
+            sessionUseCases.goForward.invoke()
+        })
         tabs.forEach { tab ->
             strip.addView(tabChip(tab, selected = tab.id == selectedTabId))
         }
@@ -260,6 +280,23 @@ class ToolbarIntegration(
             }
         }
     }
+
+    private fun navButton(drawableRes: Int, description: String, enabled: Boolean, listener: () -> Unit): ImageButton =
+        ImageButton(context).apply {
+            val icon = ContextCompat.getDrawable(context, drawableRes)?.mutate()
+            if (icon != null) {
+                DrawableCompat.setTint(icon, if (enabled) Color.WHITE else Color.rgb(105, 105, 105))
+                setImageDrawable(icon)
+            }
+            contentDescription = description
+            isEnabled = enabled
+            background = roundedTabBackground(Color.rgb(32, 32, 32))
+            scaleType = android.widget.ImageView.ScaleType.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                setMargins(dp(3), dp(5), dp(3), dp(5))
+            }
+            setOnClickListener { listener() }
+        }
 
     private fun tabChip(tab: TabSessionState, selected: Boolean): TextView =
         TextView(context).apply {
