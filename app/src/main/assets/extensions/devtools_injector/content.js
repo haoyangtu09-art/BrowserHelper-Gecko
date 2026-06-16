@@ -21,23 +21,36 @@
     return String(e && e.message ? e.message : e);
   }
 
+  var fontStyleId = 'browserhelper-eruda-fontface';
+
+  // Extract every @font-face rule from the eruda source and inject it into the
+  // document's light DOM. Gecko ignores @font-face declared inside a shadow
+  // root (bug 1714278), but a light-DOM @font-face still applies to shadow
+  // content, so this is what makes eruda's icon glyphs render.
+  function injectErudaFontFace(code) {
+    if (document.getElementById(fontStyleId)) return;
+    var rules = code.match(/@font-face\s*\{[^}]*\}/g);
+    if (!rules || !rules.length) return;
+    var style = document.createElement('style');
+    style.id = fontStyleId;
+    style.textContent = rules.join('\n');
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   function loadPageEruda(cb) {
     if (pageErudaReady) { cb(null); return; }
 
     fetch(browser.runtime.getURL('eruda.min.js'))
       .then(function (r) { return r.text(); })
       .then(function (code) {
-        // Patch font URLs so iconfont loads correctly from the blob context.
-        // eruda embeds a relative url() in @font-face; when run from a blob URL
-        // the relative path resolves to blob: origin and 404s.
-        var fontBase = browser.runtime.getURL('');
-        code = code.replace(
-          /url\(["']?([^"')]+\.(?:woff2?|ttf|eot|svg)[^"')]*?)["']?\)/g,
-          function (m, path) {
-            if (/^(https?|blob|data):/.test(path)) return m;
-            return 'url("' + fontBase + path.replace(/^\.?\//, '') + '")';
-          }
-        );
+        // Gecko bug 1714278: an @font-face declared inside a shadow root is
+        // ignored. Eruda renders its UI in a shadow root (useShadowDom:true),
+        // so its embedded icon font never applies and the gear shows as a
+        // rectangle. Fix: pull the @font-face rules out of the eruda source
+        // (the font data is base64-embedded, no external path needed) and
+        // inject them into the document's light DOM, where Gecko honors them
+        // and the rule still cascades into the shadow tree.
+        injectErudaFontFace(code);
         // Append init call inside the same script so no separate inline
         // <script> is needed — bypasses pages that block unsafe-inline CSP.
         var initCode = [
@@ -493,6 +506,13 @@
         if (netRequests.length > 200) netRequests.length = 200;
         if (netPanelVisible) renderNetList();
       }
+    } else if (d.type === 'panelShow') {
+      // page world 的 eruda tool.show() 通过 postMessage 通知 content world 渲染
+      netPanelVisible = true;
+      renderNetList();
+      renderDetail();
+    } else if (d.type === 'panelHide') {
+      netPanelVisible = false;
     }
   });
 
@@ -537,21 +557,26 @@
     ['Beautify', '格式化'], ['Word Wrap', '自动换行'],
   ];
 
+  var I18N_DICT = null;
   function replaceTextNodes(root) {
     if (!root) return;
+    if (!I18N_DICT) {
+      I18N_DICT = {};
+      for (var j = 0; j < I18N_MAP.length; j++) I18N_DICT[I18N_MAP[j][0]] = I18N_MAP[j][1];
+    }
+    function tr(node) {
+      var v = node.nodeValue;
+      if (!v) return;
+      var t = v.trim();
+      if (!t) return;
+      var zh = I18N_DICT[t];
+      if (zh && zh !== t) node.nodeValue = v.replace(t, zh);
+    }
+    if (root.nodeType === 3) { tr(root); return; }
+    if (root.nodeType !== 1 && root.nodeType !== 11) return;
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
     var node;
-    while ((node = walker.nextNode())) {
-      var val = node.nodeValue;
-      if (!val || !val.trim()) continue;
-      var replaced = val;
-      for (var i = 0; i < I18N_MAP.length; i++) {
-        var en = I18N_MAP[i][0], zh = I18N_MAP[i][1];
-        // 只整词替换，避免误伤 URL/header 等技术内容
-        if (replaced === en) { replaced = zh; break; }
-      }
-      if (replaced !== val) node.nodeValue = replaced;
-    }
+    while ((node = walker.nextNode())) tr(node);
   }
 
   function _i18nCore() {
@@ -563,26 +588,34 @@
         '(function(){',
         '  var host=document.getElementById("eruda");',
         '  if(!host||!host.shadowRoot)return;',
+        '  var root=host.shadowRoot;',
         '  var MAP=' + mapJson + ';',
-        '  function walk(root){',
-        '    var tw=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null,false);',
-        '    var n;',
-        '    while((n=tw.nextNode())){',
-        '      var v=n.nodeValue;if(!v||!v.trim())continue;',
-        '      for(var i=0;i<MAP.length;i++){',
-        '        if(v===MAP[i][0]){n.nodeValue=MAP[i][1];break;}',
-        '      }',
-        '    }',
+        '  var DICT={};for(var k=0;k<MAP.length;k++){DICT[MAP[k][0]]=MAP[k][1];}',
+        '  function tr(node){',
+        '    var v=node.nodeValue;if(!v)return;',
+        '    var t=v.trim();if(!t)return;',
+        '    var zh=DICT[t];',
+        '    if(zh&&zh!==t){node.nodeValue=v.replace(t,zh);}',  // 保留原前后空白
         '  }',
-        '  walk(host.shadowRoot);',
+        '  function walk(el){',
+        '    if(!el)return;',
+        '    if(el.nodeType===3){tr(el);return;}',
+        '    if(el.nodeType!==1&&el.nodeType!==11)return;',
+        '    var tw=document.createTreeWalker(el,NodeFilter.SHOW_TEXT,null,false);',
+        '    var n;while((n=tw.nextNode())){tr(n);}',
+        '  }',
+        '  walk(root);',
         '  var obs=new MutationObserver(function(muts){',
         '    muts.forEach(function(m){',
+        '      if(m.type==="characterData"){tr(m.target);return;}',
         '      m.addedNodes.forEach(function(node){walk(node);});',
         '    });',
         '  });',
-        '  obs.observe(host.shadowRoot,{childList:true,subtree:true});',
+        '  obs.observe(root,{childList:true,subtree:true,characterData:true});',
+        // 懒加载的 tab 面板在切换时才渲染；定时重扫几次兜底
+        '  var c=0;var iv=setInterval(function(){walk(root);if(++c>=10)clearInterval(iv);},500);',
         '})();',
-      ].join(''));
+      ].join('\n'));
       return;
     }
     // isolated-world 模式：可以直接访问 DOM（包括 shadow root）
@@ -592,10 +625,13 @@
     replaceTextNodes(root);
     var obs = new MutationObserver(function (muts) {
       muts.forEach(function (m) {
+        if (m.type === 'characterData') { replaceTextNodes(m.target); return; }
         m.addedNodes.forEach(function (node) { replaceTextNodes(node); });
       });
     });
-    obs.observe(root, { childList: true, subtree: true });
+    obs.observe(root, { childList: true, subtree: true, characterData: true });
+    var c = 0;
+    var iv = setInterval(function () { replaceTextNodes(root); if (++c >= 10) clearInterval(iv); }, 500);
   }
   // ── /Eruda 汉化 ─────────────────────────────────────────────────────────────
 
@@ -1105,23 +1141,32 @@
     return wrap;
   }
 
-  // ── 注册 eruda 自定义 Tool ──
+  // ── 注册 eruda 自定义 Tool（isolated world）──
+  // eruda.add 只调用 tool.init($el)，不调用 render()。基类 init 是 this._$el=e。
   function registerNetTool(erudaObj) {
     if (!erudaObj || !erudaObj.add) return;
     var tool = {
       name: '抓包',
-      $el: null,
-      render: function () {
-        if (!this.$el) this.$el = buildNetPanel();
-        return this.$el;
+      _$el: null,
+      init: function ($el) {
+        this._$el = $el;
+        var node = ($el && $el[0]) || $el;
+        if (!netPanel) buildNetPanel();
+        if (node && node.appendChild) node.appendChild(netPanel);
       },
       show: function () {
+        if (this._$el && this._$el.show) this._$el.show();
         netPanelVisible = true;
         renderNetList();
         renderDetail();
+        return this;
       },
-      hide: function () { netPanelVisible = false; },
-      destroy: function () { netPanelVisible = false; netPanel = null; netListEl = null; netDetailEl = null; netDetailBody = null; },
+      hide: function () {
+        if (this._$el && this._$el.hide) this._$el.hide();
+        netPanelVisible = false;
+        return this;
+      },
+      destroy: function () { netPanelVisible = false; },
     };
     try { erudaObj.add(tool); } catch (e) {}
   }
@@ -1141,36 +1186,55 @@
     }
   }
 
-  // page-world 模式下通过 runInPage 注册 Tool + 渲染（面板 DOM 由 page world 脚本构建）
-  // 因为面板逻辑复杂，page-world 用精简版：只挂一个 iframe-like div 把 content script 的 netPanel 嵌入
-  // 实际上 content script DOM 元素无法传递给 page world；改为在 page world 直接建简易面板
-  // 但为保持功能完整性，利用 window.postMessage 双向通信实现桥接
+  // page-world 模式下注册 eruda 自定义 Tool。
+  //
+  // 关键：eruda 的 DevTools.add(tool) 只会调用 tool.init($container, devtools)，
+  // 不会调用 render()；基类 init 是 this._$el=e，show/hide 走 this._$el.show()/.hide()。
+  // 之前的实现用 render() 返回 DOM，eruda 从不调用，所以面板永远空白。
+  //
+  // 同时存在跨世界问题：抓包面板的 DOM 与全部交互逻辑都在 content-script 世界，
+  // 而 eruda 在 page 世界。但两个世界共享同一份 DOM —— 所以做法是：
+  //   1. content world 用 buildNetPanel() 构建 #bh-net 元素（事件已绑定在 content world）
+  //   2. page world 的 tool.init($el) 拿到 eruda 容器后，用 DOM 查询找到 #bh-net 把它 append 进去
+  //   3. show()/hide() 通过 postMessage 通知 content world 渲染（沿用 __bhNet 通道）
   function injectNetToolPageWorld() {
-    // 简化：直接把 buildNetPanel() 生成的 DOM 插入页面 document.body，
-    // 再用 runInPage 把它注册到 eruda
-    // content script 可以把 DOM 元素 appendChild 到页面 DOM
     if (!netPanel) buildNetPanel();
+    // 先把面板挂在 body 上（隐藏），等 eruda tool.init 时再移进容器
+    netPanel.style.display = 'none';
     document.body.appendChild(netPanel);
-    // 注入样式到页面 head（已在 buildNetPanel 里做了）
-    // 通知 page world 的 eruda 注册 Tool，引用已在 DOM 里的元素
+
+    // content world 监听来自 page world 的 show/hide 消息（已在上面的 message 监听里处理 panelShow/panelHide）
+
     runInPage([
       '(function(){',
       '  if(!window.eruda||!window.eruda.add)return;',
-      '  var el=document.getElementById("bh-net");',
-      '  if(!el)return;',
-      '  window.eruda.add({',
-      '    name:"抓包",',
-      '    $el:el,',
-      '    render:function(){return el;},',
-      '    show:function(){window.__bhNetShow&&window.__bhNetShow();},',
-      '    hide:function(){window.__bhNetHide&&window.__bhNetHide();},',
-      '    destroy:function(){},',
+      '  if(window.__bhNetToolAdded)return;',
+      '  window.__bhNetToolAdded=true;',
+      '  window.eruda.add(function(devtools){',
+      '    return {',
+      '      name:"\u6293\u5305",',  // 抓包
+      '      init:function($el){',
+      '        this._$el=$el;',
+      '        var node=($el&&$el[0])||($el&&$el.get&&$el.get(0))||$el;',
+      '        var panel=document.getElementById("bh-net");',
+      '        if(panel&&node&&node.appendChild){node.appendChild(panel);panel.style.display="flex";}',
+      '      },',
+      '      show:function(){',
+      '        if(this._$el&&this._$el.show)this._$el.show();',
+      '        var panel=document.getElementById("bh-net");if(panel)panel.style.display="flex";',
+      '        try{window.postMessage({__bhNet:true,type:"panelShow"},"*");}catch(e){}',
+      '        return this;',
+      '      },',
+      '      hide:function(){',
+      '        if(this._$el&&this._$el.hide)this._$el.hide();',
+      '        try{window.postMessage({__bhNet:true,type:"panelHide"},"*");}catch(e){}',
+      '        return this;',
+      '      },',
+      '      destroy:function(){},',
+      '    };',
       '  });',
       '})();',
-    ].join(''));
-    // 绑定 show/hide 回调到 content script 的变量（通过 runInPage 桥接）
-    window.__bhNetShow = function () { netPanelVisible = true; renderNetList(); renderDetail(); };
-    window.__bhNetHide = function () { netPanelVisible = false; };
+    ].join('\n'));
   }
   // ── /抓包面板 ────────────────────────────────────────────────────────────────
 
