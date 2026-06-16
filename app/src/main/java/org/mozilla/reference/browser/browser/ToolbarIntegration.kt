@@ -14,6 +14,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -293,24 +294,44 @@ class ToolbarIntegration(
             background = roundedTabBackground(Color.rgb(32, 32, 32))
             scaleType = android.widget.ImageView.ScaleType.CENTER
             layoutParams = LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                setMargins(dp(3), dp(5), dp(3), dp(5))
+                setMargins(dp(3), dp(2), dp(3), dp(2))
             }
             setOnClickListener { listener() }
         }
 
-    private fun tabChip(tab: TabSessionState, selected: Boolean): TextView =
-        TextView(context).apply {
-            text = tabLabel(tab)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            gravity = android.view.Gravity.CENTER
-            setTextColor(if (selected) Color.WHITE else Color.rgb(190, 190, 190))
-            textSize = 13f
-            typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+    private fun tabChip(tab: TabSessionState, selected: Boolean): View =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
             background = roundedTabBackground(if (selected) Color.rgb(55, 55, 55) else Color.rgb(30, 30, 30))
-            setPadding(dp(12), 0, dp(12), 0)
-            layoutParams = LinearLayout.LayoutParams(dp(148), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                setMargins(dp(3), dp(5), dp(3), dp(5))
+            setPadding(dp(9), 0, dp(10), 0)
+            layoutParams = LinearLayout.LayoutParams(dp(156), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                setMargins(dp(3), dp(2), dp(3), dp(2))
+            }
+            val favicon = ImageView(context).apply {
+                tab.content.icon?.let(::setImageBitmap) ?: setImageResource(R.drawable.ic_web_16)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18)).apply {
+                    marginEnd = dp(7)
+                }
+            }
+            val title = TextView(context).apply {
+                text = tabLabel(tab)
+                includeFontPadding = false
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setTextColor(if (selected) Color.WHITE else Color.rgb(190, 190, 190))
+                textSize = 13f
+                typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+            }
+            addView(favicon)
+            addView(title)
+            if (selected) {
+                scaleX = 0.96f
+                scaleY = 0.96f
+                animate().scaleX(1f).scaleY(1f).setDuration(140).start()
             }
             setOnClickListener { tabsUseCases.selectTab(tab.id) }
         }
@@ -321,10 +342,11 @@ class ToolbarIntegration(
             gravity = android.view.Gravity.CENTER
             setTextColor(Color.WHITE)
             textSize = 22f
+            includeFontPadding = false
             typeface = Typeface.DEFAULT_BOLD
             background = roundedTabBackground(Color.rgb(36, 36, 36))
             layoutParams = LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                setMargins(dp(3), dp(5), dp(6), dp(5))
+                setMargins(dp(3), dp(2), dp(6), dp(2))
             }
             setOnClickListener {
                 tabsUseCases.addTab("about:blank", selectTab = true)
