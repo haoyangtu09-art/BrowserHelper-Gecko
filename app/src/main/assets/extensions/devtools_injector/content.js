@@ -1,68 +1,144 @@
-// Content script: loads patched eruda into the page's real window.
-// Uses fetch (from content script, which bypasses page CSP) to get the
-// eruda source, creates a Blob URL, and injects it via <script src>.
-// This runs eruda in the page's true window, avoiding isolated-world limits.
+// Content script: load patched Eruda inside the extension isolated world.
+// Page-world <script> injection is blocked by strict CSP on sites such as
+// chatgpt.com, and light-DOM UI is easily corrupted by page CSS.
 (function () {
   var port = null;
-  var blobUrl = null;
   var erudaReady = false;
   var erudaActive = false;
+  var tools = ['console', 'elements', 'resources', 'sources', 'info'];
 
-  function loadEruda(cb) {
-    if (erudaReady) { cb(null); return; }
-
-    // fetch() in content script bypasses page CSP.
-    fetch(browser.runtime.getURL('eruda.min.js'))
-      .then(function (r) { return r.blob(); })
-      .then(function (blob) {
-        blobUrl = URL.createObjectURL(blob);
-        var script = document.createElement('script');
-        script.src = blobUrl;
-        script.onload = function () {
-          script.remove();
-          erudaReady = true;
-          cb(null);
-        };
-        script.onerror = function () {
-          script.remove();
-          cb('blob script blocked');
-        };
-        (document.head || document.documentElement).appendChild(script);
-      })
-      .catch(function (e) { cb('fetch error: ' + e); });
+  function describeError(e) {
+    return String(e && e.message ? e.message : e);
   }
 
-  function runInPage(js) {
-    var s = document.createElement('script');
-    s.textContent = js;
-    (document.head || document.documentElement).appendChild(s);
-    s.remove();
+  function postStatus(status) {
+    try {
+      if (port) port.postMessage({ status: status });
+    } catch (e) {}
+  }
+
+  function loadEruda(cb) {
+    if (erudaReady && self.eruda) { cb(null); return; }
+
+    fetch(browser.runtime.getURL('eruda.min.js'))
+      .then(function (r) { return r.text(); })
+      .then(function (code) {
+        try {
+          // Some DOM APIs require Window as `this` when Eruda stores/calls them.
+          var preamble = [
+            'var getComputedStyle=window.getComputedStyle.bind(window);',
+            'var getSelection=window.getSelection?window.getSelection.bind(window):function(){return null;};',
+            'var matchMedia=window.matchMedia?window.matchMedia.bind(window):function(){return{matches:false,addListener:function(){},removeListener:function(){}};};',
+          ].join('');
+          var fn = new Function(preamble + code + '\nreturn typeof eruda!=="undefined"?eruda:self.eruda;');
+          var result = fn.call(self);
+          if (result && !self.eruda) self.eruda = result;
+          erudaReady = !!self.eruda;
+          cb(erudaReady ? null : 'eruda undefined after exec');
+        } catch (e) {
+          cb('exec error: ' + describeError(e));
+        }
+      })
+      .catch(function (e) { cb('fetch error: ' + describeError(e)); });
+  }
+
+  function getErudaRoot() {
+    var host = document.getElementById('eruda');
+    if (!host) return null;
+    return host.shadowRoot || host;
+  }
+
+  function getEntryButton() {
+    var root = getErudaRoot();
+    return root ? root.querySelector('.eruda-entry-btn') : null;
+  }
+
+  function isVisible(el) {
+    if (!el) return false;
+    var rect = el.getBoundingClientRect();
+    var style = window.getComputedStyle(el);
+    return rect.width > 0 &&
+      rect.height > 0 &&
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      style.opacity !== '0';
+  }
+
+  function verifyVisible(cb) {
+    var attempts = 0;
+    function check() {
+      var entry = getEntryButton();
+      if (isVisible(entry)) {
+        cb(null);
+        return;
+      }
+      attempts += 1;
+      if (attempts < 20) {
+        setTimeout(check, 50);
+      } else {
+        cb('entry button not visible');
+      }
+    }
+    check();
+  }
+
+  function destroyEruda() {
+    try {
+      if (self.eruda && self.eruda._isInit) self.eruda.destroy();
+    } catch (e) {
+      if (self.eruda) {
+        self.eruda._isInit = false;
+        self.eruda._container = null;
+        self.eruda._shadowRoot = null;
+      }
+    }
+    erudaActive = false;
+  }
+
+  function initEruda(cb) {
+    try {
+      destroyEruda();
+      self.eruda.init({
+        useShadowDom: true,
+        tool: tools,
+      });
+      if (self.eruda.position) {
+        self.eruda.position({
+          x: Math.max(0, window.innerWidth - 60),
+          y: Math.max(0, window.innerHeight - 90),
+        });
+      }
+      verifyVisible(function (err) {
+        if (err) {
+          destroyEruda();
+          cb(err);
+          return;
+        }
+        erudaActive = true;
+        cb(null);
+      });
+    } catch (e) {
+      destroyEruda();
+      cb('init error: ' + describeError(e));
+    }
   }
 
   function toggle() {
     if (erudaActive) {
-      runInPage('try{eruda.destroy();}catch(e){}');
-      erudaActive = false;
-      port.postMessage({ status: 'destroyed' });
-    } else {
-      loadEruda(function (err) {
-        if (err) { port.postMessage({ status: 'load error: ' + err }); return; }
-        runInPage(
-          '(function(){' +
-          '  try{' +
-          '    if(window.eruda&&window.eruda._isInit){' +
-          '      window.eruda._isInit=false;' +
-          '      window.eruda._container=null;' +
-          '      window.eruda._shadowRoot=null;' +
-          '    }' +
-          '    window.eruda.init({useShadowDom:false,tool:["console","elements","resources","sources","info"]});' +
-          '  }catch(e){}' +
-          '})();'
-        );
-        erudaActive = true;
-        port.postMessage({ status: 'ok' });
-      });
+      destroyEruda();
+      postStatus('destroyed');
+      return;
     }
+
+    loadEruda(function (err) {
+      if (err) {
+        postStatus('load error: ' + err);
+        return;
+      }
+      initEruda(function (initErr) {
+        postStatus(initErr ? initErr : 'ok');
+      });
+    });
   }
 
   function connect() {
