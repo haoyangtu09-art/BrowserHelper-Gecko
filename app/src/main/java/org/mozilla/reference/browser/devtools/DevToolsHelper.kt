@@ -8,12 +8,19 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import mozilla.components.browser.state.selector.selectedTab
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
 import mozilla.components.concept.engine.webextension.WebExtensionRuntime
+import mozilla.components.lib.state.ext.flow
 import mozilla.components.support.webextensions.BuiltInWebExtensionController
 import org.json.JSONObject
 
@@ -27,17 +34,23 @@ object DevToolsHelper {
 
     private var store: BrowserStore? = null
     private var appContext: Context? = null
-
-    // Track which EngineSession we last registered a content handler for,
-    // so we can re-register when the selected tab changes.
-    private var registeredSession: EngineSession? = null
+    private var scope: CoroutineScope? = null
+    private var lastRegisteredSession: EngineSession? = null
 
     fun install(runtime: WebExtensionRuntime, store: BrowserStore, context: Context) {
         this.store = store
         this.appContext = context.applicationContext
+
         controller.install(
             runtime,
-            onSuccess = {},
+            onSuccess = {
+                // Register handler for the current tab immediately after install,
+                // before the content script's connectNative() call is processed.
+                mainHandler.post {
+                    registerForCurrentTab()
+                    observeTabChanges()
+                }
+            },
             onError = { throwable ->
                 mainHandler.post {
                     appContext?.let {
@@ -54,10 +67,9 @@ object DevToolsHelper {
             Toast.makeText(context, "没有活动的页面", Toast.LENGTH_SHORT).show()
             return
         }
-        // Register content handler for this session if not already done.
-        ensureContentHandlerRegistered(engineSession)
-
         if (!controller.portConnected(engineSession, CONTENT_PORT)) {
+            // Re-register in case the session changed without us noticing, then retry once.
+            registerForSession(engineSession)
             Toast.makeText(context, "DevTools 通道未就绪，请稍候再试", Toast.LENGTH_SHORT).show()
             return
         }
@@ -68,17 +80,44 @@ object DevToolsHelper {
         )
     }
 
-    private fun ensureContentHandlerRegistered(engineSession: EngineSession) {
-        if (registeredSession === engineSession) return
-        registeredSession = engineSession
+    private fun registerForCurrentTab() {
+        val engineSession = store?.state?.selectedTab?.engineState?.engineSession ?: return
+        registerForSession(engineSession)
+    }
+
+    private fun registerForSession(engineSession: EngineSession) {
+        if (lastRegisteredSession === engineSession) return
+        lastRegisteredSession = engineSession
         controller.registerContentMessageHandler(
             engineSession,
             object : MessageHandler {
                 override fun onPortConnected(port: Port) {}
-                override fun onPortDisconnected(port: Port) {}
+                override fun onPortDisconnected(port: Port) {
+                    // Port disconnected (e.g. page navigation); clear so next
+                    // toggle re-registers for the new session.
+                    if (lastRegisteredSession === engineSession) {
+                        lastRegisteredSession = null
+                    }
+                }
                 override fun onPortMessage(message: Any, port: Port) {}
             },
             CONTENT_PORT,
         )
+    }
+
+    private fun observeTabChanges() {
+        scope?.cancel()
+        val currentStore = store ?: return
+        scope = CoroutineScope(Dispatchers.Main)
+        scope!!.launch {
+            currentStore.flow()
+                .map { state -> state.selectedTab?.engineState?.engineSession }
+                .distinctUntilChanged()
+                .collect { engineSession ->
+                    if (engineSession != null) {
+                        registerForSession(engineSession)
+                    }
+                }
+        }
     }
 }
