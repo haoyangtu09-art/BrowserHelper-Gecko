@@ -8,6 +8,9 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import mozilla.components.browser.state.selector.selectedTab
+import mozilla.components.browser.state.store.BrowserStore
+import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
 import mozilla.components.concept.engine.webextension.WebExtensionRuntime
@@ -17,19 +20,21 @@ import org.json.JSONObject
 object DevToolsHelper {
     private const val EXTENSION_ID = "devtools-injector@browserhelper.local"
     private const val EXTENSION_URL = "resource://android/assets/extensions/devtools_injector/"
-    private const val NATIVE_APP = "devtools_inject"
+    private const val CONTENT_PORT = "devtools_inject"
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var port: Port? = null
-    private var registered = false
+    private val controller = BuiltInWebExtensionController(EXTENSION_ID, EXTENSION_URL, CONTENT_PORT)
+
+    private var store: BrowserStore? = null
     private var appContext: Context? = null
-    private var pendingToggleContext: Context? = null
 
-    private val controller = BuiltInWebExtensionController(EXTENSION_ID, EXTENSION_URL, NATIVE_APP)
+    // Track which EngineSession we last registered a content handler for,
+    // so we can re-register when the selected tab changes.
+    private var registeredSession: EngineSession? = null
 
-    fun install(runtime: WebExtensionRuntime, context: Context) {
-        appContext = context.applicationContext
-        registerHandler()
+    fun install(runtime: WebExtensionRuntime, store: BrowserStore, context: Context) {
+        this.store = store
+        this.appContext = context.applicationContext
         controller.install(
             runtime,
             onSuccess = {},
@@ -44,56 +49,36 @@ object DevToolsHelper {
     }
 
     fun toggle(context: Context) {
-        val activePort = port
-        if (activePort != null) {
-            sendToggle(activePort)
-        } else {
-            pendingToggleContext = context
-            Toast.makeText(context, "正在连接 DevTools 通道…", Toast.LENGTH_SHORT).show()
+        val engineSession = store?.state?.selectedTab?.engineState?.engineSession
+        if (engineSession == null) {
+            Toast.makeText(context, "没有活动的页面", Toast.LENGTH_SHORT).show()
+            return
         }
-    }
+        // Register content handler for this session if not already done.
+        ensureContentHandlerRegistered(engineSession)
 
-    private fun sendToggle(activePort: Port) {
-        activePort.postMessage(
-            JSONObject()
-                .put("id", System.currentTimeMillis().toString())
-                .put("action", "toggle"),
+        if (!controller.portConnected(engineSession, CONTENT_PORT)) {
+            Toast.makeText(context, "DevTools 通道未就绪，请稍候再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        controller.sendContentMessage(
+            JSONObject().put("action", "toggle"),
+            engineSession,
+            CONTENT_PORT,
         )
     }
 
-    private fun registerHandler() {
-        if (registered) return
-        registered = true
-        controller.registerBackgroundMessageHandler(
+    private fun ensureContentHandlerRegistered(engineSession: EngineSession) {
+        if (registeredSession === engineSession) return
+        registeredSession = engineSession
+        controller.registerContentMessageHandler(
+            engineSession,
             object : MessageHandler {
-                override fun onPortConnected(port: Port) {
-                    this@DevToolsHelper.port = port
-                    pendingToggleContext?.let { ctx ->
-                        pendingToggleContext = null
-                        sendToggle(port)
-                        Toast.makeText(ctx, "DevTools 已开启", Toast.LENGTH_SHORT).show()
-                    }
-                }
-
-                override fun onPortDisconnected(port: Port) {
-                    if (this@DevToolsHelper.port == port) {
-                        this@DevToolsHelper.port = null
-                    }
-                }
-
-                override fun onPortMessage(message: Any, port: Port) {
-                    val data = message as? JSONObject ?: return
-                    val error = data.optString("error")
-                    if (error.isNotBlank()) {
-                        mainHandler.post {
-                            appContext?.let {
-                                Toast.makeText(it, "DevTools 错误: $error", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                    }
-                }
+                override fun onPortConnected(port: Port) {}
+                override fun onPortDisconnected(port: Port) {}
+                override fun onPortMessage(message: Any, port: Port) {}
             },
-            NATIVE_APP,
+            CONTENT_PORT,
         )
     }
 }
