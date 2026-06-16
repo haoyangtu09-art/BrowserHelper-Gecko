@@ -25,8 +25,24 @@
     if (pageErudaReady) { cb(null); return; }
 
     fetch(browser.runtime.getURL('eruda.min.js'))
-      .then(function (r) { return r.blob(); })
-      .then(function (blob) {
+      .then(function (r) { return r.text(); })
+      .then(function (code) {
+        // Append init call inside the same script so no separate inline
+        // <script> is needed — bypasses pages that block unsafe-inline CSP.
+        var initCode = [
+          '\n(function(){',
+          '  try{',
+          '    if(window.eruda&&window.eruda._isInit){',
+          '      window.eruda._isInit=false;',
+          '      window.eruda._container=null;',
+          '      window.eruda._shadowRoot=null;',
+          '    }',
+          '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});',
+          '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}',
+          '  }catch(e){}',
+          '})();',
+        ].join('');
+        var blob = new Blob([code + initCode], { type: 'application/javascript' });
         blobUrl = URL.createObjectURL(blob);
         var script = document.createElement('script');
         script.src = blobUrl;
@@ -93,21 +109,15 @@
   }
 
   function entryVisible() {
+    var host = document.getElementById('eruda');
+    // For page-world mode: just check the host element exists and has dimensions.
+    // Shadow DOM internals may not be accessible from content script world.
+    if (host && host.offsetWidth > 0 && host.offsetHeight > 0) return true;
     var btn = getEntryButton();
     if (!btn) return false;
     try {
       var rect = btn.getBoundingClientRect();
-      var view = document.defaultView || window;
-      var style = view.getComputedStyle(btn);
-      return rect.width > 0 &&
-        rect.height > 0 &&
-        rect.right > 0 &&
-        rect.bottom > 0 &&
-        rect.left < window.innerWidth &&
-        rect.top < window.innerHeight &&
-        style.display !== 'none' &&
-        style.visibility !== 'hidden' &&
-        style.opacity !== '0';
+      return rect.width > 0 && rect.height > 0;
     } catch (e) {
       return false;
     }
@@ -214,36 +224,8 @@
   }
 
   function initPageEruda(cb) {
-    runInPage(
-      '(function(){' +
-      '  try{' +
-      '    if(window.eruda&&window.eruda._isInit){' +
-      '      window.eruda._isInit=false;' +
-      '      window.eruda._container=null;' +
-      '      window.eruda._shadowRoot=null;' +
-      '    }' +
-      '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});' +
-      '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}' +
-      '    function centerEntry(){' +
-      '      try{' +
-      '        var btn=document.querySelector("#eruda .eruda-entry-btn");' +
-      '        if(!btn||!window.eruda.position)return;' +
-      '        var r=btn.getBoundingClientRect();' +
-      '        var w=r.width||btn.offsetWidth||40;' +
-      '        var h=r.height||btn.offsetHeight||40;' +
-      '        window.eruda.position({' +
-      '          x:Math.max(0,Math.round((window.innerWidth-w)/2)),' +
-      '          y:Math.max(0,Math.round((window.innerHeight-h)/2))' +
-      '        });' +
-      '      }catch(e){}' +
-      '    }' +
-      '    centerEntry();' +
-      '    requestAnimationFrame(centerEntry);' +
-      '    setTimeout(centerEntry,300);' +
-      '  }catch(e){}' +
-      '})();'
-    );
-
+    // eruda.init() was already called inside the Blob script (loadPageEruda).
+    // Just verify the entry button appeared in the DOM.
     verifyEntry(function (visible) {
       if (visible) {
         erudaMode = 'page';
