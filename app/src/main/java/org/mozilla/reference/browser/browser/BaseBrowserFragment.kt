@@ -377,7 +377,7 @@ abstract class BaseBrowserFragment :
                 // toolbar.height is still 0 here because the view has not been
                 // laid out yet. Use the fixed toolbar dimension so the behavior
                 // actually offsets the engine view below the top toolbar.
-                topToolbarHeight = resources.getDimensionPixelSize(R.dimen.browser_toolbar_height),
+                topToolbarHeight = resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height),
                 bottomToolbarHeight = BOTTOM_TOOLBAR_HEIGHT,
             )
         }
@@ -435,11 +435,13 @@ abstract class BaseBrowserFragment :
         if (enabled) {
             activity?.enterImmersiveMode()
             toolbar.visibility = View.GONE
+            view?.findViewById<View>(R.id.topTabScroll)?.visibility = View.GONE
             engineView.setDynamicToolbarMaxHeight(0)
         } else {
             activity?.exitImmersiveMode()
             toolbar.visibility = View.VISIBLE
-            engineView.setDynamicToolbarMaxHeight(resources.getDimensionPixelSize(R.dimen.browser_toolbar_height))
+            view?.findViewById<View>(R.id.topTabScroll)?.visibility = View.VISIBLE
+            engineView.setDynamicToolbarMaxHeight(resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height))
         }
     }
 

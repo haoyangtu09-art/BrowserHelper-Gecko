@@ -3,7 +3,7 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 <resources>
-    <string name="app_name">浏览器助手 Gecko</string>
+    <string name="app_name">Browser.helper</string>
 
     <!-- Text shown in the toolbar if it is empty -->
     <string name="toolbar_hint">搜索或输入网址</string>
@@ -157,7 +157,7 @@
      ]]></string>
 
     <!-- Title of the notification shown on app startup informing about the data policy -->
-    <string name="datareporting_notification_title">浏览器助手 Gecko</string>
+    <string name="datareporting_notification_title">Browser.helper</string>
 
     <!-- Summary of the notification shown on app startup informing about the data policy -->
     <string name="datareporting_notification_summary">为改善您的体验，本浏览器会自动向 Mozilla 发送部分信息。</string>

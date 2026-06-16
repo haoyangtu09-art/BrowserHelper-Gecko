@@ -6,7 +6,15 @@ package org.mozilla.reference.browser.browser
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.view.View
+import android.view.ViewGroup
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
 import kotlinx.coroutines.MainScope
@@ -15,7 +23,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import mozilla.components.browser.domains.autocomplete.ShippedDomainsProvider
 import mozilla.components.browser.menu2.BrowserMenuController
-import mozilla.components.browser.state.selector.selectedTab
+import mozilla.components.browser.state.state.TabSessionState
 import mozilla.components.browser.state.state.SessionState
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.browser.storage.sync.PlacesHistoryStorage
@@ -49,8 +57,8 @@ import org.mozilla.reference.browser.tabs.synced.SyncedTabsActivity
 @Suppress("LongParameterList")
 class ToolbarIntegration(
     private val context: Context,
-    toolbar: BrowserToolbar,
-    toolbarParentView: View,
+    private val toolbar: BrowserToolbar,
+    private val toolbarParentView: View,
     historyStorage: PlacesHistoryStorage,
     store: BrowserStore,
     private val sessionUseCases: SessionUseCases,
@@ -64,6 +72,8 @@ class ToolbarIntegration(
     }
 
     private val scope = MainScope()
+    private val tabStrip: LinearLayout? = toolbarParentView.findViewById(R.id.topTabStrip)
+    private val tabScroll: HorizontalScrollView? = toolbarParentView.findViewById(R.id.topTabScroll)
 
     private fun menuToolbar(session: SessionState?): RowMenuCandidate {
         val tint = ContextCompat.getColor(context, R.color.icons)
@@ -109,7 +119,6 @@ class ToolbarIntegration(
 
     private fun sessionMenuItems(sessionState: SessionState): List<MenuCandidate> =
         listOfNotNull(
-            menuToolbar(sessionState),
             TextMenuCandidate("分享") {
                 val url = sessionState.content.url
                 context.share(url)
@@ -199,6 +208,18 @@ class ToolbarIntegration(
                 ResourcesCompat.getDrawable(context.resources, R.drawable.url_background, context.theme),
             )
         }
+        toolbar.addBrowserAction(
+            BrowserToolbar.Button(
+                imageDrawable = ContextCompat.getDrawable(
+                    context,
+                    mozilla.components.ui.icons.R.drawable.mozac_ic_arrow_clockwise_24,
+                )!!,
+                contentDescription = "刷新",
+                iconTintColorResource = R.color.icons,
+            ) {
+                sessionUseCases.reload.invoke()
+            },
+        )
 
         toolbar.edit.apply {
             hint = context.getString(R.string.toolbar_hint)
@@ -213,13 +234,84 @@ class ToolbarIntegration(
         scope.launch {
             store
                 .flow()
-                .map { state -> state.selectedTab }
+                .map { state -> state.selectedTabId to state.tabs }
                 .distinctUntilChanged()
-                .collect { tab ->
-                    browserMenuController.submitList(menuItems(tab))
+                .collect { (selectedTabId, tabs) ->
+                    val selectedTab = tabs.firstOrNull { tab -> tab.id == selectedTabId }
+                    browserMenuController.submitList(menuItems(selectedTab))
+                    renderTopTabs(tabs, selectedTabId)
                 }
         }
     }
+
+    private fun renderTopTabs(tabs: List<TabSessionState>, selectedTabId: String?) {
+        val strip = tabStrip ?: return
+        strip.removeAllViews()
+        tabs.forEach { tab ->
+            strip.addView(tabChip(tab, selected = tab.id == selectedTabId))
+        }
+        strip.addView(newTabChip())
+        tabScroll?.post {
+            val selectedIndex = tabs.indexOfFirst { tab -> tab.id == selectedTabId }
+            if (selectedIndex >= 0 && selectedIndex < strip.childCount) {
+                strip.getChildAt(selectedIndex)?.let { child ->
+                    tabScroll.smoothScrollTo(child.left - dp(8), 0)
+                }
+            }
+        }
+    }
+
+    private fun tabChip(tab: TabSessionState, selected: Boolean): TextView =
+        TextView(context).apply {
+            text = tabLabel(tab)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            gravity = android.view.Gravity.CENTER
+            setTextColor(if (selected) Color.WHITE else Color.rgb(190, 190, 190))
+            textSize = 13f
+            typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            background = roundedTabBackground(if (selected) Color.rgb(55, 55, 55) else Color.rgb(30, 30, 30))
+            setPadding(dp(12), 0, dp(12), 0)
+            layoutParams = LinearLayout.LayoutParams(dp(148), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                setMargins(dp(3), dp(5), dp(3), dp(5))
+            }
+            setOnClickListener { tabsUseCases.selectTab(tab.id) }
+        }
+
+    private fun newTabChip(): TextView =
+        TextView(context).apply {
+            text = "+"
+            gravity = android.view.Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+            background = roundedTabBackground(Color.rgb(36, 36, 36))
+            layoutParams = LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                setMargins(dp(3), dp(5), dp(6), dp(5))
+            }
+            setOnClickListener {
+                tabsUseCases.addTab("about:blank", selectTab = true)
+            }
+        }
+
+    private fun tabLabel(tab: TabSessionState): String {
+        val title = tab.content.title.trim()
+        if (title.isNotEmpty()) return title
+        val url = tab.content.url
+        return runCatching { java.net.URI(url).host?.removePrefix("www.") }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: url.ifBlank { "新标签页" }
+    }
+
+    private fun roundedTabBackground(color: Int): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(8).toFloat()
+        }
+
+    private fun dp(value: Int): Int =
+        (value * context.resources.displayMetrics.density).toInt()
 
     private val toolbarFeature: ToolbarFeature = ToolbarFeature(
         toolbar,

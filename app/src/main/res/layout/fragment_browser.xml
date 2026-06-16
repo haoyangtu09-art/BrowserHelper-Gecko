@@ -19,6 +19,27 @@
         android:layout_height="@dimen/browser_toolbar_height"
         android:visibility="gone" />
 
+    <HorizontalScrollView
+        android:id="@+id/topTabScroll"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/browser_tab_strip_height"
+        android:layout_gravity="top"
+        android:background="@color/evenDarker"
+        android:fillViewport="false"
+        android:overScrollMode="never"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/topTabStrip"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp" />
+
+    </HorizontalScrollView>
+
     <mozilla.components.ui.widgets.VerticalSwipeRefreshLayout
         android:id="@+id/swipeRefresh"
         android:layout_width="match_parent"
@@ -54,6 +75,7 @@
         android:layout_width="match_parent"
         android:layout_height="@dimen/browser_toolbar_height"
         android:layout_gravity="top"
+        android:layout_marginTop="@dimen/browser_tab_strip_height"
         android:background="@color/toolbarBackgroundColor" />
 
     <mozilla.components.feature.readerview.view.ReaderViewControlsBar
