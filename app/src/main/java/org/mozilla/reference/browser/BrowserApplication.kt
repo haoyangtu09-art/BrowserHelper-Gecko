@@ -98,7 +98,7 @@ open class BrowserApplication : Application() {
         )
 
         CookieExportHelper.install(components.core.engine, this)
-        DevToolsHelper.install(components.core.engine, components.core.store, this)
+        DevToolsHelper.install(components.core.engine, components.core.store, components.useCases.sessionUseCases, this)
 
         setupGoogleDefaultSearch()
 

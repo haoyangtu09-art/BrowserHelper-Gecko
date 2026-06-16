@@ -20,6 +20,7 @@ import mozilla.components.concept.engine.EngineSession
 import mozilla.components.concept.engine.webextension.MessageHandler
 import mozilla.components.concept.engine.webextension.Port
 import mozilla.components.concept.engine.webextension.WebExtensionRuntime
+import mozilla.components.feature.session.SessionUseCases
 import mozilla.components.lib.state.ext.flow
 import mozilla.components.support.webextensions.BuiltInWebExtensionController
 import org.json.JSONObject
@@ -33,19 +34,30 @@ object DevToolsHelper {
     private val controller = BuiltInWebExtensionController(EXTENSION_ID, EXTENSION_URL, CONTENT_PORT)
 
     private var store: BrowserStore? = null
+    private var sessionUseCases: SessionUseCases? = null
     private var appContext: Context? = null
     private var scope: CoroutineScope? = null
-    private var lastRegisteredSession: EngineSession? = null
 
-    fun install(runtime: WebExtensionRuntime, store: BrowserStore, context: Context) {
+    // Sessions that already have a handler registered.
+    private val registeredSessions = mutableSetOf<EngineSession>()
+
+    // If toggle was requested but port wasn't ready yet (page was reloading),
+    // fire it as soon as the port connects.
+    private var pendingToggle = false
+
+    fun install(
+        runtime: WebExtensionRuntime,
+        store: BrowserStore,
+        sessionUseCases: SessionUseCases,
+        context: Context,
+    ) {
         this.store = store
+        this.sessionUseCases = sessionUseCases
         this.appContext = context.applicationContext
 
         controller.install(
             runtime,
             onSuccess = {
-                // Register handler for the current tab immediately after install,
-                // before the content script's connectNative() call is processed.
                 mainHandler.post {
                     registerForCurrentTab()
                     observeTabChanges()
@@ -67,17 +79,36 @@ object DevToolsHelper {
             Toast.makeText(context, "没有活动的页面", Toast.LENGTH_SHORT).show()
             return
         }
-        if (!controller.portConnected(engineSession, CONTENT_PORT)) {
-            // Re-register in case the session changed without us noticing, then retry once.
-            registerForSession(engineSession)
-            Toast.makeText(context, "DevTools 通道未就绪，请稍候再试", Toast.LENGTH_SHORT).show()
-            return
+        if (controller.portConnected(engineSession, CONTENT_PORT)) {
+            sendToggle(engineSession)
+        } else {
+            // Content script not yet connected — reload the page so the content
+            // script runs and connects. The toggle fires automatically on connect.
+            pendingToggle = true
+            Toast.makeText(context, "正在加载开发者工具，页面将刷新…", Toast.LENGTH_SHORT).show()
+            sessionUseCases?.reload?.invoke()
         }
+    }
+
+    private fun sendToggle(engineSession: EngineSession) {
         controller.sendContentMessage(
             JSONObject().put("action", "toggle"),
             engineSession,
             CONTENT_PORT,
         )
+    }
+
+    private fun makeHandler(engineSession: EngineSession) = object : MessageHandler {
+        override fun onPortConnected(port: Port) {
+            if (pendingToggle) {
+                pendingToggle = false
+                sendToggle(engineSession)
+            }
+        }
+        override fun onPortDisconnected(port: Port) {
+            registeredSessions.remove(engineSession)
+        }
+        override fun onPortMessage(message: Any, port: Port) {}
     }
 
     private fun registerForCurrentTab() {
@@ -86,23 +117,9 @@ object DevToolsHelper {
     }
 
     private fun registerForSession(engineSession: EngineSession) {
-        if (lastRegisteredSession === engineSession) return
-        lastRegisteredSession = engineSession
-        controller.registerContentMessageHandler(
-            engineSession,
-            object : MessageHandler {
-                override fun onPortConnected(port: Port) {}
-                override fun onPortDisconnected(port: Port) {
-                    // Port disconnected (e.g. page navigation); clear so next
-                    // toggle re-registers for the new session.
-                    if (lastRegisteredSession === engineSession) {
-                        lastRegisteredSession = null
-                    }
-                }
-                override fun onPortMessage(message: Any, port: Port) {}
-            },
-            CONTENT_PORT,
-        )
+        if (registeredSessions.contains(engineSession)) return
+        registeredSessions.add(engineSession)
+        controller.registerContentMessageHandler(engineSession, makeHandler(engineSession), CONTENT_PORT)
     }
 
     private fun observeTabChanges() {
@@ -114,9 +131,7 @@ object DevToolsHelper {
                 .map { state -> state.selectedTab?.engineState?.engineSession }
                 .distinctUntilChanged()
                 .collect { engineSession ->
-                    if (engineSession != null) {
-                        registerForSession(engineSession)
-                    }
+                    if (engineSession != null) registerForSession(engineSession)
                 }
         }
     }

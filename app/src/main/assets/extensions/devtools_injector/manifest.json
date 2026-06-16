@@ -12,6 +12,7 @@
     "mozillaAddons",
     "geckoViewAddons",
     "nativeMessaging",
+    "nativeMessagingFromContent",
     "<all_urls>"
   ],
   "content_scripts": [
