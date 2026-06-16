@@ -7,18 +7,26 @@
     if (erudaActive) {
       try { eruda.destroy(); } catch (e) {}
       erudaActive = false;
+      port.postMessage({ status: 'destroyed' });
     } else {
+      var errMsg = 'none';
       try {
-        if (typeof eruda !== 'undefined' && eruda._isInit) {
-          eruda._isInit = false;
-          eruda._container = null;
-          eruda._shadowRoot = null;
+        if (typeof eruda === 'undefined') {
+          errMsg = 'eruda is undefined';
+        } else {
+          if (eruda._isInit) {
+            eruda._isInit = false;
+            eruda._container = null;
+            eruda._shadowRoot = null;
+          }
+          eruda.init({ useShadowDom: false });
+          erudaActive = true;
+          errMsg = 'ok';
         }
-        // Disable shadow DOM — content script world's attachShadow may not
-        // render visibly in GeckoView's isolated context.
-        eruda.init({ useShadowDom: false });
-        erudaActive = true;
-      } catch (e) {}
+      } catch (e) {
+        errMsg = String(e && e.message ? e.message : e);
+      }
+      port.postMessage({ status: errMsg });
     }
   }
 
@@ -39,4 +47,5 @@
 
   connect();
 })();
+
 

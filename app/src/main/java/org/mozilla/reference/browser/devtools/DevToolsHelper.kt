@@ -113,7 +113,17 @@ object DevToolsHelper {
         override fun onPortDisconnected(port: Port) {
             registeredSessions.remove(engineSession)
         }
-        override fun onPortMessage(message: Any, port: Port) {}
+        override fun onPortMessage(message: Any, port: Port) {
+                val data = message as? JSONObject ?: return
+                val status = data.optString("status", "")
+                if (status.isNotEmpty()) {
+                    mainHandler.post {
+                        appContext?.let {
+                            Toast.makeText(it, "DevTools: $status", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
     }
 
     private fun registerForCurrentTab() {
