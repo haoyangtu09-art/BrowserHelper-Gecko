@@ -147,7 +147,7 @@ class BrowserFragment :
             view = view,
         )
 
-        engineView.setDynamicToolbarMaxHeight(resources.getDimensionPixelSize(R.dimen.browser_toolbar_height))
+        engineView.setDynamicToolbarMaxHeight(0)
     }
 
     private fun showTabs() {

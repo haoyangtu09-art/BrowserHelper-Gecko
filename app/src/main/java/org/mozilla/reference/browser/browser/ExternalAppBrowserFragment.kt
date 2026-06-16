@@ -90,6 +90,7 @@ class ExternalAppBrowserFragment :
                 scope = viewLifecycleOwner.lifecycleScope,
             ) { toolbarVisible ->
                 toolbar.isVisible = toolbarVisible
+                view.findViewById<View>(R.id.browserToolbarRow)?.isVisible = toolbarVisible
                 webAppToolbarShouldBeVisible = toolbarVisible
                 if (!toolbarVisible) engineView.setDynamicToolbarMaxHeight(0)
             },

@@ -19,7 +19,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
-import androidx.core.graphics.drawable.DrawableCompat
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -77,6 +76,9 @@ class ToolbarIntegration(
     private val scope = MainScope()
     private val tabStrip: LinearLayout? = toolbarParentView.findViewById(R.id.topTabStrip)
     private val tabScroll: HorizontalScrollView? = toolbarParentView.findViewById(R.id.topTabScroll)
+    private val homeButton: ImageButton? = toolbarParentView.findViewById(R.id.navHomeButton)
+    private val backButton: ImageButton? = toolbarParentView.findViewById(R.id.navBackButton)
+    private val forwardButton: ImageButton? = toolbarParentView.findViewById(R.id.navForwardButton)
 
     private fun menuToolbar(session: SessionState?): RowMenuCandidate {
         val tint = ContextCompat.getColor(context, R.color.icons)
@@ -223,6 +225,9 @@ class ToolbarIntegration(
                 sessionUseCases.reload.invoke()
             },
         )
+        homeButton?.setOnClickListener { sessionUseCases.loadUrl("about:blank") }
+        backButton?.setOnClickListener { sessionUseCases.goBack.invoke() }
+        forwardButton?.setOnClickListener { sessionUseCases.goForward.invoke() }
 
         toolbar.edit.apply {
             hint = context.getString(R.string.toolbar_hint)
@@ -251,25 +256,12 @@ class ToolbarIntegration(
         val strip = tabStrip ?: return
         strip.removeAllViews()
         val selectedTab = tabs.firstOrNull { tab -> tab.id == selectedTabId }
-        strip.addView(navButton(R.drawable.ic_home_24, "主页", enabled = true) {
-            sessionUseCases.loadUrl("about:blank")
-        })
-        strip.addView(navButton(
-            R.drawable.ic_back_24,
-            "后退",
-            enabled = selectedTab?.content?.canGoBack == true,
-        ) {
-            sessionUseCases.goBack.invoke()
-        })
-        strip.addView(navButton(
-            R.drawable.ic_forward_24,
-            "前进",
-            enabled = selectedTab?.content?.canGoForward == true,
-        ) {
-            sessionUseCases.goForward.invoke()
-        })
+        updateNavigationButton(backButton, selectedTab?.content?.canGoBack == true)
+        updateNavigationButton(forwardButton, selectedTab?.content?.canGoForward == true)
+        updateNavigationButton(homeButton, true)
+        val tabWidth = tabWidth(tabs.size)
         tabs.forEach { tab ->
-            strip.addView(tabChip(tab, selected = tab.id == selectedTabId))
+            strip.addView(tabChip(tab, selected = tab.id == selectedTabId, width = tabWidth))
         }
         strip.addView(newTabChip())
         tabScroll?.post {
@@ -282,31 +274,21 @@ class ToolbarIntegration(
         }
     }
 
-    private fun navButton(drawableRes: Int, description: String, enabled: Boolean, listener: () -> Unit): ImageButton =
-        ImageButton(context).apply {
-            val icon = ContextCompat.getDrawable(context, drawableRes)?.mutate()
-            if (icon != null) {
-                DrawableCompat.setTint(icon, if (enabled) Color.WHITE else Color.rgb(105, 105, 105))
-                setImageDrawable(icon)
-            }
-            contentDescription = description
+    private fun updateNavigationButton(button: ImageButton?, enabled: Boolean) {
+        button?.apply {
             isEnabled = enabled
-            background = roundedTabBackground(Color.rgb(32, 32, 32))
-            scaleType = android.widget.ImageView.ScaleType.CENTER
-            layoutParams = LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                setMargins(dp(3), dp(2), dp(3), dp(2))
-            }
-            setOnClickListener { listener() }
+            alpha = if (enabled) 1f else 0.38f
         }
+    }
 
-    private fun tabChip(tab: TabSessionState, selected: Boolean): View =
+    private fun tabChip(tab: TabSessionState, selected: Boolean, width: Int): View =
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
             background = roundedTabBackground(if (selected) Color.rgb(55, 55, 55) else Color.rgb(30, 30, 30))
             setPadding(dp(9), 0, dp(10), 0)
-            layoutParams = LinearLayout.LayoutParams(dp(156), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                setMargins(dp(3), dp(2), dp(3), dp(2))
+            layoutParams = LinearLayout.LayoutParams(width, ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                setMargins(dp(2), dp(4), dp(2), 0)
             }
             val favicon = ImageView(context).apply {
                 tab.content.icon?.let(::setImageBitmap) ?: setImageResource(R.drawable.ic_web_16)
@@ -331,7 +313,7 @@ class ToolbarIntegration(
             if (selected) {
                 scaleX = 0.96f
                 scaleY = 0.96f
-                animate().scaleX(1f).scaleY(1f).setDuration(140).start()
+                animate().scaleX(1f).scaleY(1f).setDuration(160).start()
             }
             setOnClickListener { tabsUseCases.selectTab(tab.id) }
         }
@@ -346,7 +328,7 @@ class ToolbarIntegration(
             typeface = Typeface.DEFAULT_BOLD
             background = roundedTabBackground(Color.rgb(36, 36, 36))
             layoutParams = LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-                setMargins(dp(3), dp(2), dp(6), dp(2))
+                setMargins(dp(2), dp(4), dp(6), 0)
             }
             setOnClickListener {
                 tabsUseCases.addTab("about:blank", selectTab = true)
@@ -363,10 +345,22 @@ class ToolbarIntegration(
             ?: url.ifBlank { "新标签页" }
     }
 
+    private fun tabWidth(tabCount: Int): Int {
+        val screenWidth = context.resources.displayMetrics.widthPixels
+        val available = screenWidth - dp(58)
+        return when {
+            tabCount <= 1 -> available.coerceIn(dp(180), dp(320))
+            tabCount == 2 -> (available / 2).coerceIn(dp(150), dp(240))
+            tabCount == 3 -> (available / 3).coerceIn(dp(126), dp(200))
+            else -> dp(118)
+        }
+    }
+
     private fun roundedTabBackground(color: Int): GradientDrawable =
         GradientDrawable().apply {
             setColor(color)
-            cornerRadius = dp(8).toFloat()
+            val radius = dp(8).toFloat()
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
         }
 
     private fun dp(value: Int): Int =

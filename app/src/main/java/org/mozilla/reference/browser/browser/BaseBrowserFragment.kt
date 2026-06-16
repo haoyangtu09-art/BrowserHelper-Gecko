@@ -16,7 +16,6 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.CallSuper
 import androidx.compose.ui.platform.ComposeView
-import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
@@ -46,9 +45,7 @@ import mozilla.components.support.base.log.logger.Logger
 import mozilla.components.support.ktx.android.view.enterImmersiveMode
 import mozilla.components.support.ktx.android.view.exitImmersiveMode
 import mozilla.components.support.utils.DefaultDownloadFileUtils
-import mozilla.components.ui.widgets.behavior.DependencyGravity
 import mozilla.components.ui.widgets.behavior.EngineViewClippingBehavior
-import mozilla.components.ui.widgets.behavior.EngineViewScrollingGesturesBehavior
 import org.mozilla.reference.browser.BuildConfig
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.WebExtensionPromptFeature
@@ -189,13 +186,7 @@ abstract class BaseBrowserFragment :
             view = view,
         )
 
-        (toolbar.layoutParams as? CoordinatorLayout.LayoutParams)?.apply {
-            behavior = EngineViewScrollingGesturesBehavior(
-                engineView = engineView,
-                dependency = toolbar,
-                dependencyGravity = DependencyGravity.Top,
-            )
-        }
+        engineView.setDynamicToolbarMaxHeight(0)
 
         toolbarIntegration.set(
             feature = ToolbarIntegration(
@@ -436,14 +427,16 @@ abstract class BaseBrowserFragment :
             activity?.enterImmersiveMode()
             toolbar.visibility = View.GONE
             view?.findViewById<View>(R.id.topTabScroll)?.visibility = View.GONE
+            view?.findViewById<View>(R.id.browserToolbarRow)?.visibility = View.GONE
             setTopChromeContentOffset(0)
             engineView.setDynamicToolbarMaxHeight(0)
         } else {
             activity?.exitImmersiveMode()
             toolbar.visibility = View.VISIBLE
             view?.findViewById<View>(R.id.topTabScroll)?.visibility = View.VISIBLE
+            view?.findViewById<View>(R.id.browserToolbarRow)?.visibility = View.VISIBLE
             setTopChromeContentOffset(resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height))
-            engineView.setDynamicToolbarMaxHeight(resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height))
+            engineView.setDynamicToolbarMaxHeight(0)
         }
     }
 
