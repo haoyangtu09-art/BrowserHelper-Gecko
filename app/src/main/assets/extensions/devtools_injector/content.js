@@ -546,11 +546,125 @@
 
   function injectInterceptor() {
     if (erudaMode === 'page') {
+      // page world：直接用 <script> 注入（没有 CSP 问题，因为已经用 blob URL 加载了 eruda）
       runInPage(INTERCEPT_JS);
     } else {
-      // isolated world 也注入到 page（runInPage 在 content script 里可用）
-      runInPage(INTERCEPT_JS);
+      // isolated world（强 CSP 页面）：<script> 标签被 CSP 阻止。
+      // 用 Gecko 专有 exportFunction/cloneInto API 把拦截函数直接导出到 page world，
+      // 不经过 <script> 标签，完全绕过 CSP。
+      injectInterceptorViaExportFunction();
     }
+  }
+
+  // Gecko content script 专有：exportFunction 把 content world 函数导出到 page world window
+  function injectInterceptorViaExportFunction() {
+    if (typeof exportFunction === 'undefined' || typeof window.wrappedJSObject === 'undefined') {
+      // 非 Gecko 或 API 不可用，降级尝试 runInPage（可能被 CSP 阻止）
+      runInPage(INTERCEPT_JS);
+      return;
+    }
+    var pw = window.wrappedJSObject; // page world window
+    if (pw.__bhNetInstalled) return;
+    pw.__bhNetInstalled = true;
+
+    // ── 工具函数（在 content world 执行，操作 page world 对象需 cloneInto）──
+    function headersToObj(h) {
+      if (!h) return {};
+      var o = {};
+      if (typeof h.forEach === 'function') { h.forEach(function (v, k) { o[k] = v; }); return o; }
+      if (Array.isArray(h)) { h.forEach(function (p) { o[p[0]] = p[1]; }); return o; }
+      return Object.assign({}, h);
+    }
+    function uid() { return Math.random().toString(36).slice(2); }
+    function sendNet(data) {
+      try { window.postMessage(Object.assign({ __bhNet: true }, data), '*'); } catch (e) {}
+    }
+    function checkMock(url) {
+      var rules = pw.__bhMockRules;
+      if (!rules || !rules.length) return null;
+      for (var i = 0; i < rules.length; i++) {
+        if (url.indexOf(rules[i].pattern) !== -1) return rules[i];
+      }
+      return null;
+    }
+
+    // ── 替换 page world 的 fetch ──
+    var _origFetch = pw.fetch;
+    exportFunction(function (input, init) {
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      var reqHeaders = headersToObj(init && init.headers);
+      var reqBody = (init && init.body != null) ? String(init.body) : null;
+      var reqId = uid();
+      var t0 = Date.now();
+      sendNet({ type: 'req', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody });
+      var mock = checkMock(url);
+      if (mock) {
+        sendNet({ type: 'resp', reqId: reqId, status: mock.status || 200,
+          respHeaders: { 'x-mock': '1' }, respBody: mock.body || '', duration: Date.now() - t0 });
+        return Promise.resolve(new window.Response(mock.body || '', { status: mock.status || 200 }));
+      }
+      var thr = pw.__bhThrottle;
+      var delay = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
+      var doFetch = function () {
+        return _origFetch.call(pw, input, init).then(function (resp) {
+          var status = resp.status;
+          var respHeaders = headersToObj(resp.headers);
+          resp.clone().text().then(function (body) {
+            sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
+              respBody: body.slice(0, 102400), duration: Date.now() - t0 });
+          }).catch(function () {
+            sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
+              respBody: '(读取失败)', duration: Date.now() - t0 });
+          });
+          return resp;
+        }).catch(function (err) {
+          sendNet({ type: 'resp', reqId: reqId, status: 0, error: String(err), duration: Date.now() - t0 });
+          throw err;
+        });
+      };
+      return delay > 0 ? new Promise(function (res) { setTimeout(function () { res(doFetch()); }, delay); }) : doFetch();
+    }, pw, { defineAs: 'fetch' });
+
+    // ── 替换 page world 的 XMLHttpRequest ──
+    var _OrigXHR = pw.XMLHttpRequest;
+    exportFunction(function () {
+      var xhr = new _OrigXHR();
+      var _method = 'GET', _url = '', _reqHeaders = {}, _reqBody = null, _reqId = uid(), _t0 = 0;
+      exportFunction(function (method, url) { _method = method.toUpperCase(); _url = url; return xhr.open.apply(xhr, arguments); }, xhr, { defineAs: 'open' });
+      exportFunction(function (k, v) { _reqHeaders[k] = v; return xhr.setRequestHeader(k, v); }, xhr, { defineAs: 'setRequestHeader' });
+      exportFunction(function (body) {
+        _reqBody = body != null ? String(body) : null;
+        _t0 = Date.now();
+        sendNet({ type: 'req', reqId: _reqId, url: _url, method: _method, reqHeaders: _reqHeaders, reqBody: _reqBody });
+        var mock = checkMock(_url);
+        if (mock) {
+          sendNet({ type: 'resp', reqId: _reqId, status: mock.status || 200,
+            respHeaders: { 'x-mock': '1' }, respBody: mock.body || '', duration: Date.now() - _t0 });
+          return;
+        }
+        var doSend = function () {
+          xhr.addEventListener('readystatechange', function () {
+            if (xhr.readyState !== 4) return;
+            var respHeaders = {};
+            try {
+              (xhr.getAllResponseHeaders() || '').split('\r\n').forEach(function (l) {
+                var i = l.indexOf(':'); if (i < 0) return;
+                respHeaders[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+              });
+            } catch (e) {}
+            sendNet({ type: 'resp', reqId: _reqId, status: xhr.status,
+              respHeaders: respHeaders, respBody: (xhr.responseText || '').slice(0, 102400),
+              duration: Date.now() - _t0 });
+          });
+          xhr.send(body);
+        };
+        var thr = pw.__bhThrottle;
+        var d = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
+        if (d > 0) { setTimeout(doSend, d); } else { doSend(); }
+      }, xhr, { defineAs: 'send' });
+      return xhr;
+    }, pw, { defineAs: 'XMLHttpRequest' });
   }
   // ── /网络拦截层 ──────────────────────────────────────────────────────────────
 
