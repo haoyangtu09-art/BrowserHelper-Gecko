@@ -415,6 +415,14 @@
 
       // ── fetch 拦截 ──
       '  var _origFetch=window.fetch;',
+      '  function checkMock(url){',
+      '    var rules=window.__bhMockRules;',
+      '    if(!rules||!rules.length)return null;',
+      '    for(var i=0;i<rules.length;i++){',
+      '      if(url.indexOf(rules[i].pattern)!==-1)return rules[i];',
+      '    }',
+      '    return null;',
+      '  }',
       '  window.fetch=function(input,init){',
       '    var url=typeof input==="string"?input:(input&&input.url)||"";',
       '    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();',
@@ -423,6 +431,14 @@
       '    var reqId=uid();',
       '    var t0=Date.now();',
       '    send({type:"req",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody});',
+      '    var mock=checkMock(url);',
+      '    if(mock){',
+      '      var mBody=mock.body||"";',
+      '      var mStatus=mock.status||200;',
+      '      send({type:"resp",reqId:reqId,status:mStatus,respHeaders:{"x-mock":"1"},',
+      '        respBody:mBody,duration:Date.now()-t0});',
+      '      return Promise.resolve(new Response(mBody,{status:mStatus,headers:{"x-mock":"1"}}));',
+      '    }',
       '    var args=arguments;',
       '    var thr=window.__bhThrottle;',
       '    var delay=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
@@ -459,6 +475,12 @@
       '      _reqBody=body!=null?String(body):null;',
       '      _t0=Date.now();',
       '      send({type:"req",reqId:_reqId,url:_url,method:_method,reqHeaders:_reqHeaders,reqBody:_reqBody});',
+      '      var mock=checkMock(_url);',
+      '      if(mock){',
+      '        send({type:"resp",reqId:_reqId,status:mock.status||200,',
+      '          respHeaders:{"x-mock":"1"},respBody:mock.body||"",duration:Date.now()-_t0});',
+      '        return;',
+      '      }',
       '      var doSend=function(){',
       '      xhr.addEventListener("readystatechange",function(){',
       '        if(xhr.readyState!==4)return;',
@@ -1056,6 +1078,9 @@
   ];
 
   function applyThrottle(cfg) {
+    if (cfg.latencyMs > 0 || cfg.kbps > 0) {
+      netThrottle._last = { latencyMs: cfg.latencyMs, kbps: cfg.kbps };
+    }
     netThrottle.latencyMs = cfg.latencyMs;
     netThrottle.kbps = cfg.kbps;
     netThrottle.enabled = cfg.latencyMs > 0 || cfg.kbps > 0;
@@ -1147,17 +1172,34 @@
     bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
-    bar.querySelector('#bh-thr-btn').addEventListener('click', openThrottleMenu);
-    bar.querySelector('#bh-thr-btn').addEventListener('contextmenu', function (e) {
-      e.preventDefault(); openThrottleCustom();
-    });
-    bar.querySelector('#bh-thr-btn').addEventListener('pointerdown', function () {
-      var btn = this;
-      btn._longT = setTimeout(function () { btn._longT = null; openThrottleCustom(); }, 600);
-    });
-    bar.querySelector('#bh-thr-btn').addEventListener('pointerup', function () {
-      if (this._longT) { clearTimeout(this._longT); this._longT = null; }
-    });
+    // 弱网按钮：单点切换开/关，长按弹菜单选预设
+    (function () {
+      var thrBtn = bar.querySelector('#bh-thr-btn');
+      var longT = null;
+      var fired = false;
+      thrBtn.addEventListener('pointerdown', function () {
+        fired = false;
+        longT = setTimeout(function () {
+          fired = true;
+          openThrottleMenu();
+        }, 600);
+      });
+      thrBtn.addEventListener('pointerup', function () {
+        if (longT) { clearTimeout(longT); longT = null; }
+      });
+      thrBtn.addEventListener('click', function () {
+        if (fired) { fired = false; return; } // 长按已处理
+        // 单点：开 → 关，关 → 上次预设或3G
+        if (netThrottle.enabled) {
+          applyThrottle({ latencyMs: 0, kbps: 0 });
+        } else {
+          // 恢复上次非零预设，默认3G
+          var last = netThrottle._last || { latencyMs: 100, kbps: 200 };
+          applyThrottle(last);
+        }
+      });
+      thrBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); openThrottleMenu(); });
+    }());
     netFilterEl.addEventListener('input', renderNetList);
 
     // 请求列表
@@ -1217,7 +1259,7 @@
   function registerNetTool(erudaObj) {
     if (!erudaObj || !erudaObj.add) return;
     var tool = {
-      name: '抓包',
+      name: 'Network',
       _$el: null,
       init: function ($el) {
         this._$el = $el;
@@ -1283,7 +1325,7 @@
       '  window.__bhNetToolAdded=true;',
       '  window.eruda.add(function(devtools){',
       '    return {',
-      '      name:"\u6293\u5305",',  // 抓包
+      '      name:"Network",',  // tab label
       '      init:function($el){',
       '        this._$el=$el;',
       '        var node=($el&&$el[0])||($el&&$el.get&&$el.get(0))||$el;',
