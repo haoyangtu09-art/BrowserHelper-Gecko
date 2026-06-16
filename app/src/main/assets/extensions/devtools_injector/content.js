@@ -13,11 +13,24 @@
         // Execute in content script scope via Function constructor so that
         // `self` refers to this isolated world's global, making eruda available.
         try {
-          // Wrap to capture return value in case UMD exports via module
-          var fn = new Function(code + '\nreturn typeof eruda !== "undefined" ? eruda : null;');
+          // In the content script isolated world, window.fetch is read-only.
+          // Temporarily make it writable so Eruda's module-level code can
+          // set up its Network panel internals without throwing.
+          var origFetch = self.fetch;
+          try {
+            Object.defineProperty(self, 'fetch', { writable: true, configurable: true, value: origFetch });
+          } catch (ignore) {}
+
+          var fn = new Function(code + '\nreturn typeof eruda !== "undefined" ? eruda : (typeof self.eruda !== "undefined" ? self.eruda : null);');
           var result = fn();
           if (result && !self.eruda) self.eruda = result;
           erudaReady = typeof self.eruda !== 'undefined';
+
+          // Restore fetch to read-only
+          try {
+            Object.defineProperty(self, 'fetch', { writable: false, configurable: false, value: origFetch });
+          } catch (ignore) {}
+
           cb(erudaReady ? null : 'eruda still undefined after Function exec');
         } catch (e) {
           cb(String(e && e.message ? e.message : e));
@@ -43,7 +56,12 @@
             self.eruda._container = null;
             self.eruda._shadowRoot = null;
           }
-          self.eruda.init({ useShadowDom: false });
+          // Exclude the Network tool — it patches window.fetch which is
+          // read-only in the content script isolated world.
+          self.eruda.init({
+            useShadowDom: false,
+            tool: ['console', 'elements', 'resources', 'sources', 'info'],
+          });
           erudaActive = true;
           port.postMessage({ status: 'ok' });
         } catch (e) {
