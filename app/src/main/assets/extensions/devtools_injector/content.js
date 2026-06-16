@@ -1,10 +1,10 @@
 // Content script: load patched Eruda inside the extension isolated world.
-// Page-world <script> injection is blocked by strict CSP on sites such as
-// chatgpt.com, and light-DOM UI is easily corrupted by page CSS.
+// Page-world <script> injection is blocked by strict CSP on strict sites.
 (function () {
   var port = null;
   var erudaReady = false;
   var erudaActive = false;
+  var styleId = 'browserhelper-eruda-fix-style';
   var tools = ['console', 'elements', 'resources', 'sources', 'info'];
 
   function describeError(e) {
@@ -42,6 +42,41 @@
       .catch(function (e) { cb('fetch error: ' + describeError(e)); });
   }
 
+  function installFixStyle() {
+    var old = document.getElementById(styleId);
+    if (old) old.remove();
+
+    var style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = [
+      '#eruda{all:initial!important;z-index:2147483647!important;}',
+      '#eruda .eruda-entry-btn{',
+      '  display:block!important;visibility:visible!important;opacity:1!important;',
+      '  pointer-events:auto!important;filter:none!important;mix-blend-mode:normal!important;',
+      '  z-index:2147483647!important;',
+      '}',
+      '#eruda .eruda-entry-btn .eruda-icon-tool,',
+      '#eruda .eruda-entry-btn [class*="eruda-icon-"],',
+      '#eruda .eruda-entry-btn [class^="eruda-icon-"]{',
+      '  display:inline-block!important;font-family:eruda-icon!important;',
+      '  font-size:16px!important;font-style:normal!important;',
+      '  background:transparent!important;color:#fff!important;',
+      '}',
+      '#eruda .eruda-entry-btn .eruda-icon-tool:before{content:"\\f113"!important;}',
+      '#eruda .eruda-dev-tools{',
+      '  background:var(--background,#fff)!important;opacity:1!important;',
+      '  backdrop-filter:none!important;-webkit-backdrop-filter:none!important;',
+      '}',
+      '#eruda .eruda-tools,#eruda .eruda-tool{background:var(--background,#fff)!important;}',
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function removeFixStyle() {
+    var style = document.getElementById(styleId);
+    if (style) style.remove();
+  }
+
   function getErudaRoot() {
     var host = document.getElementById('eruda');
     if (!host) return null;
@@ -59,14 +94,44 @@
     var style = window.getComputedStyle(el);
     return rect.width > 0 &&
       rect.height > 0 &&
+      rect.right > 0 &&
+      rect.bottom > 0 &&
+      rect.left < window.innerWidth &&
+      rect.top < window.innerHeight &&
       style.display !== 'none' &&
       style.visibility !== 'hidden' &&
       style.opacity !== '0';
   }
 
+  function centerEntryButton() {
+    var entry = getEntryButton();
+    if (!entry || !self.eruda || !self.eruda.position) return false;
+
+    var rect = entry.getBoundingClientRect();
+    var width = rect.width || entry.offsetWidth || 40;
+    var height = rect.height || entry.offsetHeight || 40;
+    var x = Math.max(0, Math.round((window.innerWidth - width) / 2));
+    var y = Math.max(0, Math.round((window.innerHeight - height) / 2));
+    self.eruda.position({ x: x, y: y });
+    return true;
+  }
+
+  function resetPanelOptions() {
+    var devTools = self.eruda && self.eruda._devTools;
+    var config = devTools && devTools.config;
+    try {
+      if (config && config.set) {
+        config.set('transparency', 1);
+        config.set('displaySize', 80);
+      }
+      if (self.eruda && self.eruda.hide) self.eruda.hide();
+    } catch (e) {}
+  }
+
   function verifyVisible(cb) {
     var attempts = 0;
     function check() {
+      centerEntryButton();
       var entry = getEntryButton();
       if (isVisible(entry)) {
         cb(null);
@@ -92,22 +157,20 @@
         self.eruda._shadowRoot = null;
       }
     }
+    removeFixStyle();
     erudaActive = false;
   }
 
   function initEruda(cb) {
     try {
       destroyEruda();
+      installFixStyle();
       self.eruda.init({
-        useShadowDom: true,
+        useShadowDom: false,
         tool: tools,
       });
-      if (self.eruda.position) {
-        self.eruda.position({
-          x: Math.max(0, window.innerWidth - 60),
-          y: Math.max(0, window.innerHeight - 90),
-        });
-      }
+      resetPanelOptions();
+      centerEntryButton();
       verifyVisible(function (err) {
         if (err) {
           destroyEruda();
