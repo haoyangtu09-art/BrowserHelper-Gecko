@@ -54,7 +54,8 @@
           code = code
             .replace(/\bwindow\.getComputedStyle\(/g, 'getComputedStyle(')
             .replace(/\bwindow\.getSelection\(/g, 'getSelection(')
-            .replace(/\bwindow\.matchMedia\(/g, 'matchMedia(');
+            .replace(/\bwindow\.matchMedia\(/g, 'matchMedia(')
+            .replace(/\br=o\.getComputedStyle,i=o\.document\b/g, 'r=getComputedStyle,i=o.document');
           var preamble = [
             'var __bhWindow=document.defaultView||window;',
             'var getComputedStyle=function(el,pseudo){return __bhWindow.getComputedStyle(el,pseudo);};',
