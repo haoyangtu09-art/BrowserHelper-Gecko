@@ -27,6 +27,17 @@
     fetch(browser.runtime.getURL('eruda.min.js'))
       .then(function (r) { return r.text(); })
       .then(function (code) {
+        // Patch font URLs so iconfont loads correctly from the blob context.
+        // eruda embeds a relative url() in @font-face; when run from a blob URL
+        // the relative path resolves to blob: origin and 404s.
+        var fontBase = browser.runtime.getURL('');
+        code = code.replace(
+          /url\(["']?([^"')]+\.(?:woff2?|ttf|eot|svg)[^"')]*?)["']?\)/g,
+          function (m, path) {
+            if (/^(https?|blob|data):/.test(path)) return m;
+            return 'url("' + fontBase + path.replace(/^\.?\//, '') + '")';
+          }
+        );
         // Append init call inside the same script so no separate inline
         // <script> is needed — bypasses pages that block unsafe-inline CSP.
         var initCode = [
@@ -291,6 +302,7 @@
   function toggle() {
     if (erudaActive) {
       destroyActiveEruda();
+      clearActiveState();
       postStatus('destroyed');
       return;
     }
@@ -303,6 +315,7 @@
             return;
           }
           erudaActive = true;
+          saveActiveState();
           postStatus('ok(isolated,blob-blocked:' + err + ')');
           setTimeout(installI18n, 500);
         });
@@ -312,6 +325,7 @@
       initPageEruda(function (pageErr) {
         if (!pageErr) {
           erudaActive = true;
+          saveActiveState();
           postStatus('ok(page)');
           setTimeout(installI18n, 500);
           return;
@@ -322,6 +336,7 @@
             return;
           }
           erudaActive = true;
+          saveActiveState();
           postStatus('ok(isolated,page-err:' + pageErr + ')');
           setTimeout(installI18n, 500);
         });
@@ -342,6 +357,18 @@
     } catch (e) {
       setTimeout(connect, 1000);
     }
+  }
+
+  // 页面导航后自动恢复：把激活状态写入 sessionStorage，
+  // 新页面的 content script 启动时读取并自动触发 toggle。
+  function saveActiveState() {
+    try { sessionStorage.setItem('__bhErudaActive', '1'); } catch (e) {}
+  }
+  function clearActiveState() {
+    try { sessionStorage.removeItem('__bhErudaActive'); } catch (e) {}
+  }
+  function wasActive() {
+    try { return sessionStorage.getItem('__bhErudaActive') === '1'; } catch (e) { return false; }
   }
 
   // ── 网络拦截层 ───────────────────────────────────────────────────────────────
@@ -575,28 +602,25 @@
   // ── 抓包面板 ─────────────────────────────────────────────────────────────────
   var NET_STYLE = [
     '*{box-sizing:border-box;margin:0;padding:0;}',
+    // 面板根：固定浅色主题，不依赖 CSS 变量（shadow root 内变量继承不可靠）
     '#bh-net{display:flex;flex-direction:column;height:100%;font-size:13px;',
     '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
-    '  background:var(--background,#fff);color:var(--foreground,#111);}',
+    '  background:#fff;color:#111;}',
     // 顶部工具栏
     '#bh-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;',
-    '  border-bottom:1px solid var(--border,#d0d7de);flex-wrap:wrap;}',
-    '#bh-bar button,#bh-bar label{font-size:12px;padding:4px 8px;border-radius:4px;',
-    '  border:1px solid var(--border,#d0d7de);background:var(--darker-background,#f6f8fa);',
-    '  color:var(--foreground,#111);cursor:pointer;white-space:nowrap;}',
-    '#bh-bar button:active{opacity:.7;}',
+    '  border-bottom:1px solid #d0d7de;flex-wrap:wrap;background:#f6f8fa;}',
+    '#bh-bar button{font-size:12px;padding:4px 8px;border-radius:4px;',
+    '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;white-space:nowrap;}',
+    '#bh-bar button:active{background:#e8eaed;}',
     '#bh-filter{flex:1;min-width:80px;font-size:12px;padding:4px 6px;border-radius:4px;',
-    '  border:1px solid var(--border,#d0d7de);background:var(--darker-background,#f6f8fa);',
-    '  color:var(--foreground,#111);}',
+    '  border:1px solid #d0d7de;background:#fff;color:#111;}',
     // 请求列表
-    '#bh-list{flex:1;overflow-y:auto;border-bottom:1px solid var(--border,#d0d7de);}',
+    '#bh-list{flex:1;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
     '.bh-row{display:flex;align-items:center;padding:8px;min-height:44px;',
-    '  border-bottom:1px solid var(--border,#d0d7de);cursor:pointer;gap:6px;}',
-    '.bh-row:active{background:var(--highlight,#dbeafe);}',
-    '.bh-row.bh-sel{background:var(--highlight,#dbeafe);}',
-    '.bh-method{font-weight:700;min-width:38px;font-size:11px;}',
-    '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;}',
-    '.bh-status{min-width:32px;text-align:right;font-size:12px;font-weight:700;}',
+    '  border-bottom:1px solid #eaecef;cursor:pointer;gap:6px;background:#fff;}',
+    '.bh-row:active,.bh-row.bh-sel{background:#dbeafe;}',
+    '.bh-method{font-weight:700;min-width:38px;font-size:11px;color:#111;}',
+    '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#111;}',
     '.bh-dur{min-width:38px;text-align:right;font-size:11px;color:#888;}',
     '.bh-tag{font-size:10px;padding:1px 4px;border-radius:3px;background:#6366f1;color:#fff;}',
     // 状态颜色
@@ -605,41 +629,37 @@
     '.bh-status{font-size:12px;font-weight:700;line-height:1.2;}',
     '.bh-status-desc{font-size:10px;color:#888;line-height:1.2;}',
     // 详情区
-    '#bh-detail{max-height:55%;overflow:hidden;display:flex;flex-direction:column;}',
-    '#bh-detail-tabs{display:flex;border-bottom:1px solid var(--border,#d0d7de);',
-    '  overflow-x:auto;}',
-    '.bh-dtab{padding:6px 10px;font-size:12px;cursor:pointer;white-space:nowrap;',
+    '#bh-detail{max-height:55%;overflow:hidden;display:flex;flex-direction:column;background:#fff;}',
+    '#bh-detail-tabs{display:flex;border-bottom:1px solid #d0d7de;overflow-x:auto;background:#f6f8fa;}',
+    '.bh-dtab{padding:6px 10px;font-size:12px;cursor:pointer;white-space:nowrap;color:#111;',
     '  border-bottom:2px solid transparent;}',
-    '.bh-dtab.active{border-bottom-color:var(--primary,#2563eb);font-weight:700;}',
-    '#bh-detail-body{flex:1;overflow-y:auto;padding:8px;font-size:12px;',
-    '  white-space:pre-wrap;word-break:break-all;font-family:monospace;}',
+    '.bh-dtab.active{border-bottom-color:#2563eb;font-weight:700;}',
+    '#bh-detail-body{flex:1;overflow-y:auto;padding:8px;font-size:12px;color:#111;',
+    '  white-space:pre-wrap;word-break:break-all;font-family:monospace;background:#fff;}',
     '#bh-detail-acts{display:flex;gap:6px;padding:6px 8px;flex-wrap:wrap;',
-    '  border-top:1px solid var(--border,#d0d7de);}',
+    '  border-top:1px solid #d0d7de;background:#f6f8fa;}',
     '#bh-detail-acts button{font-size:12px;padding:4px 8px;border-radius:4px;',
-    '  border:1px solid var(--border,#d0d7de);background:var(--darker-background,#f6f8fa);',
-    '  color:var(--foreground,#111);cursor:pointer;}',
-    '#bh-detail-acts button:active{opacity:.7;}',
-    // 模态弹窗
+    '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
+    '#bh-detail-acts button:active{background:#e8eaed;}',
+    // 模态弹窗（挂到 document.body，在 shadow root 外，用固定色）
     '#bh-modal{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;',
     '  justify-content:center;background:rgba(0,0,0,.5);}',
-    '#bh-modal-box{background:var(--background,#fff);border-radius:8px;',
+    '#bh-modal-box{background:#fff;border-radius:8px;color:#111;',
     '  width:90vw;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;}',
     '#bh-modal-title{padding:10px 12px;font-weight:700;font-size:14px;',
-    '  border-bottom:1px solid var(--border,#d0d7de);}',
+    '  border-bottom:1px solid #d0d7de;}',
     '#bh-modal-body{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;}',
     '#bh-modal-body label{font-size:12px;font-weight:600;}',
     '#bh-modal-body input,#bh-modal-body textarea,#bh-modal-body select{',
     '  width:100%;font-size:12px;padding:6px;border-radius:4px;',
-    '  border:1px solid var(--border,#d0d7de);',
-    '  background:var(--darker-background,#f6f8fa);color:var(--foreground,#111);',
-    '  font-family:monospace;}',
+    '  border:1px solid #d0d7de;background:#f6f8fa;color:#111;font-family:monospace;}',
     '#bh-modal-body textarea{resize:vertical;min-height:80px;}',
     '#bh-modal-acts{display:flex;gap:8px;padding:8px 12px;',
-    '  border-top:1px solid var(--border,#d0d7de);justify-content:flex-end;}',
+    '  border-top:1px solid #d0d7de;justify-content:flex-end;}',
     '#bh-modal-acts button{font-size:13px;padding:6px 14px;border-radius:4px;',
-    '  border:1px solid var(--border,#d0d7de);cursor:pointer;}',
-    '#bh-btn-ok{background:var(--primary,#2563eb);color:#fff;border-color:var(--primary,#2563eb);}',
-    '#bh-btn-cancel{background:var(--darker-background,#f6f8fa);color:var(--foreground,#111);}',
+    '  border:1px solid #d0d7de;cursor:pointer;}',
+    '#bh-btn-ok{background:#2563eb;color:#fff;border-color:#2563eb;}',
+    '#bh-btn-cancel{background:#f6f8fa;color:#111;}',
     // 空状态
     '#bh-empty{padding:24px;text-align:center;color:#888;font-size:13px;}',
     // 断点高亮
@@ -1003,13 +1023,11 @@
     var wrap = document.createElement('div');
     wrap.id = 'bh-net';
 
-    // 注入样式（只注一次，挂到 document.head）
-    if (!document.getElementById('bh-net-style')) {
-      var style = document.createElement('style');
-      style.id = 'bh-net-style';
-      style.textContent = NET_STYLE;
-      (document.head || document.documentElement).appendChild(style);
-    }
+    // 样式注入：eruda tool 面板在 shadow root 里渲染，document.head 的样式不生效。
+    // 把 <style> 放到 wrap 内部，eruda 把 wrap 挂进 shadow root 时样式随之进入。
+    var style = document.createElement('style');
+    style.textContent = NET_STYLE;
+    wrap.appendChild(style);
 
     // 顶部工具栏
     var bar = document.createElement('div');
@@ -1157,4 +1175,14 @@
   // ── /抓包面板 ────────────────────────────────────────────────────────────────
 
   connect();
+
+  // 页面导航后自动恢复：如果上一个页面是激活状态，新页面加载完也自动注入
+  if (wasActive()) {
+    // 等 DOM ready 再恢复，避免在 document-start 时 body 还不存在
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () { toggle(); });
+    } else {
+      toggle();
+    }
+  }
 })();
