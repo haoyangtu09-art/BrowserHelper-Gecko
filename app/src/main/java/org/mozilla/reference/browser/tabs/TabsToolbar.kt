@@ -7,6 +7,7 @@ package org.mozilla.reference.browser.tabs
 import android.content.Context
 import android.util.AttributeSet
 import mozilla.components.feature.tabs.tabstray.TabsFeature
+import org.mozilla.reference.browser.BrowserUrls
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.ext.components
 import mozilla.components.ui.icons.R as iconsR
@@ -34,7 +35,7 @@ class TabsToolbar
                 R.id.newTab -> {
                     when (isPrivateTray) {
                         true -> tabsUseCases.addTab.invoke("about:privatebrowsing", selectTab = true, private = true)
-                        false -> tabsUseCases.addTab.invoke("about:blank", selectTab = true)
+                        false -> tabsUseCases.addTab.invoke(BrowserUrls.DEFAULT_NEW_TAB, selectTab = true)
                     }
                     closeTabsTray?.invoke()
                 }

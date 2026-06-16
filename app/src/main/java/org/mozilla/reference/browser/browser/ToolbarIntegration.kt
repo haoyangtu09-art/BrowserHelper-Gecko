@@ -47,6 +47,7 @@ import mozilla.components.feature.toolbar.ToolbarFeature
 import mozilla.components.lib.state.ext.flow
 import mozilla.components.support.base.feature.LifecycleAwareFeature
 import mozilla.components.support.base.feature.UserInteractionHandler
+import org.mozilla.reference.browser.BrowserUrls
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.AddonsActivity
 import org.mozilla.reference.browser.cookie.CookieAction
@@ -225,7 +226,7 @@ class ToolbarIntegration(
                 sessionUseCases.reload.invoke()
             },
         )
-        homeButton?.setOnClickListener { sessionUseCases.loadUrl("about:blank") }
+        homeButton?.setOnClickListener { sessionUseCases.loadUrl(BrowserUrls.DEFAULT_NEW_TAB) }
         backButton?.setOnClickListener { sessionUseCases.goBack.invoke() }
         forwardButton?.setOnClickListener { sessionUseCases.goForward.invoke() }
 
@@ -331,7 +332,7 @@ class ToolbarIntegration(
                 setMargins(dp(2), dp(4), dp(6), 0)
             }
             setOnClickListener {
-                tabsUseCases.addTab("about:blank", selectTab = true)
+                tabsUseCases.addTab(BrowserUrls.DEFAULT_NEW_TAB, selectTab = true)
             }
         }
 
