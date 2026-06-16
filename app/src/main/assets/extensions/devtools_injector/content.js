@@ -1,18 +1,29 @@
-// Content script: loads patched eruda into the page's real window.
-// Uses fetch (from content script, which bypasses page CSP) to get the
-// eruda source, creates a Blob URL, and injects it via <script src>.
-// This runs eruda in the page's true window, avoiding isolated-world limits.
+// Content script: prefer Eruda in the page's real window. If a strict CSP
+// blocks page-world script execution, fall back to Eruda's native entry button
+// in the extension isolated world.
 (function () {
   var port = null;
   var blobUrl = null;
-  var erudaReady = false;
+  var pageErudaReady = false;
+  var isolatedErudaReady = false;
   var erudaActive = false;
-  var fallbackHost = null;
+  var erudaMode = null;
+  var fixStyleId = 'browserhelper-eruda-native-fix';
+  var tools = ['console', 'elements', 'resources', 'sources', 'info'];
 
-  function loadEruda(cb) {
-    if (erudaReady) { cb(null); return; }
+  function postStatus(status) {
+    try {
+      if (port) port.postMessage({ status: status });
+    } catch (e) {}
+  }
 
-    // fetch() in content script bypasses page CSP.
+  function describeError(e) {
+    return String(e && e.message ? e.message : e);
+  }
+
+  function loadPageEruda(cb) {
+    if (pageErudaReady) { cb(null); return; }
+
     fetch(browser.runtime.getURL('eruda.min.js'))
       .then(function (r) { return r.blob(); })
       .then(function (blob) {
@@ -21,7 +32,7 @@
         script.src = blobUrl;
         script.onload = function () {
           script.remove();
-          erudaReady = true;
+          pageErudaReady = true;
           cb(null);
         };
         script.onerror = function () {
@@ -30,7 +41,31 @@
         };
         (document.head || document.documentElement).appendChild(script);
       })
-      .catch(function (e) { cb('fetch error: ' + e); });
+      .catch(function (e) { cb('fetch error: ' + describeError(e)); });
+  }
+
+  function loadIsolatedEruda(cb) {
+    if (isolatedErudaReady && self.eruda) { cb(null); return; }
+
+    fetch(browser.runtime.getURL('eruda.min.js'))
+      .then(function (r) { return r.text(); })
+      .then(function (code) {
+        try {
+          var preamble = [
+            'var getComputedStyle=window.getComputedStyle.bind(window);',
+            'var getSelection=window.getSelection?window.getSelection.bind(window):function(){return null;};',
+            'var matchMedia=window.matchMedia?window.matchMedia.bind(window):function(){return{matches:false,addListener:function(){},removeListener:function(){}};};',
+          ].join('');
+          var fn = new Function(preamble + code + '\nreturn typeof eruda!=="undefined"?eruda:self.eruda;');
+          var result = fn.call(self);
+          if (result && !self.eruda) self.eruda = result;
+          isolatedErudaReady = !!self.eruda;
+          cb(isolatedErudaReady ? null : 'eruda undefined after isolated exec');
+        } catch (e) {
+          cb('isolated exec error: ' + describeError(e));
+        }
+      })
+      .catch(function (e) { cb('isolated fetch error: ' + describeError(e)); });
   }
 
   function runInPage(js) {
@@ -40,20 +75,19 @@
     s.remove();
   }
 
-  function postStatus(status) {
-    try {
-      if (port) port.postMessage({ status: status });
-    } catch (e) {}
+  function getErudaRoot() {
+    var host = document.getElementById('eruda');
+    if (!host) return null;
+    return host.shadowRoot || host;
   }
 
-  function applyStyles(el, styles) {
-    Object.keys(styles).forEach(function (key) {
-      el.style.setProperty(key, styles[key], 'important');
-    });
+  function getEntryButton() {
+    var root = getErudaRoot();
+    return root ? root.querySelector('.eruda-entry-btn') : null;
   }
 
-  function realEntryVisible() {
-    var btn = document.querySelector('#eruda .eruda-entry-btn');
+  function entryVisible() {
+    var btn = getEntryButton();
     if (!btn) return false;
     var rect = btn.getBoundingClientRect();
     var style = window.getComputedStyle(btn);
@@ -68,15 +102,15 @@
       style.opacity !== '0';
   }
 
-  function verifyRealEntry(cb) {
+  function verifyEntry(cb) {
     var tries = 0;
     function check() {
-      if (realEntryVisible()) {
+      if (entryVisible()) {
         cb(true);
         return;
       }
       tries += 1;
-      if (tries < 12) {
+      if (tries < 16) {
         setTimeout(check, 100);
       } else {
         cb(false);
@@ -85,115 +119,218 @@
     check();
   }
 
-  function removeFallbackButton() {
-    if (fallbackHost) {
-      fallbackHost.remove();
-      fallbackHost = null;
-    }
+  function installFixStyle() {
+    var old = document.getElementById(fixStyleId);
+    if (old) old.remove();
+
+    var style = document.createElement('style');
+    style.id = fixStyleId;
+    style.textContent = [
+      '#eruda{all:initial!important;z-index:2147483647!important;}',
+      '#eruda .eruda-entry-btn{visibility:visible!important;opacity:1!important;z-index:2147483647!important;}',
+      '#eruda .eruda-dev-tools{background:#fff!important;opacity:1!important;color:#111!important;}',
+      '#eruda .eruda-tools,#eruda .eruda-tool{background:#fff!important;}',
+      '#eruda .eruda-tab,#eruda .eruda-notification,#eruda .eruda-modal{background:#fff!important;}',
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(style);
   }
 
-  function showFallbackButton() {
-    removeFallbackButton();
-
-    fallbackHost = document.createElement('div');
-    fallbackHost.id = 'browserhelper-devtools-fallback';
-    applyStyles(fallbackHost, {
-      position: 'fixed',
-      left: '50%',
-      top: '50%',
-      transform: 'translate(-50%, -50%)',
-      width: '56px',
-      height: '56px',
-      'z-index': '2147483647',
-      'pointer-events': 'auto',
+  function applyStyles(el, styles) {
+    if (!el) return;
+    Object.keys(styles).forEach(function (key) {
+      el.style.setProperty(key, styles[key], 'important');
     });
+  }
 
-    var button = document.createElement('button');
-    button.type = 'button';
-    button.setAttribute('aria-label', 'DevTools');
-    button.innerHTML = '&#9881;';
-    applyStyles(button, {
-      width: '56px',
-      height: '56px',
-      margin: '0',
-      padding: '0',
-      border: '0',
-      'border-radius': '50%',
-      background: '#111827',
-      color: '#ffffff',
-      'box-shadow': '0 8px 24px rgba(0,0,0,.35)',
-      'font-size': '28px',
-      'line-height': '56px',
-      'font-family': 'sans-serif',
-      'text-align': 'center',
-      cursor: 'pointer',
+  function patchIsolatedPanelStyles() {
+    var host = document.getElementById('eruda');
+    if (!host) return;
+    var vars = {
+      '--background': '#fff',
+      '--darker-background': '#f6f8fa',
+      '--foreground': '#111',
+      '--border': '#d0d7de',
+      '--primary': '#2563eb',
+      '--highlight': '#dbeafe',
+    };
+    applyStyles(host, vars);
+    applyStyles(host.querySelector('.eruda-container'), vars);
+    applyStyles(host.querySelector('.eruda-dev-tools'), {
+      background: '#fff',
+      color: '#111',
       opacity: '1',
-      'pointer-events': 'auto',
+      'backdrop-filter': 'none',
+      '-webkit-backdrop-filter': 'none',
     });
-    button.addEventListener('click', function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      var realBtn = document.querySelector('#eruda .eruda-entry-btn');
-      if (realEntryVisible() && realBtn) {
-        realBtn.click();
-      } else {
-        postStatus('ok');
+    Array.prototype.forEach.call(
+      host.querySelectorAll('.eruda-tools,.eruda-tool,.eruda-tab,.eruda-notification,.eruda-modal'),
+      function (el) {
+        applyStyles(el, {
+          background: '#fff',
+          opacity: '1',
+        });
       }
-    }, true);
-    fallbackHost.appendChild(button);
-    (document.documentElement || document.body).appendChild(fallbackHost);
+    );
+  }
+
+  function removeFixStyle() {
+    var style = document.getElementById(fixStyleId);
+    if (style) style.remove();
+  }
+
+  function centerIsolatedEntry() {
+    var entry = getEntryButton();
+    if (!entry || !self.eruda || !self.eruda.position) return;
+    var rect = entry.getBoundingClientRect();
+    var width = rect.width || entry.offsetWidth || 40;
+    var height = rect.height || entry.offsetHeight || 40;
+    self.eruda.position({
+      x: Math.max(0, Math.round((window.innerWidth - width) / 2)),
+      y: Math.max(0, Math.round((window.innerHeight - height) / 2)),
+    });
+  }
+
+  function resetIsolatedPanel() {
+    var devTools = self.eruda && self.eruda._devTools;
+    var config = devTools && devTools.config;
+    try {
+      if (config && config.set) {
+        config.set('transparency', 1);
+        config.set('displaySize', 80);
+      }
+      if (self.eruda && self.eruda.hide) self.eruda.hide();
+    } catch (e) {}
+  }
+
+  function initPageEruda(cb) {
+    runInPage(
+      '(function(){' +
+      '  try{' +
+      '    if(window.eruda&&window.eruda._isInit){' +
+      '      window.eruda._isInit=false;' +
+      '      window.eruda._container=null;' +
+      '      window.eruda._shadowRoot=null;' +
+      '    }' +
+      '    window.eruda.init({useShadowDom:false,tool:["console","elements","resources","sources","info"]});' +
+      '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}' +
+      '    function centerEntry(){' +
+      '      try{' +
+      '        var btn=document.querySelector("#eruda .eruda-entry-btn");' +
+      '        if(!btn||!window.eruda.position)return;' +
+      '        var r=btn.getBoundingClientRect();' +
+      '        var w=r.width||btn.offsetWidth||40;' +
+      '        var h=r.height||btn.offsetHeight||40;' +
+      '        window.eruda.position({' +
+      '          x:Math.max(0,Math.round((window.innerWidth-w)/2)),' +
+      '          y:Math.max(0,Math.round((window.innerHeight-h)/2))' +
+      '        });' +
+      '      }catch(e){}' +
+      '    }' +
+      '    centerEntry();' +
+      '    requestAnimationFrame(centerEntry);' +
+      '    setTimeout(centerEntry,300);' +
+      '  }catch(e){}' +
+      '})();'
+    );
+
+    verifyEntry(function (visible) {
+      if (visible) {
+        erudaMode = 'page';
+        cb(null);
+      } else {
+        cb('page eruda entry not visible');
+      }
+    });
+  }
+
+  function initIsolatedEruda(cb) {
+    loadIsolatedEruda(function (err) {
+      if (err) { cb(err); return; }
+
+      try {
+        var old = document.getElementById('eruda');
+        if (old) old.remove();
+        installFixStyle();
+        if (self.eruda._isInit) {
+          try { self.eruda.destroy(); } catch (e) {}
+          self.eruda._isInit = false;
+          self.eruda._container = null;
+          self.eruda._shadowRoot = null;
+        }
+        self.eruda.init({
+          useShadowDom: false,
+          tool: tools,
+        });
+        resetIsolatedPanel();
+        patchIsolatedPanelStyles();
+        centerIsolatedEntry();
+        requestAnimationFrame(patchIsolatedPanelStyles);
+        requestAnimationFrame(centerIsolatedEntry);
+        setTimeout(patchIsolatedPanelStyles, 300);
+        setTimeout(centerIsolatedEntry, 300);
+        verifyEntry(function (visible) {
+          if (!visible) {
+            removeFixStyle();
+            cb('isolated eruda entry not visible');
+            return;
+          }
+          erudaMode = 'isolated';
+          cb(null);
+        });
+      } catch (e) {
+        removeFixStyle();
+        cb('isolated init error: ' + describeError(e));
+      }
+    });
+  }
+
+  function destroyActiveEruda() {
+    if (erudaMode === 'isolated') {
+      try { if (self.eruda && self.eruda._isInit) self.eruda.destroy(); } catch (e) {}
+      removeFixStyle();
+    } else {
+      runInPage('try{eruda.destroy();}catch(e){}');
+    }
+    erudaMode = null;
+    erudaActive = false;
   }
 
   function toggle() {
     if (erudaActive) {
-      runInPage('try{eruda.destroy();}catch(e){}');
-      removeFallbackButton();
-      erudaActive = false;
-      port.postMessage({ status: 'destroyed' });
-    } else {
-      loadEruda(function (err) {
-        if (err) {
-          showFallbackButton();
+      destroyActiveEruda();
+      postStatus('destroyed');
+      return;
+    }
+
+    loadPageEruda(function (err) {
+      if (err) {
+        initIsolatedEruda(function (isolatedErr) {
+          if (isolatedErr) {
+            postStatus('load error: ' + isolatedErr);
+            return;
+          }
           erudaActive = true;
-          port.postMessage({ status: 'ok' });
+          postStatus('ok');
+        });
+        return;
+      }
+
+      initPageEruda(function (pageErr) {
+        if (!pageErr) {
+          erudaActive = true;
+          postStatus('ok');
           return;
         }
-        runInPage(
-          '(function(){' +
-          '  try{' +
-          '    if(window.eruda&&window.eruda._isInit){' +
-          '      window.eruda._isInit=false;' +
-          '      window.eruda._container=null;' +
-          '      window.eruda._shadowRoot=null;' +
-          '    }' +
-          '    window.eruda.init({useShadowDom:false,tool:["console","elements","resources","sources","info"]});' +
-          '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}' +
-          '    function centerEntry(){' +
-          '      try{' +
-          '        var btn=document.querySelector("#eruda .eruda-entry-btn");' +
-          '        if(!btn||!window.eruda.position)return;' +
-          '        var r=btn.getBoundingClientRect();' +
-          '        var w=r.width||btn.offsetWidth||40;' +
-          '        var h=r.height||btn.offsetHeight||40;' +
-          '        window.eruda.position({' +
-          '          x:Math.max(0,Math.round((window.innerWidth-w)/2)),' +
-          '          y:Math.max(0,Math.round((window.innerHeight-h)/2))' +
-          '        });' +
-          '      }catch(e){}' +
-          '    }' +
-          '    centerEntry();' +
-          '    requestAnimationFrame(centerEntry);' +
-          '    setTimeout(centerEntry,300);' +
-          '  }catch(e){}' +
-          '})();'
-        );
-        verifyRealEntry(function (visible) {
-          if (!visible) showFallbackButton();
+        initIsolatedEruda(function (isolatedErr) {
+          if (isolatedErr) {
+            postStatus('load error: ' + pageErr + '; ' + isolatedErr);
+            return;
+          }
           erudaActive = true;
-          port.postMessage({ status: 'ok' });
+          postStatus('ok');
         });
       });
-    }
+    });
   }
 
   function connect() {
