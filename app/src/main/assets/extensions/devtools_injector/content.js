@@ -9,13 +9,14 @@
       erudaActive = false;
     } else {
       try {
-        // Force reset in case _isInit is stale from a previous context
         if (typeof eruda !== 'undefined' && eruda._isInit) {
           eruda._isInit = false;
           eruda._container = null;
           eruda._shadowRoot = null;
         }
-        eruda.init();
+        // Disable shadow DOM — content script world's attachShadow may not
+        // render visibly in GeckoView's isolated context.
+        eruda.init({ useShadowDom: false });
         erudaActive = true;
       } catch (e) {}
     }
@@ -38,3 +39,4 @@
 
   connect();
 })();
+
