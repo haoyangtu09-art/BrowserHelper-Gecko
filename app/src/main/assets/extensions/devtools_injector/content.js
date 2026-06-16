@@ -321,7 +321,7 @@
             return;
           }
           erudaActive = true;
-          postStatus('ok');
+          postStatus('ok(isolated,blob-blocked:' + err + ')');
         });
         return;
       }
@@ -329,7 +329,7 @@
       initPageEruda(function (pageErr) {
         if (!pageErr) {
           erudaActive = true;
-          postStatus('ok');
+          postStatus('ok(page)');
           return;
         }
         initIsolatedEruda(function (isolatedErr) {
@@ -338,7 +338,7 @@
             return;
           }
           erudaActive = true;
-          postStatus('ok');
+          postStatus('ok(isolated,page-err:' + pageErr + ')');
         });
       });
     });
