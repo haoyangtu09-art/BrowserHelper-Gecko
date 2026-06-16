@@ -91,6 +91,9 @@
       .then(function (r) { return r.text(); })
       .then(function (code) {
         try {
+          // 同 page 模式：把 @font-face 注入 light DOM，否则 isolated 模式下
+          // (强 CSP 站点如 github) 图标字体不生效，齿轮显示为长方块。
+          injectErudaFontFace(code);
           code = code
             .replace(/\bwindow\.getComputedStyle\(/g, 'getComputedStyle(')
             .replace(/\bwindow\.getSelection\(/g, 'getSelection(')
@@ -115,10 +118,31 @@
   }
 
   function runInPage(js) {
-    var s = document.createElement('script');
-    s.textContent = js;
-    (document.head || document.documentElement).appendChild(s);
-    s.remove();
+    // 用 blob URL 注入，而不是 inline <script>。
+    // 很多强 CSP 站点（chatgpt 等）允许 blob: script-src 但禁止 unsafe-inline，
+    // 之前用 s.textContent 的 inline 脚本会被静默拦截，导致 Network tab 注册、
+    // 拦截器注入、汉化注入全部失效。eruda 本体能加载正是因为它走的是 blob URL。
+    try {
+      var blob = new Blob([js], { type: 'application/javascript' });
+      var url = URL.createObjectURL(blob);
+      var s = document.createElement('script');
+      s.src = url;
+      s.onload = function () { s.remove(); URL.revokeObjectURL(url); };
+      s.onerror = function () {
+        s.remove(); URL.revokeObjectURL(url);
+        // blob 也被拦截时回退到 inline（弱 CSP 站点）
+        var inl = document.createElement('script');
+        inl.textContent = js;
+        (document.head || document.documentElement).appendChild(inl);
+        inl.remove();
+      };
+      (document.head || document.documentElement).appendChild(s);
+    } catch (e) {
+      var s2 = document.createElement('script');
+      s2.textContent = js;
+      (document.head || document.documentElement).appendChild(s2);
+      s2.remove();
+    }
   }
 
   function getErudaRoot() {
@@ -670,36 +694,63 @@
 
   // ── Eruda 汉化 ──────────────────────────────────────────────────────────────
   var I18N_MAP = [
+    // 顶部 Tab 名（DOM 里是小写，靠 CSS text-transform:capitalize 显示成首字母大写，
+    // 所以这里必须用小写键才能匹配到文本节点）
+    ['console', '控制台'], ['elements', '元素'], ['network', '网络'],
+    ['resources', '存储'], ['sources', '源码'], ['info', '信息'],
+    ['snippets', '代码片段'], ['settings', '设置'],
     // Console 面板
     ['Clear', '清空'], ['Filter', '过滤'], ['Preserve Log', '保留日志'],
     ['Show Timestamp', '显示时间戳'], ['Log', '日志'], ['Warn', '警告'],
     ['Error', '错误'], ['Info', '信息'], ['Debug', '调试'],
     ['Verbose', '详细'], ['Output', '输出'], ['JS', 'JS'],
+    ['All', '全部'], ['Console', '控制台'],
     // Elements 面板
     ['Computed', '计算值'], ['Event Listeners', '事件监听器'],
-    ['Styles', '样式'], ['Dom Tree', 'DOM 树'],
+    ['Styles', '样式'], ['Dom Tree', 'DOM 树'], ['Attributes', '属性'],
     // Resources 面板
     ['Local Storage', '本地存储'], ['Session Storage', '会话存储'],
     ['IndexedDB', 'IndexedDB'], ['Cache Storage', '缓存存储'],
-    ['ServiceWorker', 'Service Worker'],
+    ['ServiceWorker', 'Service Worker'], ['Cookie', 'Cookie'],
+    ['Scripts', '脚本'], ['Stylesheets', '样式表'], ['Images', '图片'],
     // Info 面板
     ['Location', '页面地址'], ['System', '系统信息'], ['About', '关于'],
+    ['Backend', '后端'], ['Screen', '屏幕'],
     // Settings 面板
     ['Theme', '主题'], ['Transparency', '透明度'], ['Display Size', '显示大小'],
     ['Dark', '深色'], ['Light', '浅色'], ['Apply', '应用'],
     ['Close', '关闭'], ['Default', '默认'], ['Settings', '设置'],
+    ['Log Level', '日志级别'], ['Max Log Number', '最大日志数'],
+    ['Overflow', '溢出'], ['Wrap Long Lines', '长行换行'],
     // 通用按钮/标签
     ['Refresh', '刷新'], ['Copy', '复制'], ['Delete', '删除'],
     ['Expand', '展开'], ['Collapse', '折叠'], ['Search', '搜索'],
     ['Clear All', '全部清空'], ['Select All', '全选'],
     ['Cancel', '取消'], ['Confirm', '确认'], ['Save', '保存'],
     ['Reset', '重置'], ['Enable', '启用'], ['Disable', '禁用'],
-    ['Open', '打开'],
+    ['Open', '打开'], ['Add', '添加'], ['Edit', '编辑'],
     // Sources 面板（部分标签）
     ['Beautify', '格式化'], ['Word Wrap', '自动换行'],
   ];
 
   var I18N_DICT = null;
+  // 数据展示区：这些容器里的文本是用户数据（console 输出、DOM 内容、存储值、
+  // 网络数据等），绝不能翻译，否则数据会被破坏。只翻译 UI 外壳（tab、按钮、设置项）。
+  function inDataRegion(node) {
+    var el = node.parentNode;
+    while (el && el.nodeType === 1) {
+      var cls = el.className;
+      if (typeof cls === 'string') {
+        // luna-* 是 eruda 用来渲染数据的组件库；eruda-logs 是控制台输出区
+        if (/luna-console|luna-data-grid|luna-dom-viewer|luna-object-viewer|luna-json|eruda-logs|eruda-resources|eruda-sources|bh-net/.test(cls)) {
+          return true;
+        }
+      }
+      el = el.parentNode;
+    }
+    return false;
+  }
+
   function replaceTextNodes(root) {
     if (!root) return;
     if (!I18N_DICT) {
@@ -712,7 +763,9 @@
       var t = v.trim();
       if (!t) return;
       var zh = I18N_DICT[t];
-      if (zh && zh !== t) node.nodeValue = v.replace(t, zh);
+      if (!zh || zh === t) return;
+      if (inDataRegion(node)) return; // 数据区不翻译
+      node.nodeValue = v.replace(t, zh);
     }
     if (root.nodeType === 3) { tr(root); return; }
     if (root.nodeType !== 1 && root.nodeType !== 11) return;
@@ -733,11 +786,23 @@
         '  var root=host.shadowRoot;',
         '  var MAP=' + mapJson + ';',
         '  var DICT={};for(var k=0;k<MAP.length;k++){DICT[MAP[k][0]]=MAP[k][1];}',
+        '  var DATA_RE=/luna-console|luna-data-grid|luna-dom-viewer|luna-object-viewer|luna-json|eruda-logs|eruda-resources|eruda-sources|bh-net/;',
+        '  function inData(node){',
+        '    var el=node.parentNode;',
+        '    while(el&&el.nodeType===1){',
+        '      var c=el.className;',
+        '      if(typeof c==="string"&&DATA_RE.test(c))return true;',
+        '      el=el.parentNode;',
+        '    }',
+        '    return false;',
+        '  }',
         '  function tr(node){',
         '    var v=node.nodeValue;if(!v)return;',
         '    var t=v.trim();if(!t)return;',
         '    var zh=DICT[t];',
-        '    if(zh&&zh!==t){node.nodeValue=v.replace(t,zh);}',  // 保留原前后空白
+        '    if(!zh||zh===t)return;',
+        '    if(inData(node))return;',  // 数据区不翻译，保护用户数据
+        '    node.nodeValue=v.replace(t,zh);',  // 保留原前后空白
         '  }',
         '  function walk(el){',
         '    if(!el)return;',
@@ -781,44 +846,45 @@
   var NET_STYLE = [
     '*{box-sizing:border-box;margin:0;padding:0;}',
     // 面板根：固定浅色主题，不依赖 CSS 变量（shadow root 内变量继承不可靠）
-    '#bh-net{display:flex;flex-direction:column;height:100%;font-size:13px;',
+    '#bh-net{display:flex;flex-direction:column;height:100%;font-size:15px;',
     '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
     '  background:#fff;color:#111;}',
     // 顶部工具栏
-    '#bh-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;',
+    '#bh-bar{display:flex;align-items:center;gap:8px;padding:8px 10px;',
     '  border-bottom:1px solid #d0d7de;flex-wrap:wrap;background:#f6f8fa;}',
-    '#bh-bar button{font-size:12px;padding:4px 8px;border-radius:4px;',
+    '#bh-bar button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;white-space:nowrap;}',
     '#bh-bar button:active{background:#e8eaed;}',
-    '#bh-filter{flex:1;min-width:80px;font-size:12px;padding:4px 6px;border-radius:4px;',
+    '#bh-filter{flex:1;min-width:100px;font-size:14px;padding:8px 10px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;}',
     // 请求列表
     '#bh-list{flex:1;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
-    '.bh-row{display:flex;align-items:center;padding:8px;min-height:44px;',
-    '  border-bottom:1px solid #eaecef;cursor:pointer;gap:6px;background:#fff;}',
+    '#bh-empty{padding:20px;text-align:center;color:#888;font-size:14px;}',
+    '.bh-row{display:flex;align-items:center;padding:12px 10px;min-height:56px;',
+    '  border-bottom:1px solid #eaecef;cursor:pointer;gap:8px;background:#fff;}',
     '.bh-row:active,.bh-row.bh-sel{background:#dbeafe;}',
-    '.bh-method{font-weight:700;min-width:38px;font-size:11px;color:#111;}',
-    '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:#111;}',
-    '.bh-dur{min-width:38px;text-align:right;font-size:11px;color:#888;}',
-    '.bh-tag{font-size:10px;padding:1px 4px;border-radius:3px;background:#6366f1;color:#fff;}',
+    '.bh-method{font-weight:700;min-width:46px;font-size:13px;color:#111;}',
+    '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#111;}',
+    '.bh-dur{min-width:46px;text-align:right;font-size:12px;color:#888;}',
+    '.bh-tag{font-size:11px;padding:2px 6px;border-radius:3px;background:#6366f1;color:#fff;}',
     // 状态颜色
     '.s2{color:#16a34a;}.s3{color:#2563eb;}.s4{color:#ea580c;}.s5{color:#dc2626;}.s0{color:#888;}.s-err{color:#dc2626;font-style:italic;}',
-    '.bh-status-wrap{display:flex;flex-direction:column;align-items:flex-end;min-width:52px;}',
-    '.bh-status{font-size:12px;font-weight:700;line-height:1.2;}',
-    '.bh-status-desc{font-size:10px;color:#888;line-height:1.2;}',
+    '.bh-status-wrap{display:flex;flex-direction:column;align-items:flex-end;min-width:60px;}',
+    '.bh-status{font-size:14px;font-weight:700;line-height:1.2;}',
+    '.bh-status-desc{font-size:11px;color:#888;line-height:1.2;}',
     // 详情区
     '#bh-detail{max-height:55%;overflow:hidden;display:flex;flex-direction:column;background:#fff;}',
     '#bh-detail-tabs{display:flex;border-bottom:1px solid #d0d7de;overflow-x:auto;background:#f6f8fa;}',
-    '.bh-dtab{padding:6px 10px;font-size:12px;cursor:pointer;white-space:nowrap;color:#111;',
-    '  border-bottom:2px solid transparent;}',
+    '.bh-dtab{padding:10px 14px;font-size:14px;cursor:pointer;white-space:nowrap;color:#111;',
+    '  min-height:42px;display:flex;align-items:center;border-bottom:2px solid transparent;}',
     '.bh-dtab.active{border-bottom-color:#2563eb;font-weight:700;}',
     // textarea 代替 div：原生支持长按选中复制、单点光标编辑
-    '#bh-detail-body{flex:1;overflow-y:auto;padding:8px;font-size:12px;color:#111;',
+    '#bh-detail-body{flex:1;overflow-y:auto;padding:10px;font-size:13px;color:#111;',
     '  white-space:pre;word-break:break-all;font-family:monospace;background:#fff;',
     '  border:none;outline:none;resize:none;width:100%;}',
-    '#bh-detail-acts{display:flex;gap:6px;padding:6px 8px;flex-wrap:wrap;',
+    '#bh-detail-acts{display:flex;gap:8px;padding:8px 10px;flex-wrap:wrap;',
     '  border-top:1px solid #d0d7de;background:#f6f8fa;}',
-    '#bh-detail-acts button{font-size:12px;padding:4px 8px;border-radius:4px;',
+    '#bh-detail-acts button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
     '#bh-detail-acts button:active{background:#e8eaed;}',
     // 模态弹窗（挂到 document.body，在 shadow root 外，用固定色）
@@ -1205,8 +1271,9 @@
   function updateThrottleBtn() {
     var btn = document.getElementById('bh-thr-btn');
     if (!btn) return;
-    btn.textContent = netThrottle.enabled ? '弱网●' : '弱网';
-    btn.style.color = netThrottle.enabled ? '#ea580c' : '';
+    // 跟"监听中"一样：左边圆球区分开/关。● 实心=开启(橙)，○ 空心=关闭(灰)
+    btn.textContent = (netThrottle.enabled ? '● ' : '○ ') + '弱网';
+    btn.style.color = netThrottle.enabled ? '#ea580c' : '#888';
   }
 
   function openThrottleCustom() {
@@ -1267,7 +1334,7 @@
       '<button id="bh-export-har">导出 HAR</button>' +
       '<button id="bh-bp-btn">断点</button>' +
       '<button id="bh-mock-btn">Mock</button>' +
-      '<button id="bh-thr-btn">弱网</button>' +
+      '<button id="bh-thr-btn">○ 弱网</button>' +
       '<input id="bh-filter" placeholder="过滤 URL…">';
     wrap.appendChild(bar);
     netFilterEl = bar.querySelector('#bh-filter');
