@@ -12,7 +12,13 @@
       .then(function (r) { return r.text(); })
       .then(function (code) {
         try {
-          var fn = new Function(code + '\nreturn typeof eruda!=="undefined"?eruda:null;');
+          // Bind globals that lose their `this` context inside new Function scope
+          var preamble = [
+            'var getComputedStyle=window.getComputedStyle.bind(window);',
+            'var getSelection=window.getSelection?window.getSelection.bind(window):function(){return null;};',
+            'var matchMedia=window.matchMedia?window.matchMedia.bind(window):function(){return{matches:false,addListener:function(){},removeListener:function(){}};};',
+          ].join('');
+          var fn = new Function(preamble + code + '\nreturn typeof eruda!=="undefined"?eruda:null;');
           var result = fn();
           if (result && !self.eruda) self.eruda = result;
           erudaReady = typeof self.eruda !== 'undefined';
