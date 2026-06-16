@@ -51,10 +51,15 @@
       .then(function (r) { return r.text(); })
       .then(function (code) {
         try {
+          code = code
+            .replace(/\bwindow\.getComputedStyle\(/g, 'getComputedStyle(')
+            .replace(/\bwindow\.getSelection\(/g, 'getSelection(')
+            .replace(/\bwindow\.matchMedia\(/g, 'matchMedia(');
           var preamble = [
-            'var getComputedStyle=window.getComputedStyle.bind(window);',
-            'var getSelection=window.getSelection?window.getSelection.bind(window):function(){return null;};',
-            'var matchMedia=window.matchMedia?window.matchMedia.bind(window):function(){return{matches:false,addListener:function(){},removeListener:function(){}};};',
+            'var __bhWindow=document.defaultView||window;',
+            'var getComputedStyle=function(el,pseudo){return __bhWindow.getComputedStyle(el,pseudo);};',
+            'var getSelection=function(){return __bhWindow.getSelection?__bhWindow.getSelection():null;};',
+            'var matchMedia=function(query){return __bhWindow.matchMedia?__bhWindow.matchMedia(query):{matches:false,addListener:function(){},removeListener:function(){}};};',
           ].join('');
           var fn = new Function(preamble + code + '\nreturn typeof eruda!=="undefined"?eruda:self.eruda;');
           var result = fn.call(self);
@@ -89,17 +94,22 @@
   function entryVisible() {
     var btn = getEntryButton();
     if (!btn) return false;
-    var rect = btn.getBoundingClientRect();
-    var style = window.getComputedStyle(btn);
-    return rect.width > 0 &&
-      rect.height > 0 &&
-      rect.right > 0 &&
-      rect.bottom > 0 &&
-      rect.left < window.innerWidth &&
-      rect.top < window.innerHeight &&
-      style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      style.opacity !== '0';
+    try {
+      var rect = btn.getBoundingClientRect();
+      var view = document.defaultView || window;
+      var style = view.getComputedStyle(btn);
+      return rect.width > 0 &&
+        rect.height > 0 &&
+        rect.right > 0 &&
+        rect.bottom > 0 &&
+        rect.left < window.innerWidth &&
+        rect.top < window.innerHeight &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        style.opacity !== '0';
+    } catch (e) {
+      return false;
+    }
   }
 
   function verifyEntry(cb) {
