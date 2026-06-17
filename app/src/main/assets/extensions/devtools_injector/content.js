@@ -1606,7 +1606,6 @@
 	  var netModal = null;   // 当前弹窗 element
 	  var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
 	  var netDetailDirty = false;
-	  var netListRefreshPending = false; // 编辑期间被抑制的列表刷新，退出编辑后补刷
 	  var netHideTunnelNoise = false;
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
@@ -2079,10 +2078,6 @@
 
   function renderNetList() {
     if (!netListEl) return;
-    // 正在编辑详情 textarea 时绝不重建列表 DOM。Android/GeckoView 上，IME 合成期间
-    // 任何文档 DOM 变更都会触发 restartInput，使 textarea 丢焦点，后续字符穿到页面输入框
-    // （chatgpt 等流式站点每条响应都会触发刷新）。退出编辑后由 flushPendingNetList() 补刷。
-    if (netEditing) { netListRefreshPending = true; return; }
     var rows = getVisibleRequests();
     var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0;
     if (rows.length === 0 && !showIntercepts) {
@@ -2296,13 +2291,24 @@
   }
 
   function setNetEditing(active) {
-    var was = netEditing;
     netEditing = !!active;
-    // 退出编辑态时补刷一次被抑制的列表刷新
-    if (was && !netEditing && netListRefreshPending) {
-      netListRefreshPending = false;
-      if (netPanelVisible) renderNetList();
-    }
+  }
+
+  // 点按详情 textarea：可编辑的 tab 打开 light DOM 编辑层输入，写回后刷新展示。
+  // 可编辑范围：拦截请求的 请求头(0)/请求体(1)；普通请求的 请求体(1)。
+  function openDetailEditor() {
+    if (!netDetailBody) return;
+    var isIntercept = !!netSelIntercept;
+    var editable = isIntercept ? (netDetailTab === 0 || netDetailTab === 1) : (netDetailTab === 1);
+    if (!editable) return;
+    var title = netDetailTab === 0 ? '编辑请求头' : '编辑请求体';
+    openEditOverlay(title, netDetailBody.value, function (text) {
+      // 把编辑结果塞进只读 textarea，复用既有的写回逻辑（它从 netDetailBody.value 读取）
+      netDetailBody.value = text;
+      netDetailDirty = true;
+      syncCurrentDetailEdit();
+      renderDetail(true);
+    });
   }
 
   // ── 功能：重放 ──
@@ -2430,9 +2436,102 @@
     // 挂进 #bh-net 后弹窗与面板同处一个堆叠上下文，position:fixed 覆盖视口即可见可点。
     (netPanel || document.body).appendChild(el);
     netModal = el;
+    // shadow root 内的输入框在 Android 软键盘下 IME 合成会崩坏（Gecko bug），
+    // 因此弹窗内所有 input/textarea 设为只读，点按时改用 light DOM 编辑层输入。
+    bindModalFieldEditors(el);
   }
+
+  // 把弹窗里的 input/textarea 改成"点按→light DOM 编辑层"模式，绕过 shadow-DOM IME bug。
+  function bindModalFieldEditors(modalEl) {
+    var fields = modalEl.querySelectorAll('input, textarea');
+    Array.prototype.forEach.call(fields, function (f) {
+      var isNumber = (f.tagName === 'INPUT' && f.getAttribute('type') === 'number');
+      f.readOnly = true;
+      f.addEventListener('click', function () {
+        var label = f.getAttribute('placeholder') || '编辑';
+        // 找最近的 <label> 文案当标题
+        var prev = f.previousElementSibling;
+        if (prev && prev.tagName === 'LABEL' && prev.textContent) label = prev.textContent;
+        openEditOverlay(label, f.value, function (text) {
+          f.value = isNumber ? text.replace(/[^0-9.\-]/g, '') : text;
+        });
+      });
+    });
+  }
+
 	  function closeModal() {
 	    if (netModal) { try { netModal.remove(); } catch (e) {} netModal = null; }
+	  }
+
+	  // ── 独立编辑层（light DOM，绕过 Gecko shadow-DOM IME bug）──
+	  // Gecko 已知 bug：shadow root 内的可编辑元素在 Android 软键盘下 IME 合成会崩坏
+	  // （只进首字符、后续字符穿到页面输入框）。eruda 面板在 shadow root 内，因此把真正
+	  // 接收输入的 textarea 放到 document.body（shadow root 外），编辑完写回。
+	  var netEditOverlay = null;     // 编辑层根（在 document.body）
+	  var netEditTextarea = null;    // 真正接收键盘输入的 textarea（light DOM）
+	  var netEditOnDone = null;      // 完成回调，参数为编辑后的文本
+
+	  function ensureEditOverlayStyle() {
+	    if (document.getElementById('bh-edit-overlay-style')) return;
+	    var st = document.createElement('style');
+	    st.id = 'bh-edit-overlay-style';
+	    st.textContent = [
+	      '#bh-edit-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;',
+	      '  background:#fff;color:#111;font-family:sans-serif;}',
+	      '#bh-edit-overlay-bar{display:flex;align-items:center;gap:8px;padding:8px 10px;flex:0 0 auto;',
+	      '  border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
+	      '#bh-edit-overlay-title{flex:1 1 auto;font-size:14px;font-weight:700;overflow:hidden;',
+	      '  text-overflow:ellipsis;white-space:nowrap;}',
+	      '#bh-edit-overlay-bar button{font-size:14px;padding:8px 14px;border-radius:6px;min-height:40px;',
+	      '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
+	      '#bh-edit-overlay-ok{background:#2563eb !important;color:#fff !important;border-color:#2563eb !important;}',
+	      '#bh-edit-overlay-textarea{flex:1 1 auto;min-height:0;width:100%;padding:10px;font-size:14px;',
+	      '  color:#111;background:#fff;border:none;outline:none;resize:none;line-height:1.5;',
+	      '  white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:monospace;}',
+	    ].join('');
+	    (document.head || document.documentElement).appendChild(st);
+	  }
+
+	  // 打开编辑层。title 显示用，initial 是初始文本，onDone(text) 在"完成"时回调。
+	  function openEditOverlay(title, initial, onDone) {
+	    closeEditOverlay();
+	    ensureEditOverlayStyle();
+	    var el = document.createElement('div');
+	    el.id = 'bh-edit-overlay';
+	    el.innerHTML =
+	      '<div id="bh-edit-overlay-bar">' +
+	        '<button id="bh-edit-overlay-cancel" type="button">取消</button>' +
+	        '<span id="bh-edit-overlay-title"></span>' +
+	        '<button id="bh-edit-overlay-ok" type="button">完成</button>' +
+	      '</div>' +
+	      '<textarea id="bh-edit-overlay-textarea" spellcheck="false" wrap="soft"></textarea>';
+	    document.body.appendChild(el);
+	    el.querySelector('#bh-edit-overlay-title').textContent = title || '编辑';
+	    var ta = el.querySelector('#bh-edit-overlay-textarea');
+	    ta.value = initial == null ? '' : String(initial);
+	    netEditOverlay = el;
+	    netEditTextarea = ta;
+	    netEditOnDone = onDone || null;
+	    el.querySelector('#bh-edit-overlay-cancel').addEventListener('click', function () {
+	      closeEditOverlay();
+	    });
+	    el.querySelector('#bh-edit-overlay-ok').addEventListener('click', function () {
+	      var v = netEditTextarea ? netEditTextarea.value : '';
+	      var cb = netEditOnDone;
+	      closeEditOverlay();
+	      if (cb) cb(v);
+	    });
+	    // 聚焦并把光标放到末尾，弹出软键盘
+	    setTimeout(function () {
+	      try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {}
+	    }, 30);
+	  }
+
+	  function closeEditOverlay() {
+	    if (netEditOverlay) { try { netEditOverlay.remove(); } catch (e) {} }
+	    netEditOverlay = null;
+	    netEditTextarea = null;
+	    netEditOnDone = null;
 	  }
 
 	  function bindLongPress(el, fn) {
@@ -2945,7 +3044,14 @@
 	    updateFilterButtons();
 	    updateInterceptBtn();
 	    updateRulesBtn();
-	    netFilterEl.addEventListener('input', renderNetList);
+	    // 搜索框也在 shadow root 内，同样改成"点按→light DOM 编辑层"避免 IME 崩坏
+	    netFilterEl.readOnly = true;
+	    netFilterEl.addEventListener('click', function () {
+	      openEditOverlay('搜索 URL', netFilterEl.value, function (text) {
+	        netFilterEl.value = text;
+	        renderNetList();
+	      });
+	    });
 
     // 请求列表
     netListEl = document.createElement('div');
@@ -2983,21 +3089,17 @@
 	      }, true);
 	    });
 
-	    // textarea 聚焦/输入时进入编辑保护：不再移动详情区，只避免响应刷新覆盖正在编辑的内容。
-	    netDetailBody.addEventListener('focus', function () { setNetEditing(true); });
-	    netDetailBody.addEventListener('blur', function () { setNetEditing(false); });
-	    netDetailBody.addEventListener('beforeinput', function () { setNetEditing(true); netDetailDirty = true; });
-	    netDetailBody.addEventListener('input', function () { setNetEditing(true); netDetailDirty = true; });
-	    netDetailBody.addEventListener('compositionstart', function () { setNetEditing(true); });
-	    netDetailBody.addEventListener('touchstart', function () { setNetEditing(true); }, { passive: true });
-	    ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','keydown','keyup','input','beforeinput','paste','cut','drop','change','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
+	    // shadow root 内的 textarea 在 Android 软键盘下 IME 合成会崩坏（Gecko bug），
+	    // 因此设为只读（仍可长按选中/复制），点按时改用 light DOM 编辑层输入。
+	    netDetailBody.readOnly = true;
+	    ['pointerdown','pointerup','mousedown','mouseup','dblclick','touchstart','touchend'].forEach(function (type) {
 	      netDetailBody.addEventListener(type, function (e) {
-	        setNetEditing(true);
-	        if (/^(beforeinput|input|paste|cut|drop|change)$/.test(type)) netDetailDirty = true;
 	        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
 	        else e.stopPropagation();
-	        if (type === 'dblclick') e.preventDefault();
 	      }, true);
+	    });
+	    netDetailBody.addEventListener('click', function () {
+	      openDetailEditor();
 	    });
 
 	    netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
@@ -3028,7 +3130,11 @@
       flashBtn(this, '已复制');
     });
 	    netDetailActs.querySelector('#bh-act-clear').addEventListener('click', function () {
-	      if (netDetailBody) { netDetailBody.value = ''; netDetailDirty = true; setNetEditing(true); netDetailBody.focus(); }
+	      if (!netDetailBody) return;
+	      netDetailBody.value = '';
+	      netDetailDirty = true;
+	      syncCurrentDetailEdit();
+	      renderDetail(true);
 	    });
 	    netDetailActs.querySelector('#bh-act-curl').addEventListener('click', function () {
 	      syncCurrentDetailEdit();
