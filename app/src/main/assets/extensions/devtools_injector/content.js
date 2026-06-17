@@ -1965,6 +1965,16 @@
 	      syncInterceptEdit();
 	      return;
 	    }
+	    if (netSelReq && netDetailTab === 0) {
+	      // 普通请求请求头：解析 "key: value" 格式写回
+	      var headers = {};
+	      String(netDetailBody.value || '').split(/\r?\n/).forEach(function (line) {
+	        var idx = line.indexOf(':');
+	        if (idx < 0) return;
+	        headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+	      });
+	      netSelReq.reqHeaders = headers;
+	    }
 	    if (netSelReq && netDetailTab === 1) {
 	      var body = bodyValueFromTextarea(true);
 	      if (body !== netSelReq.reqBody) removeHeaderCI(netSelReq.reqHeaders, 'content-length');
@@ -2299,9 +2309,11 @@
   function openDetailEditor() {
     if (!netDetailBody) return;
     var isIntercept = !!netSelIntercept;
-    var editable = isIntercept ? (netDetailTab === 0 || netDetailTab === 1) : (netDetailTab === 1);
+    // tab 0=请求头 1=请求体 可编辑；普通请求也允许编辑请求头(0)和请求体(1)
+    var editable = (netDetailTab === 0 || netDetailTab === 1);
     if (!editable) return;
-    var title = netDetailTab === 0 ? '编辑请求头' : '编辑请求体';
+    var titles = ['编辑请求头', '编辑请求体', '', '', ''];
+    var title = titles[netDetailTab] || '编辑';
     openEditOverlay(title, netDetailBody.value, function (text) {
       // 把编辑结果塞进只读 textarea，复用既有的写回逻辑（它从 netDetailBody.value 读取）
       netDetailBody.value = text;
