@@ -3224,20 +3224,14 @@
 
   // document_start 时提前注入拦截器（不依赖 DOM），让页面第一个请求就能被捕获
   function earlyInjectInterceptor() {
-    // isolated world：直接用 exportFunction，不需要 DOM
+    // isolated world：exportFunction 直接操作 page world，完全不需要 DOM
     if (typeof exportFunction !== 'undefined' && typeof window.wrappedJSObject !== 'undefined') {
       injectInterceptorViaExportFunction();
       return;
     }
-    // page world：需要往 DOM 插 <script>，等 documentElement 可用
-    function doInject() {
-      runInPage(INTERCEPT_JS);
-    }
-    if (document.documentElement) {
-      doInject();
-    } else {
-      document.addEventListener('DOMContentLoaded', doInject, { once: true });
-    }
+    // page world：需要往 DOM 插 <script>。document_start 时 documentElement 存在但 head 可能没有，
+    // runInPage 内部已用 document.head || document.documentElement 兜底，可以直接调用。
+    runInPage(INTERCEPT_JS);
   }
 
   function applyReplaceRules(text) {
@@ -3767,29 +3761,32 @@
   connect();
 
   // 页面导航后自动恢复：
-  //   - document_start 阶段：若上次 DevTools 是开启的，立刻加载持久化配置并注入拦截器
-  //     （此时 DOM 可能还不存在，只 hook fetch/XHR，不碰 eruda）
-  //   - DOMContentLoaded 后：再完整初始化 eruda + 面板 + 同步配置到 page world
+  //   - document_start 阶段：立刻加载持久化配置并注入拦截器（只 hook fetch/XHR，不碰 eruda）
+  //   - 页面加载完成（load 或 DOMContentLoaded + 延迟）后：再初始化 eruda + 面板
   if (wasActive()) {
     // 1. 提前注入拦截器：document_start 时 fetch/XHR 就被 hook，页面第一个请求就能捕获
     loadNetConfig(function () {
-      // 加载替换规则（storage 读取异步，尽早开始）
       loadReplaceRules();
-      // isolated world 可直接 hook；page world 需要 documentElement
       earlyInjectInterceptor();
-      // 同步全局拦截开关到 page world（拦截器刚注入，需要告知初始状态）
       syncGlobalInterceptEnabled();
       syncReplaceRules();
     });
 
-    // 2. DOM 就绪后再初始化 eruda + 面板
+    // 2. eruda 初始化必须等页面渲染足够完成，否则 entry button 没有尺寸导致 verifyEntry 超时
+    //    用 load 事件兜底，load 前若 DOMContentLoaded 已触发则延迟 300ms 再试
     function doRestore() {
-      toggle();
+      if (document.readyState === 'complete') {
+        toggle();
+      } else {
+        window.addEventListener('load', function () { toggle(); }, { once: true });
+      }
     }
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', doRestore, { once: true });
+      document.addEventListener('DOMContentLoaded', function () {
+        setTimeout(doRestore, 300);
+      }, { once: true });
     } else {
-      doRestore();
+      setTimeout(doRestore, 300);
     }
   }
 })();
