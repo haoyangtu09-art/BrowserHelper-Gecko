@@ -2153,6 +2153,34 @@
 	    return rule;
 	  }
 
+	  function findRuleForReq(r) {
+	    if (!r) return null;
+	    var key = ruleKey(makeInterceptRuleFromReq(r, 'pass'));
+	    var found = null;
+	    sanitizeInterceptRules(netInterceptRules).forEach(function (x) {
+	      if (ruleKey(x) === key) found = x;
+	    });
+	    return found;
+	  }
+
+	  // 长按请求/拦截项里切换"是否拦截服务器响应"。无对应标记时新建一条放行规则只为拦响应。
+	  function toggleRespRuleForReq(r) {
+	    if (!r) return;
+	    var key = ruleKey(makeInterceptRuleFromReq(r, 'pass'));
+	    var existing = null;
+	    netInterceptRules = sanitizeInterceptRules(netInterceptRules);
+	    netInterceptRules.forEach(function (x) { if (ruleKey(x) === key) existing = x; });
+	    if (existing) {
+	      existing.interceptResp = !existing.interceptResp;
+	      existing.updatedAt = Date.now();
+	    } else {
+	      var rule = makeInterceptRuleFromReq(r, 'pass');
+	      rule.interceptResp = true;
+	      netInterceptRules.push(rule);
+	    }
+	    saveInterceptRules();
+	  }
+
 	  function removeInterceptRule(ruleId) {
 	    netInterceptRules = sanitizeInterceptRules(netInterceptRules).filter(function (r) {
 	      return r.id !== ruleId;
@@ -3130,10 +3158,14 @@
 
 	  function openMarkMenu(r) {
 	    if (!r) return;
+	    var existingRule = findRuleForReq(r);
+	    var respOn = !!(existingRule && existingRule.interceptResp);
 	    openModal('标记请求',
 	      '<div style="font-size:12px;color:#555;word-break:break-all;">' + escHtml(requestLabel(r)) + '</div>' +
 	      '<button data-mark="pass" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为放行</button>' +
-	      '<button data-mark="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为拦截</button>',
+	      '<button data-mark="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为拦截</button>' +
+	      '<button data-mark="resp" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">' +
+	        (respOn ? '取消拦截服务器响应' : '拦截服务器响应') + '</button>',
 	      function () { closeModal(); }
 	    );
 	    setTimeout(function () {
@@ -3143,7 +3175,8 @@
 	      Array.prototype.forEach.call(netModal.querySelectorAll('[data-mark]'), function (btn) {
 	        btn.addEventListener('click', function () {
 	          var action = btn.getAttribute('data-mark');
-	          upsertInterceptRuleFromReq(r, action);
+	          if (action === 'resp') toggleRespRuleForReq(r);
+	          else upsertInterceptRuleFromReq(r, action);
 	          closeModal();
 	          renderNetList();
 	        });
