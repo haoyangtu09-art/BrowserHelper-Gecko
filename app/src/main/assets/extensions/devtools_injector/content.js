@@ -501,8 +501,20 @@
       '      send({type:"req",reqId:_reqId,url:_url,method:_method,reqHeaders:_reqHeaders,reqBody:_reqBody});',
       '      var mock=checkMock(_url);',
       '      if(mock){',
-      '        send({type:"resp",reqId:_reqId,status:mock.status||200,',
-      '          respHeaders:{"x-mock":"1"},respBody:mock.body||"",duration:Date.now()-_t0});',
+      '        var _mb=mock.body||"";var _ms=mock.status||200;',
+      '        send({type:"resp",reqId:_reqId,status:_ms,',
+      '          respHeaders:{"x-mock":"1"},respBody:_mb,duration:Date.now()-_t0});',
+      '        try{Object.defineProperty(xhr,"readyState",{configurable:true,get:function(){return 4;}});}catch(e){}',
+      '        try{Object.defineProperty(xhr,"status",{configurable:true,get:function(){return _ms;}});}catch(e){}',
+      '        try{Object.defineProperty(xhr,"responseText",{configurable:true,get:function(){return _mb;}});}catch(e){}',
+      '        try{Object.defineProperty(xhr,"response",{configurable:true,get:function(){return _mb;}});}catch(e){}',
+      '        setTimeout(function(){',
+      '          try{if(xhr.onreadystatechange)xhr.onreadystatechange();}catch(e){}',
+      '          try{xhr.dispatchEvent(new Event("readystatechange"));}catch(e){}',
+      '          try{xhr.dispatchEvent(new Event("load"));}catch(e){}',
+      '          try{if(xhr.onload)xhr.onload();}catch(e){}',
+      '          try{if(xhr.onloadend)xhr.onloadend();}catch(e){}',
+      '        },0);',
       '        return;',
       '      }',
       '      var doSend=function(){',
@@ -663,8 +675,24 @@
         sendNet({ type: 'req', reqId: _reqId, url: _url, method: _method, reqHeaders: _reqHeaders, reqBody: _reqBody });
         var mock = checkMock(_url);
         if (mock) {
-          sendNet({ type: 'resp', reqId: _reqId, status: mock.status || 200,
-            respHeaders: { 'x-mock': '1' }, respBody: mock.body || '', duration: Date.now() - _t0 });
+          var _mb = mock.body || '', _ms = mock.status || 200;
+          sendNet({ type: 'resp', reqId: _reqId, status: _ms,
+            respHeaders: { 'x-mock': '1' }, respBody: _mb, duration: Date.now() - _t0 });
+          // 用 wrappedJSObject 在 page world 上下文里伪造 readyState/status/responseText 并派发事件
+          try {
+            var w = xhr.wrappedJSObject || xhr;
+            Object.defineProperty(w, 'readyState', { configurable: true, get: exportFunction(function () { return 4; }, pw) });
+            Object.defineProperty(w, 'status', { configurable: true, get: exportFunction(function () { return _ms; }, pw) });
+            Object.defineProperty(w, 'responseText', { configurable: true, get: exportFunction(function () { return _mb; }, pw) });
+            Object.defineProperty(w, 'response', { configurable: true, get: exportFunction(function () { return _mb; }, pw) });
+          } catch (e) {}
+          pw.setTimeout(exportFunction(function () {
+            try { if (xhr.onreadystatechange) xhr.onreadystatechange(); } catch (e) {}
+            try { xhr.dispatchEvent(new pw.Event('readystatechange')); } catch (e) {}
+            try { xhr.dispatchEvent(new pw.Event('load')); } catch (e) {}
+            try { if (xhr.onload) xhr.onload(); } catch (e) {}
+            try { if (xhr.onloadend) xhr.onloadend(); } catch (e) {}
+          }, pw), 0);
           return;
         }
         var doSend = function () {
