@@ -534,6 +534,24 @@
 	      '    }',
 	      '    return "";',
 	      '  }',
+	      '  function interceptRespMatch(url,method,body){',
+	      '    var rules=window.__bhInterceptRules||[];',
+	      '    if(!rules||!rules.length)return false;',
+	      '    var u=null;try{u=new URL(String(url||""),location.href);}catch(e){return false;}',
+	      '    method=String(method||"GET").toUpperCase();',
+	      '    var hasBody=bodyHasValue(body);',
+	      '    for(var i=rules.length-1;i>=0;i--){',
+	      '      var r=rules[i]||{};',
+	      '      if(r.host&&r.host!==u.host)continue;',
+	      '      if(r.path&&r.path!==u.pathname)continue;',
+	      '      if(r.method&&String(r.method).toUpperCase()!==method)continue;',
+	      '      if(!!r.hasBody!==hasBody)continue;',
+	      '      return !!r.interceptResp;',
+	      '    }',
+	      '    return false;',
+	      '  }',
+	      '  function stripCL(h){if(!h)return h;try{Object.keys(h).forEach(function(k){if(/^content-length$/i.test(k))delete h[k];});}catch(e){}return h;}',
+	      '  function nullBodyStatus(s){return s===101||s===204||s===205||s===304;}',
 	      '  function isNoiseReq(url,method,body,headers){',
 	      '    url=String(url||"").toLowerCase();method=String(method||"GET").toUpperCase();',
 	      '    if(!url)return true;',
@@ -571,10 +589,10 @@
       '    });',
       '  }',
       // 响应断点：服务器响应已到（流式已被 text() 攒成整段），暂停等编辑后放行/中止
-      '  function waitRespBp(reqId,status,respHeaders,respBody){',
+      '  function waitRespBp(reqId,status,respHeaders,respBody,via){',
       '    return new Promise(function(resolve){',
       '      window.__bhRespBpPending[reqId]=resolve;',
-      '      send({type:"respBreakpoint",reqId:reqId,status:status,respHeaders:respHeaders,respBody:respBody});',
+      '      send({type:"respBreakpoint",reqId:reqId,status:status,respHeaders:respHeaders,respBody:respBody,via:via||"breakpoint"});',
       '    });',
       '  }',
       '  window.fetch=function(input,init){',
@@ -605,10 +623,11 @@
       '      if(respStop){',
       '        return resp.text().then(function(body){',
       '          send({type:"resp",reqId:reqId,status:status,respHeaders:respHeaders,respBody:body.slice(0,102400),duration:Date.now()-t0});',
-      '          return waitRespBp(reqId,status,respHeaders,body).then(function(r){',
-      '            if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"响应已被断点中止",duration:Date.now()-t0});throw new Error("aborted by response breakpoint");}',
-      '            var nb=(r.respBody!=null)?r.respBody:body;var ns=r.status||status;var nh=r.respHeaders||respHeaders;',
-      '            try{return new Response(nb,{status:ns,headers:nh});}catch(e){try{return new Response(nb,{status:ns});}catch(e2){return new Response(nb);}}',
+      '          return waitRespBp(reqId,status,respHeaders,body,respVia).then(function(r){',
+      '            if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"响应已被中止",duration:Date.now()-t0});throw new Error("aborted by response intercept");}',
+      '            var nb=(r.respBody!=null)?r.respBody:body;var ns=r.status||status;var nh=stripCL(Object.assign({},r.respHeaders||respHeaders));',
+      '            var rb=nullBodyStatus(ns)?null:nb;',
+      '            try{return new Response(rb,{status:ns,headers:nh});}catch(e){try{return new Response(rb,{status:ns});}catch(e2){return new Response(rb);}}',
       '          });',
       '        });',
       '      }',
@@ -628,7 +647,9 @@
       '    var runDelay=function(){return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();};',
       // 命中断点：暂停，等编辑结果。修改后的 URL/头/体替换原参数后再发
 	      '    var _bp=bpMatch(url);',
-	      '    var respStop=!!_bp&&(_bp.stage==="resp"||_bp.stage==="both");',
+	      '    var _ir=interceptRespMatch(url,method,reqBody);',
+	      '    var respStop=(!!_bp&&(_bp.stage==="resp"||_bp.stage==="both"))||_ir;',
+	      '    var respVia=_ir?"intercept":"breakpoint";',
 	      '    var bpMode=(_bp&&_bp.stage!=="resp")?"breakpoint":(checkGlobalIntercept(url,method,reqBody,reqHeaders)?"intercept":"");',
       '    if(bpMode){',
       '      return waitBp(reqId,url,method,reqHeaders,reqBody,bpMode).then(function(r){',
@@ -786,6 +807,7 @@
 	  var netActiveBreakpoint = null;
 	  var netInterceptQueue = [];
 	  var netSelIntercept = null;
+	  var netRespInterceptQueue = [];
 	  var netInterceptRules = [];
 	  var netRulesViewEl = null;
 	  var netPlainCandidates = [];
@@ -894,9 +916,20 @@
   }
 
   function enqueueRespBreakpoint(d) {
+    if (d.via === 'intercept') { enqueueRespIntercept(d); return; }
     d.__resp = true;
     netBreakpointQueue.push(d);
     if (!netActiveBreakpoint) openNextBreakpoint();
+  }
+
+  function enqueueRespIntercept(d) {
+    d.ts = Date.now();
+    d.respHeaders = d.respHeaders || {};
+    d.respBody = d.respBody == null ? '' : d.respBody;
+    if (d.status == null) d.status = 200;
+    netRespInterceptQueue.push(d);
+    updateInterceptBtn();
+    if (netPanelVisible) { renderNetList(); renderDetail(); }
   }
 
 	  function enqueueIntercept(d) {
@@ -1082,6 +1115,25 @@
 	      }
 	      return '';
 	    }
+	    function interceptRespMatch(url, method, body) {
+	      var rules = netInterceptRules || [];
+	      if (!rules.length) return false;
+	      var u = null;
+	      try { u = new URL(String(url || ''), location.href); } catch (e) { return false; }
+	      method = String(method || 'GET').toUpperCase();
+	      var hasBody = bodyHasValue(body);
+	      for (var i = rules.length - 1; i >= 0; i--) {
+	        var r = rules[i] || {};
+	        if (r.host && r.host !== u.host) continue;
+	        if (r.path && r.path !== u.pathname) continue;
+	        if (r.method && String(r.method).toUpperCase() !== method) continue;
+	        if (!!r.hasBody !== hasBody) continue;
+	        return !!r.interceptResp;
+	      }
+	      return false;
+	    }
+	    function stripCL(h) { if (!h) return h; try { Object.keys(h).forEach(function (k) { if (/^content-length$/i.test(k)) delete h[k]; }); } catch (e) {} return h; }
+	    function nullBodyStatus(s) { return s === 101 || s === 204 || s === 205 || s === 304; }
 	    function isNoiseBeforeSend(url, method, body, headers) {
 	      url = String(url || '').toLowerCase();
 	      method = String(method || 'GET').toUpperCase();
@@ -1108,10 +1160,10 @@
       });
     }
     // 响应断点（isolated）：content-world Promise 等待编辑结果
-    function waitRespBp(reqId, status, respHeaders, respBody) {
+    function waitRespBp(reqId, status, respHeaders, respBody, via) {
       return new Promise(function (resolve) {
         _respBpIsoPending[reqId] = resolve;
-        sendNet({ type: 'respBreakpoint', reqId: reqId, status: status, respHeaders: respHeaders, respBody: respBody });
+        sendNet({ type: 'respBreakpoint', reqId: reqId, status: status, respHeaders: respHeaders, respBody: respBody, via: via || 'breakpoint' });
       });
     }
 
@@ -1162,7 +1214,9 @@
         }, pw));
       }
       var _bp = bpMatch(url);
-      var respStop = !!_bp && (_bp.stage === 'resp' || _bp.stage === 'both');
+      var _ir = interceptRespMatch(url, method, reqBody);
+      var respStop = (!!_bp && (_bp.stage === 'resp' || _bp.stage === 'both')) || _ir;
+      var respVia = _ir ? 'intercept' : 'breakpoint';
       // 响应断点（isolated）：读完整 body（流式被攒成整段），暂停编辑后构造 pw.Response 放行。
       // 跨世界：返回值必须是 pw.Response；page-world promise 的回调必须 exportFunction。
       function handleRespBp(p) {
@@ -1173,19 +1227,20 @@
             resp.text().then(exportFunction(function (body) {
               sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
                 respBody: body.slice(0, 102400), duration: Date.now() - t0 });
-              waitRespBp(reqId, status, respHeaders, body).then(function (r) {
+              waitRespBp(reqId, status, respHeaders, body, respVia).then(function (r) {
                 if (r.action === 'abort') {
-                  sendNet({ type: 'resp', reqId: reqId, status: 0, error: '响应已被断点中止', duration: Date.now() - t0 });
-                  reject(new pw.Error('aborted by response breakpoint'));
+                  sendNet({ type: 'resp', reqId: reqId, status: 0, error: '响应已被中止', duration: Date.now() - t0 });
+                  reject(new pw.Error('aborted by response intercept'));
                   return;
                 }
                 var nb = (r.respBody != null) ? r.respBody : body;
                 var ns = r.status || status;
-                var nh = r.respHeaders || respHeaders;
-                try { resolve(new pw.Response(nb, cloneInto({ status: ns, headers: nh }, pw))); }
+                var nh = stripCL(Object.assign({}, r.respHeaders || respHeaders));
+                var rb = nullBodyStatus(ns) ? null : nb;
+                try { resolve(new pw.Response(rb, cloneInto({ status: ns, headers: nh }, pw))); }
                 catch (e) {
-                  try { resolve(new pw.Response(nb, cloneInto({ status: ns }, pw))); }
-                  catch (e2) { try { resolve(new pw.Response(nb)); } catch (e3) { reject(new pw.Error(String(e3))); } }
+                  try { resolve(new pw.Response(rb, cloneInto({ status: ns }, pw))); }
+                  catch (e2) { try { resolve(new pw.Response(rb)); } catch (e3) { reject(new pw.Error(String(e3))); } }
                 }
               });
             }, pw), exportFunction(function () { resolve(resp); }, pw));
@@ -2012,6 +2067,7 @@
 	        path: String(r.path || ''),
 	        method: String(r.method || 'GET').toUpperCase(),
 	        hasBody: !!r.hasBody,
+	        interceptResp: !!r.interceptResp,
 	        sampleUrl: String(r.sampleUrl || ''),
 	        createdAt: r.createdAt || Date.now(),
 	        updatedAt: r.updatedAt || r.createdAt || Date.now(),
@@ -2030,6 +2086,7 @@
 	      path: u.path,
 	      method: String((r && r.method) || 'GET').toUpperCase(),
 	      hasBody: byteLen(r && r.reqBody) > 0,
+	      interceptResp: false,
 	      sampleUrl: u.sampleUrl,
 	      createdAt: Date.now(),
 	      updatedAt: Date.now(),
@@ -2087,6 +2144,7 @@
 	      replaced = true;
 	      rule.id = old.id;
 	      rule.createdAt = old.createdAt || rule.createdAt;
+	      rule.interceptResp = !!old.interceptResp;
 	      rule.updatedAt = Date.now();
 	      return rule;
 	    });
@@ -2267,6 +2325,65 @@
 	    });
 	  }
 
+	  function finishRespIntercept(d, payload) {
+	    if (!d || d.__done) return;
+	    d.__done = true;
+	    respResolve(d.reqId, payload);
+	    netRespInterceptQueue = netRespInterceptQueue.filter(function (x) { return x.reqId !== d.reqId; });
+	    updateInterceptBtn();
+	    if (netModal) closeModal();
+	    renderNetList();
+	    renderDetail(true);
+	  }
+
+	  function releaseAllRespIntercepts() {
+	    netRespInterceptQueue.slice().forEach(function (d) {
+	      finishRespIntercept(d, {
+	        action: 'continue',
+	        status: d.status,
+	        respHeaders: d.respHeaders || {},
+	        respBody: d.respBody == null ? '' : d.respBody,
+	      });
+	    });
+	  }
+
+	  // 响应拦截编辑框（light-DOM 安全）：改 状态码/响应头/响应体 后放行，或中止响应
+	  function openRespInterceptEditor(d) {
+	    if (!d) return;
+	    var headersStr = JSON.stringify(d.respHeaders || {}, null, 2);
+	    openModal('响应拦截 — 编辑后放行',
+	      '<div style="font-size:12px;color:#555;word-break:break-all;">' +
+	        escHtml((d.method || 'GET') + ' ' + (d.url || '')) + '</div>' +
+	      '<label>状态码</label><input id="bh-rie-status" value="' + escHtml(String(d.status == null ? 200 : d.status)) + '">' +
+	      '<label>响应头 (JSON)</label><textarea id="bh-rie-headers">' + escHtml(headersStr) + '</textarea>' +
+	      '<label>响应体</label><textarea id="bh-rie-body">' + escHtml(d.respBody == null ? '' : d.respBody) + '</textarea>',
+	      function (el) {
+	        var headers = {};
+	        try { headers = JSON.parse(el.querySelector('#bh-rie-headers').value); } catch (e) {}
+	        finishRespIntercept(d, {
+	          action: 'continue',
+	          status: parseInt(el.querySelector('#bh-rie-status').value, 10) || (d.status == null ? 200 : d.status),
+	          respHeaders: headers,
+	          respBody: el.querySelector('#bh-rie-body').value,
+	        });
+	      }
+	    );
+	    setTimeout(function () {
+	      if (!netModal) return;
+	      var ok = netModal.querySelector('#bh-btn-ok');
+	      if (ok) ok.textContent = '放行';
+	      var cancel = netModal.querySelector('#bh-btn-cancel');
+	      if (cancel) {
+	        cancel.textContent = '中止响应';
+	        cancel.onclick = function () { finishRespIntercept(d, { action: 'abort' }); };
+	      }
+	      netModal.addEventListener('click', function (e) {
+	        if (e.target !== netModal) return;
+	        try { e.preventDefault(); e.stopImmediatePropagation(); } catch (err) {}
+	      }, true);
+	    }, 20);
+	  }
+
 	  function getVisibleRequests() {
     var filter = netFilterEl ? netFilterEl.value.trim().toLowerCase() : '';
     return netRequests.filter(function (r) {
@@ -2309,14 +2426,15 @@
   function renderNetList() {
     if (!netListEl) return;
     var rows = getVisibleRequests();
-    var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0;
+    var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0 || netRespInterceptQueue.length > 0;
     if (rows.length === 0 && !showIntercepts) {
       netListEl.innerHTML = '<div id="bh-empty">暂无匹配请求</div>';
       return;
     }
     var html = '';
     if (showIntercepts) {
-      html += '<div class="bh-section-title">拦截中 ' + netInterceptQueue.length + '</div>';
+      // 上分栏：发出去被拦截的请求（待发送）
+      html += '<div class="bh-section-title">请求拦截 ' + netInterceptQueue.length + '</div>';
       if (!netInterceptQueue.length) {
         html += '<div class="bh-section-empty">暂无拦截请求</div>';
       } else {
@@ -2331,6 +2449,27 @@
               '<span class="bh-meta">' + escHtml(meta) + '</span>' +
             '</span>' +
             '<span class="bh-tag">待发送</span>' +
+            '</div>';
+        });
+      }
+      // 下分栏：发进来被拦截的服务器响应（待放行）
+      html += '<div class="bh-section-title">响应拦截 ' + netRespInterceptQueue.length + '</div>';
+      if (!netRespInterceptQueue.length) {
+        html += '<div class="bh-section-empty">暂无拦截响应</div>';
+      } else {
+        netRespInterceptQueue.forEach(function (d) {
+          var sc = statusClass(d.status, false);
+          var statusNum = d.status ? String(d.status) : '…';
+          var meta = '待放行 · ↓ ' + fmtBytes(byteLen(d.respBody));
+          html += '<div class="bh-row bh-resp-intercept" data-rint-id="' + escHtml(d.reqId) + '">' +
+            '<span class="bh-method">' + escHtml(d.method || 'GET') + '</span>' +
+            '<span class="bh-main">' +
+              '<span class="bh-url" title="' + escHtml(d.url || '') + '">' + escHtml(truncUrl(d.url || '')) + '</span>' +
+              '<span class="bh-meta">' + escHtml(meta) + '</span>' +
+            '</span>' +
+            '<span class="bh-status-wrap">' +
+              '<span class="bh-status ' + sc + '">' + escHtml(statusNum) + '</span>' +
+            '</span>' +
             '</div>';
         });
       }
@@ -2384,8 +2523,15 @@
 	        if (d) openMarkMenu(interceptAsReq(d));
 	      });
 	    });
+	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-resp-intercept'), function (el) {
+	      el.addEventListener('click', function () {
+	        var id = el.getAttribute('data-rint-id');
+	        var d = netRespInterceptQueue.find(function (r) { return r.reqId === id; });
+	        if (d) openRespInterceptEditor(d);
+	      });
+	    });
 	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-row'), function (el) {
-	      if (el.getAttribute('data-int-id')) return;
+	      if (el.getAttribute('data-int-id') || el.getAttribute('data-rint-id')) return;
 	      el.addEventListener('click', function () {
 	        syncCurrentDetailEdit();
 	        var id = el.getAttribute('data-id');
@@ -3013,6 +3159,8 @@
 	      '</div>' +
 	      '<button data-rule-act="pass" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">改为放行</button>' +
 	      '<button data-rule-act="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">改为拦截</button>' +
+	      '<button data-rule-act="resp" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">' +
+	        (rule.interceptResp ? '拦截服务器响应：开 → 关' : '拦截服务器响应：关 → 开') + '</button>' +
 	      '<button data-rule-act="clear" style="padding:10px;border:1px solid #fecaca;border-radius:6px;background:#fff5f5;color:#dc2626;text-align:left;">清除标记</button>',
 	      function () { closeModal(); }
 	    );
@@ -3025,6 +3173,14 @@
 	          var act = btn.getAttribute('data-rule-act');
 	          if (act === 'clear') {
 	            removeInterceptRule(rule.id);
+	          } else if (act === 'resp') {
+	            netInterceptRules = sanitizeInterceptRules(netInterceptRules).map(function (r) {
+	              if (r.id !== rule.id) return r;
+	              r.interceptResp = !r.interceptResp;
+	              r.updatedAt = Date.now();
+	              return r;
+	            });
+	            saveInterceptRules();
 	          } else {
 	            netInterceptRules = sanitizeInterceptRules(netInterceptRules).map(function (r) {
 	              if (r.id !== rule.id) return r;
@@ -3047,7 +3203,8 @@
 	      return (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
 	    });
 	    var rows = rules.map(function (r) {
-	      var meta = (r.host || '(无域名)') + ' · ' + (r.hasBody ? '有正文' : '无正文') + ' · ' +
+	      var meta = (r.host || '(无域名)') + ' · ' + (r.hasBody ? '有正文' : '无正文') +
+	        (r.interceptResp ? ' · 拦响应' : '') + ' · ' +
 	        new Date(r.updatedAt || r.createdAt || Date.now()).toLocaleString();
 	      return '<div class="bh-rule-row" data-rule-id="' + escHtml(r.id) + '">' +
 	        '<span class="bh-rule-action ' + (r.action === 'intercept' ? 'intercept' : 'pass') + '">' +
@@ -3269,7 +3426,8 @@
 	  function updateInterceptBtn() {
 	    var btn = netPanel && netPanel.querySelector('#bh-intercept-btn');
 	    if (!btn) return;
-	    var suffix = netInterceptQueue.length ? ' ' + netInterceptQueue.length : '';
+	    var total = netInterceptQueue.length + netRespInterceptQueue.length;
+	    var suffix = total ? ' ' + total : '';
 	    btn.textContent = (netGlobalInterceptEnabled ? '● ' : '○ ') + '拦截' + suffix;
 	    btn.style.color = netGlobalInterceptEnabled ? '#dc2626' : '#888';
 	  }
@@ -3548,6 +3706,7 @@
 	      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
 	      syncGlobalInterceptEnabled();
 	      if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
+	      if (!netGlobalInterceptEnabled && netRespInterceptQueue.length) releaseAllRespIntercepts();
 	      saveNetConfig();
 	      updateInterceptBtn();
 	      renderNetList();
