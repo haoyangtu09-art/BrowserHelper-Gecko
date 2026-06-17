@@ -759,20 +759,53 @@
     ['Open', '打开'], ['Add', '添加'], ['Edit', '编辑'],
     // Sources 面板（部分标签）
     ['Beautify', '格式化'], ['Word Wrap', '自动换行'],
+    // ── Settings 面板（eruda 真实英文标签，逐字匹配）──
+    ['Asynchronous Rendering', '异步渲染'],
+    ['Enable JavaScript Execution', '启用 JavaScript 执行'],
+    ['Catch Global Errors', '捕获全局错误'],
+    ['Override Console', '接管 Console'],
+    ['Auto Display If Error Occurs', '出错时自动显示'],
+    ['Display Extra Information', '显示额外信息'],
+    ['Display Unenumerable Properties', '显示不可枚举属性'],
+    ['Access Getter Value', '读取 Getter 值'],
+    ['Lazy Evaluation', '延迟求值'],
+    ['Catch Event Listeners', '捕获事件监听器'],
+    ['Auto Refresh Elements', '自动刷新元素'],
+    ['Hide Eruda Setting', '隐藏 Eruda 设置'],
+    ['Show Line Numbers', '显示行号'],
+    ['Remember Entry Button Position', '记住入口按钮位置'],
+    ['Restore defaults and reload', '恢复默认并重新加载'],
+    ['System preference', '跟随系统'],
+    ['infinite', '不限'],
+    // ── Elements 盒模型分类名（DOM 里是小写，靠 capitalize 显示）──
+    ['margin', '外边距'], ['border', '边框'], ['padding', '内边距'],
+    ['content', '内容'], ['element.style', 'element.style'],
+    // ── Info / Snippets 分区与条目名 ──
+    ['User Agent', '用户代理'], ['Device', '设备'],
+    ['Border All', '显示所有边框'], ['Refresh Page', '刷新页面'],
+    ['Search Text', '搜索文本'], ['Edit Page', '编辑页面'],
+    ['Fit Screen', '适应屏幕'],
   ];
 
   var I18N_DICT = null;
-  // 数据展示区：这些容器里的文本是用户数据（console 输出、DOM 内容、存储值、
-  // 网络数据等），绝不能翻译，否则数据会被破坏。只翻译 UI 外壳（tab、按钮、设置项）。
+  // 数据展示区：这些容器里的文本是用户数据（console 输出、DOM 内容、存储的值、
+  // JSON/对象值等），绝不能翻译，否则数据会被破坏。
+  // 注意：只匹配"真正承载数据值"的容器——
+  //   luna-console        控制台输出
+  //   luna-data-grid-data 表格的数据行（表头 luna-data-grid-header-* 不在内，分类名可翻译）
+  //   luna-dom-viewer     DOM 树内容
+  //   luna-object-viewer  对象属性值
+  //   luna-json           JSON 数据
+  //   bh-net              自定义网络面板（URL/请求体等都是数据）
+  // 不再整块屏蔽 eruda-resources/eruda-sources/eruda-logs 面板，
+  // 这样面板里的分类名/表头/区块标题可以被翻译。
+  var DATA_REGION_RE = /luna-console|luna-data-grid-data|luna-dom-viewer|luna-object-viewer|luna-json|bh-net/;
   function inDataRegion(node) {
     var el = node.parentNode;
     while (el && el.nodeType === 1) {
       var cls = el.className;
-      if (typeof cls === 'string') {
-        // luna-* 是 eruda 用来渲染数据的组件库；eruda-logs 是控制台输出区
-        if (/luna-console|luna-data-grid|luna-dom-viewer|luna-object-viewer|luna-json|eruda-logs|eruda-resources|eruda-sources|bh-net/.test(cls)) {
-          return true;
-        }
+      if (typeof cls === 'string' && DATA_REGION_RE.test(cls)) {
+        return true;
       }
       el = el.parentNode;
     }
@@ -814,7 +847,7 @@
         '  var root=host.shadowRoot;',
         '  var MAP=' + mapJson + ';',
         '  var DICT={};for(var k=0;k<MAP.length;k++){DICT[MAP[k][0]]=MAP[k][1];}',
-        '  var DATA_RE=/luna-console|luna-data-grid|luna-dom-viewer|luna-object-viewer|luna-json|eruda-logs|eruda-resources|eruda-sources|bh-net/;',
+        '  var DATA_RE=/luna-console|luna-data-grid-data|luna-dom-viewer|luna-object-viewer|luna-json|bh-net/;',
         '  function inData(node){',
         '    var el=node.parentNode;',
         '    while(el&&el.nodeType===1){',
