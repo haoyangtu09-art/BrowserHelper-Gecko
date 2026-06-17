@@ -1,185 +1,284 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with this repository.
+Current working context for BrowserHelper-Gecko. Prefer this file over older chat history; old
+debugging notes may refer to reverted code.
+
+## Current Code State
+
+On 2026-06-17 the Network panel was rolled back to the state before the large
+search/batch-injection update.
+
+- Reverted commits: `9ec32734` and `5fdd5ae6`.
+- Revert commit: `04243ec4 Revert network editing and injection update`.
+- `content.js` was verified to match `c2eea7f1` after the revert.
+- The uncommitted `CLAUDE.md` cleanup is documentation-only unless explicitly committed later.
+
+Features from `9ec32734` / `5fdd5ae6` are **not active** after this rollback:
+
+- Full-screen request/response string search with blue match highlights.
+- Batch injection module (`注入`) and `bhNetInject*` storage keys.
+- Request/response direction expansion for user-mark intercept rules.
+- Fetch response intercept/edit path added by that update.
+- Toolbar `额外 ▾` regrouping from that update.
+- The later noise-filter tweak that tried to fix `拦截中 = 0`.
+
+The user reported that APK `5fdd5ae6` still showed `拦截中` count `0` after enabling intercept.
+That failed fix is now reverted; do not treat it as a solved root cause if the feature is
+reintroduced.
 
 ## Project Overview
 
-BrowserHelper-Gecko is a fork of Mozilla's Reference Browser, an Android browser built on
-GeckoView + Android Components (v153 nightly). Additions over upstream:
-- Chinese UI localization
-- Cookie export/view (built-in WebExtension `cookie_export_helper`)
-- Eruda DevTools + custom Network capture panel (built-in WebExtension `devtools_injector`, active dev)
-- Custom top-tab strip, density override, Google as default search engine
+BrowserHelper-Gecko is a fork of Mozilla Reference Browser using GeckoView + Android Components
+(v153 nightly). Project-specific additions:
 
-## Build & Deploy
+- Chinese UI localization.
+- Cookie export/view through built-in WebExtension `cookie_export_helper`.
+- Eruda DevTools through built-in WebExtension `devtools_injector`.
+- Custom Network capture/intercept panel implemented in
+  `app/src/main/assets/extensions/devtools_injector/content.js`.
+- Custom top tab strip, density override, and Google as default search engine.
+
+## Build And Deploy
+
+Use the repository explicitly with `gh`; the local `gh` default repo may point at upstream
+`mozilla-mobile/reference-browser`.
 
 ```bash
-./gradlew :app:assembleDebug --no-daemon          # local debug APK
-gh run list -R haoyangtu09-art/BrowserHelper-Gecko # CI: push main → auto-build arm64 APK
+./gradlew :app:assembleDebug --no-daemon
+gh workflow run build.yml --ref main -R haoyangtu09-art/BrowserHelper-Gecko
+gh run watch <run-id> -R haoyangtu09-art/BrowserHelper-Gecko --exit-status
+gh run download <run-id> -R haoyangtu09-art/BrowserHelper-Gecko --dir artifacts/run-<run-id>
 ```
 
-Output: `app/build/outputs/apk/debug/*arm64-v8a*.apk`
-No unit tests; testing is manual on-device.
+Local Termux builds need Java 17. If local Gradle fails because Java 17 is missing, use GitHub
+Actions; `.github/workflows/build.yml` runs `:app:assembleDebug` with Temurin 17.
 
-## Key File Locations
+Output:
+
+- Local APK: `app/build/outputs/apk/debug/*arm64-v8a*.apk`
+- CI artifact: `BrowserHelper-Gecko-<short-sha>-arm64.apk`
+
+No unit tests. Usual checks: `node --check content.js`, `git diff --check`, GitHub Actions build,
+and manual on-device testing.
+
+## Key Files
 
 | Purpose | Path |
 |---------|------|
-| **Eruda content script (primary edit target)** | `app/src/main/assets/extensions/devtools_injector/content.js` |
-| Eruda JS bundle (patched v3.4.3) | `app/src/main/assets/extensions/devtools_injector/eruda.min.js` |
+| Main DevTools content script | `app/src/main/assets/extensions/devtools_injector/content.js` |
+| Eruda JS bundle, patched v3.4.3 | `app/src/main/assets/extensions/devtools_injector/eruda.min.js` |
 | DevTools manifest | `app/src/main/assets/extensions/devtools_injector/manifest.json` |
-| Native DevTools Kotlin helper | `app/src/main/java/org/mozilla/reference/browser/devtools/DevToolsHelper.kt` |
-| App entry / extension install | `app/src/main/java/org/mozilla/reference/browser/BrowserApplication.kt` |
-| Toolbar menu (Chinese labels) | `app/src/main/java/org/mozilla/reference/browser/browser/ToolbarIntegration.kt` |
-| GeckoEngine / density config | `app/src/main/java/org/mozilla/reference/browser/components/Core.kt` |
-| Cookie extension (working reference) | `app/src/main/assets/extensions/cookie_export_helper/` |
+| Native DevTools helper | `app/src/main/java/org/mozilla/reference/browser/devtools/DevToolsHelper.kt` |
+| App extension install | `app/src/main/java/org/mozilla/reference/browser/BrowserApplication.kt` |
+| Toolbar menu | `app/src/main/java/org/mozilla/reference/browser/browser/ToolbarIntegration.kt` |
+| GeckoEngine/density config | `app/src/main/java/org/mozilla/reference/browser/components/Core.kt` |
+| Cookie extension reference | `app/src/main/assets/extensions/cookie_export_helper/` |
 
-## Built-in WebExtension Pattern
+## Built-In WebExtension Pattern
 
-Uses `BuiltInWebExtensionController` from `mozilla.components.support.webextensions`:
-1. Assets in `app/src/main/assets/extensions/<name>/`; URL = `resource://android/assets/extensions/<name>/`
-2. `controller.install(runtime, onSuccess, onError)` from `BrowserApplication.onCreate`
-3. **Handler registered in `onSuccess`** — before content script calls `connectNative()`
-4. `BrowserStore.flow()` observes tab changes to re-register handler per new `EngineSession`
-5. `registerContentMessageHandler` keeps only the **latest** session's handler
+DevTools is a built-in content-script WebExtension.
 
-### DevTools Extension
-- **Type**: content script. **Port**: `"devtools_inject"`.
-- **Critical permission**: `nativeMessagingFromContent` (content scripts calling `connectNative()` silently fail without it).
-- Entry: Menu "开发者工具" → `DevToolsHelper.toggle(context)` → sends `{action:"toggle"}` over port.
+- Native port: `devtools_inject`.
+- Required permission: `nativeMessagingFromContent`; content scripts cannot reliably
+  `connectNative()` without it.
+- Storage permission is used for persistent Network intercept marking rules.
+- Entry point: app menu `开发者工具` -> `DevToolsHelper.toggle(context)` -> native port message.
+- `BrowserApplication` installs the extension and registers the content message handler in
+  `onSuccess`.
 
-## GeckoView Content Script: Two Execution Worlds
+## GeckoView Execution Worlds
 
-Every page load produces two distinct JS environments that share the DOM but have separate globals:
+Every page load has two JS worlds sharing the DOM but not globals.
 
-| Mode | How eruda loads | Intercept method | When |
-|------|----------------|-----------------|------|
-| **page-world** | `fetch(eruda.min.js)` → Blob URL `<script>` injected | `runInPage(INTERCEPT_JS)` string eval via blob `<script>` | Normal sites |
-| **isolated-world** | `new Function(src)()` in content script global | `exportFunction` + `window.wrappedJSObject` (Gecko-only) | Strong-CSP sites (chatgpt, github…) |
+| Mode | Eruda loading | Network hook path | Typical site |
+|------|---------------|-------------------|--------------|
+| `page` | fetch `eruda.min.js`, inject Blob/script into page | `runInPage(INTERCEPT_JS)` | Normal pages |
+| `isolated` | `new Function(src)()` in content script global | `exportFunction` + `wrappedJSObject` | Strong-CSP pages |
 
-**`erudaMode`** variable (`'page'` or `'isolated'`) is set at load time and gates all dual-path logic.
+Important constraints:
 
-## Critical GeckoView Limitations
+- `tabs.executeScript` is not available; use declared content scripts.
+- Strong-CSP pages may block inline/script injection; isolated mode must use Gecko-only
+  `exportFunction`, `cloneInto`, and `window.wrappedJSObject`.
+- `new Function()` loses Window `this`; patched eruda must use `window.getComputedStyle()`.
+- `@font-face` inside shadow root is ignored in Gecko; inject fonts into document light DOM.
 
-- `tabs.executeScript` **not supported** — only `content_scripts` declaration works.
-- `eruda` global is `undefined` in isolated world after `content_scripts` load — must `fetch()` source and `new Function()` it.
-- `new Function()` body loses Window `this` — bare `getComputedStyle()` throws; must use `window.getComputedStyle()`.
-- Isolated world shares DOM with page but has its own JS global and its own `window` proxy.
-- `@font-face` inside shadow root is ignored (Gecko bug 1714278) — must inject into document light DOM.
-- Strong-CSP sites block inline `<script>`; use blob URL in `runInPage()` with inline fallback.
-- `exportFunction` / `cloneInto` / `window.wrappedJSObject` are Gecko-only APIs for cross-world bridging.
+## Eruda Bundle Patch Requirements
 
-## eruda.min.js Patches (Eruda v3.4.3, DO NOT regenerate without re-applying)
+`eruda.min.js` is a patched Eruda v3.4.3 bundle. If regenerating it, re-apply:
 
-Original at `$HOME/eruda.min.js`. Patches that must be re-applied if regenerating:
-1. Remove `"network"` from default tool list — prevents eruda patching `window.fetch`/`window.WebSocket`
-2. Remove `window.fetch = function(){...}` block — isolated world makes `window.fetch` read-only
-3. Remove `window.WebSocket = t` assignment — same reason
-4. Replace bare `getComputedStyle(` → `window.getComputedStyle(` — needed for isolated-world execution
+1. Remove `"network"` from Eruda's default tool list. The custom Network panel replaces it.
+2. Remove Eruda's `window.fetch = ...` patch.
+3. Remove Eruda's `window.WebSocket = ...` patch.
+4. Replace bare `getComputedStyle(` calls with `window.getComputedStyle(`.
 
-eruda tab names are **lowercase in DOM** (CSS `text-transform:capitalize` shows them capitalized).
-I18n map keys must therefore be lowercase (`'console'`, `'elements'`, etc.) to match text nodes.
+Eruda tab names are lowercase in the DOM; i18n keys for tab labels must be lowercase.
 
-## Network Capture Panel (content.js — custom tool added to eruda)
+## Network Panel Architecture
 
-### Architecture
+The Network panel is a custom Eruda tool built in `content.js`. Eruda calls only
+`tool.init($el)`, so panel DOM, state, and event binding live in the content script.
 
-The panel is a custom eruda Tool built entirely in `content.js` (content-script world).
-It is registered via `eruda.add(tool)` — eruda only calls `tool.init($el)`, never `render()`.
+Registration differs by world:
 
-**Dual-path registration:**
-- `erudaMode === 'page'` → `injectNetToolPageWorld()`: builds DOM in content world, appends to `document.body` hidden, then injects page-world script that calls `eruda.add()` and moves `#bh-net` into eruda's container. `show()`/`hide()` communicated back via `postMessage({__bhNet:true, type:'panelShow'/'panelHide'})`.
-- `erudaMode === 'isolated'` → `registerNetTool(self.eruda)`: calls `eruda.add(tool)` directly.
+- Page mode: `injectNetToolPageWorld()` builds hidden DOM in content world, injects a page-world
+  Eruda tool script, then moves `#bh-net` into Eruda's container.
+- Isolated mode: `registerNetTool(self.eruda)` calls `eruda.add(tool)` directly.
 
-### Cross-world Messaging (`window.postMessage` channel)
+All network bridge messages use `window.postMessage` with `__bhNet: true`:
 
-All messages carry `{__bhNet: true, type: ...}`. Types:
-- `req` — interceptor → content: new request captured
-- `resp` — interceptor → content: response received (or error/mock)
-- `panelShow` / `panelHide` — page-world tool → content: visibility change
-- `breakpoint` — interceptor → content: request hit a breakpoint, needs editing
-- `bpResolve` — content → interceptor: user decision (`action:'continue'|'abort'` + edited req fields)
+- `req`: interceptor captured a request.
+- `resp`: interceptor captured a response, error, or mock result.
+- `breakpoint`: request is paused and needs user action.
+- `bpResolve`: UI tells the interceptor to continue or abort.
+- `plain`: optional plaintext probe candidate.
+- `panelShow` / `panelHide`: Eruda tool visibility changed.
 
-### Network Interceptor
+## Network Interceptor Current Behavior
 
-**Page mode**: `runInPage(INTERCEPT_JS)` injects a string-built script into page world.
-**Isolated mode**: `injectInterceptorViaExportFunction()` uses `exportFunction`/`wrappedJSObject` — no `<script>` needed, bypasses CSP entirely.
+Both page-world and isolated-world paths hook `window.fetch` and `XMLHttpRequest`.
 
-Both paths hook `window.fetch` and `window.XMLHttpRequest`. Each request:
-1. Checks `window.__bhMockRules` → if matched, returns fake Response immediately (fetch) or fires synthetic XHR events (XHR).
-2. Checks `window.__bhBreakpoints` → if matched, calls `waitBp()` which postMessages `breakpoint` to content world, then awaits `bpResolve` message before proceeding.
-3. Reads `window.__bhThrottle` for delay/throttle.
+Fetch request-side timing in the reverted/current code:
 
-**Writing config to page world:**
-- `injectMockRules()` — writes `window.__bhMockRules`
-- `injectBreakpoints()` — writes `window.__bhBreakpoints`
-- `applyThrottle()` — writes `window.__bhThrottle`
-All three try `wrappedJSObject`+`cloneInto` first (isolated mode, bypasses CSP), fall back to `runInPage`.
+1. Collect URL, method, headers, and a synchronously readable `init.body` string when available.
+2. Send `req` message to content world.
+3. Check mock rules.
+4. Check manual breakpoints and global/user-mark request intercept.
+5. If intercepted, call `waitBp()` before `_origFetch`; page request waits for `bpResolve`.
+6. Call original fetch.
+7. Read `resp.clone().text()` asynchronously for display/logging, send `resp`, then return the
+   original `Response` to the page.
 
-### Key Functions & Line Ranges (approximate, subject to drift)
+Current code does **not** do batch injection or response-body replacement.
+
+XHR request-side timing is similar for request interception. XHR mock can synthesize events.
+True XHR response editing/interception is not implemented.
+
+Config mirrored into page world:
+
+- `__bhMockRules`
+- `__bhBreakpoints`
+- `__bhThrottle`
+- `__bhGlobalInterceptEnabled`
+- `__bhInterceptRules`
+- `__bhPlainProbeEnabled`
+
+Persistent storage key:
+
+- `bhNetInterceptRules`
+
+Request history is capped at 200 records.
+
+## Global Intercept UI Model
+
+Global request intercept does not open a modal for every request. Pending items live in
+`netInterceptQueue` and render in the top `拦截中` list section.
+
+Expected flow:
+
+1. `#bh-intercept-btn` toggles `netGlobalInterceptEnabled`.
+2. `syncGlobalInterceptEnabled()` mirrors the flag into page world when needed.
+3. A fetch/XHR hook calls `checkGlobalIntercept(...)`.
+4. The hook calls `waitBp(..., mode:'intercept')`.
+5. A `breakpoint` message reaches the content-world listener.
+6. `enqueueBreakpoint()` routes `mode === 'intercept'` to `enqueueIntercept()`.
+7. `netInterceptQueue.length` increases and `renderNetList()` shows `拦截中 N`.
+
+When a pending intercept row is selected:
+
+- `netSelIntercept` is set and `netSelReq` is cleared.
+- Request headers/body are editable; response tabs are placeholders until the request is sent.
+- Bottom actions are relabeled: `重放` -> `发送`, `设断点` -> `中止`.
+- `sendSelectedIntercept()` posts `bpResolve` with edited fields.
+- `abortSelectedIntercept()` posts `bpResolve` with `action:'abort'`.
+
+Manual URL breakpoints still use `openBreakpointEditor()` and the separate
+`netBreakpointQueue` / `netActiveBreakpoint` modal queue.
+
+## Current Network UI Features
+
+Active after rollback:
+
+- URL filter field (`#bh-filter`) using light-DOM edit overlay.
+- Export HAR (`exportHAR()`).
+- Manual breakpoint management.
+- Mock response rules.
+- Weak network simulation.
+- Request pass/intercept marking rules (`bhNetInterceptRules`).
+- Plaintext probe (`明文`).
+- Detail editor overlay for request headers/body.
+
+Not active after rollback:
+
+- Full body/header string search with blue match highlights.
+- Batch injection/replacement rules.
+- Response-side intercept/edit rules.
+- `额外 ▾` toolbar regrouping.
+
+## Detail Editing And IME Constraint
+
+GeckoView Android has a practical IME issue with editable fields inside shadow DOM: soft-keyboard
+composition can lose characters or route input to the page. The safe rule is:
+
+**Any text entry used by the DevTools UI must happen in a light-DOM overlay attached to
+`document.body`, not directly inside Eruda's shadow root.**
+
+Current model:
+
+- `#bh-detail-body` is a read-only display textarea.
+- Tapping editable tabs opens `openEditOverlay()`.
+- `#bh-filter` is read-only and opens the overlay for search text.
+- Modal fields are made read-only and bound through `bindModalFieldEditors()`.
+- `openModal()` must not stop click/touch events in capture phase; target controls need their own
+  events before modal propagation is stopped.
+
+Editable detail tabs:
+
+- Tab 0: request headers.
+- Tab 1: request body.
+- Tabs 2-4: response headers, response body, plaintext candidates; read-only.
+
+`renderDetail(force)` should not overwrite dirty edit state unless forced.
+
+## Key Functions
 
 | Function | Purpose |
 |----------|---------|
-| `buildNetPanel()` | Creates all panel DOM; binds all button listeners; sets `netPanel` |
-| `renderNetList()` | Redraws request list; binds row click → sets `netSelReq`, calls `renderDetail(true)` |
-| `renderDetail(force)` | Renders selected request tabs/body; skips textarea overwrite if `netEditing && !force` |
-| `injectInterceptor()` | Gates page vs isolated interceptor injection |
-| `INTERCEPT_JS` | Page-world interceptor source (string); fetch+XHR hooks + mock/bp/throttle |
-| `injectInterceptorViaExportFunction()` | Isolated-mode interceptor via exportFunction |
-| `openModal(title, bodyHtml, onOk)` | Modal appended to `netPanel` (inside shadow root); z-index max |
-| `openBreakpointEditor(d)` | Breakpoint hit modal: "放行" sends continue, "中止" sends abort |
-| `openBreakpointModal()` | Manage breakpoint list; calls `injectBreakpoints()` on change |
-| `openMockModal()` | Manage Mock rules; calls `injectMockRules()` on change |
-| `openThrottleMenu()` | Preset picker (long-press 弱网); calls `applyThrottle()` |
-| `replayReq(r, tag)` | Replays request using content-world `fetch`; result appears in list |
-| `_i18nCore()` | Translates eruda UI text nodes; page mode via `runInPage`, isolated direct DOM |
-| `installI18n()` | Called after eruda loads; triggers i18n + interceptor + tool registration |
-| `injectErudaFontFace(code)` | Extracts `@font-face` from eruda source → injects into `document.head` (both modes) |
-| `flashBtn(btn, msg)` | Shows 1s feedback text on a button then restores original label |
+| `buildNetPanel()` | Builds the Network panel DOM and toolbar. |
+| `renderNetList()` | Renders history plus `拦截中`; binds row selection and long-press menus. |
+| `renderDetail(force)` | Renders selected request/intercept details and tabs. |
+| `injectInterceptor()` | Selects page-world or isolated-world interceptor path. |
+| `INTERCEPT_JS` | Page-world fetch/XHR hook source string. |
+| `injectInterceptorViaExportFunction()` | Isolated-mode fetch/XHR hook implementation. |
+| `syncGlobalInterceptEnabled()` | Mirrors global intercept toggle into page world. |
+| `checkGlobalIntercept()` | Decides request pause from rules/global toggle/noise filter. Exists in both hook paths. |
+| `enqueueIntercept()` | Pushes global/user-mark intercepted requests into `netInterceptQueue`. |
+| `sendSelectedIntercept()` | Continues selected queued intercept with edits. |
+| `abortSelectedIntercept()` | Aborts selected queued intercept. |
+| `releaseAllIntercepts()` | Continues queued intercepts when capture is disabled. |
+| `openBreakpointModal()` | Manual breakpoint config UI. |
+| `openMockModal()` | Mock response config UI. |
+| `openThrottleMenu()` | Weak network config UI. |
+| `openRulesView()` | Saved pass/intercept marking rules view. |
+| `exportHAR()` | Exports captured network records. |
+| `openEditOverlay()` | Light-DOM full-screen text editor. |
+| `bindModalFieldEditors()` | Routes modal inputs/textareas through the light-DOM editor. |
 
-### Panel DOM Variables (set in buildNetPanel, used globally)
+## Future Branch: Streaming Intercept Shell
 
-| Variable | DOM Element |
-|----------|-------------|
-| `netPanel` | `#bh-net` — panel root (appended into eruda container) |
-| `netListEl` | `#bh-list` — request list (flex shrinks to 30% when detail shown) |
-| `netDetailEl` | `#bh-detail` — detail area (hidden until row selected) |
-| `netDetailBody` | `#bh-detail-body` — textarea; editable; focus sets `netEditing=true` |
-| `netDetailActs` | `#bh-detail-acts` — bottom action buttons row |
-| `netFilterEl` | `#bh-filter` — URL filter input |
-| `netEnableBtn` | `#bh-toggle` — capture on/off toggle |
-| `netModal` | current open modal element (null if none) |
+Do not start this work until the user explicitly says **"开始做流式拦截壳"**.
 
-State variables: `netRequests[]`, `netSelReq`, `netDetailTab` (0-3), `netEditing`, `netPanelVisible`, `netBreakpoints[]`, `netMockRules[]`, `netThrottle{enabled,latencyMs,kbps}`.
+This is a future design for response-side replacement if that feature is reintroduced. The
+reverted/current code only reads `resp.clone().text()` for capture and returns the original
+`Response`; it does not rebuild responses for replacement.
 
-### Modal System
+Future direction:
 
-`openModal(title, bodyHtml, onOk)` — appended to `netPanel` (shadow root), z-index `2147483647`.
-**Critical**: modals must NOT be appended to `document.body` — eruda panel z-index=9999999 covers it.
-Use `closeModal()` to dismiss. `netModal` holds the current element.
-
-### Breakpoint Editing Flow
-
-1. Interceptor calls `waitBp(reqId, ...)` → postMessages `{type:'breakpoint'}` → page-world Promise pending in `window.__bhBpPending[reqId]`.
-2. Content world receives `breakpoint` → `openBreakpointEditor(d)` → modal with editable URL/method/headers/body.
-3. User clicks "放行" → `bpResolve(reqId, {action:'continue', ...})` → `window.postMessage({type:'bpResolve'})`.
-4. Page-world listener resolves the Promise; request proceeds with edited parameters.
-5. "中止" → `action:'abort'` → interceptor rejects the Promise / stops XHR.
-Isolated mode: pending Promise lives in `_bpIsoPending{}` in content world; `bpResolve` message also received by content world listener.
-
-## I18n (Chinese translation of eruda UI)
-
-- `I18N_MAP` — array of `[englishText, chineseText]` pairs. Keys are **exact** DOM text node values.
-- Tab names lowercase (`'console'`/`'elements'` etc.) to match DOM (CSS does capitalization).
-- `inDataRegion(node)` — guards against translating raw data values. Blocks nodes inside:
-  `luna-console`, `luna-data-grid-data` (rows only, NOT headers), `luna-dom-viewer`,
-  `luna-object-viewer`, `luna-json`, `bh-net`. Panel-level containers (`eruda-resources` etc.) are NOT blocked so category/header labels can be translated.
-- Settings labels use eruda's real English strings (from `.switch()`/`.select()`/`.range()` calls in eruda source).
-
-## Local Development with Local Dependencies
-
-```
-# local.properties
-autoPublish.android-components.dir=../android-components
-dependencySubstitutions.geckoviewTopsrcdir=/path/to/mozilla-central
-```
+- Use a `TransformStream`-based response path instead of read-all-then-rebuild.
+- `Response` can accept a `ReadableStream` as body.
+- Matching/replacement must handle strings split across chunk boundaries by keeping a small overlap
+  buffer.
+- Keep conservative filters: pass through `event-stream`, binary content, large files, media,
+  WASM, and unknown/high-risk types.
+- This should replace any future read-all-then-rebuild response modification path, not add another
+  user-facing feature.
