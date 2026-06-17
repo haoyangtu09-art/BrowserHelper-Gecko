@@ -818,21 +818,17 @@
     if (!netActiveBreakpoint) openNextBreakpoint();
   }
 
-  function enqueueIntercept(d) {
-    d.ts = Date.now();
-    d.reqHeaders = d.reqHeaders || {};
-    d.reqBody = d.reqBody || '';
-    netInterceptQueue.push(d);
-    if (!netSelReq && !netSelIntercept) {
-      netSelIntercept = d;
-      netDetailTab = byteLen(d.reqBody) > 0 ? 1 : 0;
-    }
-    updateInterceptBtn();
-    if (netPanelVisible) {
-      renderNetList();
-      renderDetail(true);
-    }
-  }
+	  function enqueueIntercept(d) {
+	    d.ts = Date.now();
+	    d.reqHeaders = d.reqHeaders || {};
+	    d.reqBody = d.reqBody || '';
+	    netInterceptQueue.push(d);
+	    updateInterceptBtn();
+	    if (netPanelVisible) {
+	      renderNetList();
+	      renderDetail();
+	    }
+	  }
 
   function openNextBreakpoint() {
     if (netActiveBreakpoint || !netBreakpointQueue.length) return;
@@ -1548,8 +1544,8 @@
     '  background:#f6f8fa;color:#555;font-size:24px;line-height:1;cursor:pointer;}',
     '#bh-detail-close:active{background:#e8eaed;color:#111;}',
     // textarea 代替 div：原生支持长按选中复制、单点光标编辑
-    '#bh-detail-body{flex:1 1 auto;min-height:200px;overflow:auto;padding:10px;font-size:13px;color:#111;',
-    '  white-space:pre;word-break:break-all;font-family:monospace;background:#fff;',
+	    '#bh-detail-body{flex:1 1 auto;min-height:200px;overflow:auto;padding:10px;font-size:13px;color:#111;',
+	    '  white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:monospace;background:#fff;',
     '  border:none;outline:none;resize:none;width:100%;line-height:1.5;}',
     '#bh-detail-acts{display:flex;gap:8px;padding:8px 10px;flex-wrap:wrap;flex:0 0 auto;',
     '  border-top:1px solid #d0d7de;background:#f6f8fa;}',
@@ -1605,11 +1601,12 @@
   var netDetailActs = null;
   var netFilterEl = null;
   var netEnableBtn = null;
-  var netSelReq = null;  // 当前选中的请求条目
-  var netDetailTab = 0;  // 0=请求头 1=请求体 2=响应头 3=响应体 4=明文
-  var netModal = null;   // 当前弹窗 element
-  var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
-  var netHideTunnelNoise = false;
+	  var netSelReq = null;  // 当前选中的请求条目
+	  var netDetailTab = 0;  // 0=请求头 1=请求体 2=响应头 3=响应体 4=明文
+	  var netModal = null;   // 当前弹窗 element
+	  var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
+	  var netDetailDirty = false;
+	  var netHideTunnelNoise = false;
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
   var netGlobalInterceptEnabled = false;
@@ -1929,9 +1926,9 @@
     return lines.join('\n');
   }
 
-  function parseInterceptHead(text, d) {
-    var headers = {};
-    String(text || '').split(/\r?\n/).forEach(function (line) {
+	  function parseInterceptHead(text, d) {
+	    var headers = {};
+	    String(text || '').split(/\r?\n/).forEach(function (line) {
       if (!line.trim()) return;
       var idx = line.indexOf(':');
       if (idx < 0) return;
@@ -1940,15 +1937,41 @@
       if (/^method$/i.test(key)) d.method = (val || d.method || 'GET').toUpperCase();
       else if (/^url$/i.test(key)) d.url = val || d.url;
       else headers[key] = val;
-    });
-    d.reqHeaders = headers;
-  }
+	    });
+	    d.reqHeaders = headers;
+	  }
 
-  function syncInterceptEdit() {
-    if (!netSelIntercept || !netDetailBody) return;
-    if (netDetailTab === 0) parseInterceptHead(netDetailBody.value, netSelIntercept);
-    else if (netDetailTab === 1) netSelIntercept.reqBody = netDetailBody.value;
-  }
+	  function bodyValueFromTextarea(emptyAsNull) {
+	    if (!netDetailBody) return emptyAsNull ? null : '';
+	    var value = netDetailBody.value;
+	    if (value === '(无)') return emptyAsNull ? null : '';
+	    return value;
+	  }
+
+	  function syncInterceptEdit() {
+	    if (!netSelIntercept || !netDetailBody || !netDetailDirty) return;
+	    if (netDetailTab === 0) parseInterceptHead(netDetailBody.value, netSelIntercept);
+	    else if (netDetailTab === 1) {
+	      var body = bodyValueFromTextarea(false);
+	      if (body !== netSelIntercept.reqBody) removeHeaderCI(netSelIntercept.reqHeaders, 'content-length');
+	      netSelIntercept.reqBody = body;
+	    }
+	    netDetailDirty = false;
+	  }
+
+	  function syncCurrentDetailEdit() {
+	    if (!netDetailDirty || !netDetailBody) return;
+	    if (netSelIntercept) {
+	      syncInterceptEdit();
+	      return;
+	    }
+	    if (netSelReq && netDetailTab === 1) {
+	      var body = bodyValueFromTextarea(true);
+	      if (body !== netSelReq.reqBody) removeHeaderCI(netSelReq.reqHeaders, 'content-length');
+	      netSelReq.reqBody = body;
+	    }
+	    netDetailDirty = false;
+	  }
 
   function interceptAsReq(d) {
     return {
@@ -1968,10 +1991,10 @@
     };
   }
 
-  function finishIntercept(d, payload) {
-    if (!d || d.__done) return;
-    if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncInterceptEdit();
-    d.__done = true;
+	  function finishIntercept(d, payload) {
+	    if (!d || d.__done) return;
+	    if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncCurrentDetailEdit();
+	    d.__done = true;
     bpResolve(d.reqId, payload);
     netInterceptQueue = netInterceptQueue.filter(function (x) { return x.reqId !== d.reqId; });
     if (netSelIntercept && netSelIntercept.reqId === d.reqId) {
@@ -1984,10 +2007,10 @@
     renderDetail(true);
   }
 
-  function sendSelectedIntercept() {
-    if (!netSelIntercept) return;
-    syncInterceptEdit();
-    finishIntercept(netSelIntercept, {
+	  function sendSelectedIntercept() {
+	    if (!netSelIntercept) return;
+	    syncCurrentDetailEdit();
+	    finishIntercept(netSelIntercept, {
       action: 'continue',
       url: netSelIntercept.url,
       method: String(netSelIntercept.method || 'GET').toUpperCase(),
@@ -2003,7 +2026,7 @@
 
 	  function releaseAllIntercepts() {
 	    netInterceptQueue.slice().forEach(function (d) {
-	      if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncInterceptEdit();
+	      if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncCurrentDetailEdit();
 	      finishIntercept(d, {
 	        action: 'continue',
 	        url: d.url,
@@ -2116,7 +2139,7 @@
     // 绑定点击
 	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-intercept'), function (el) {
 	      el.addEventListener('click', function () {
-	        if (netSelIntercept) syncInterceptEdit();
+	        syncCurrentDetailEdit();
 	        var id = el.getAttribute('data-int-id');
 	        netSelIntercept = netInterceptQueue.find(function (r) { return r.reqId === id; }) || null;
         netSelReq = null;
@@ -2134,8 +2157,8 @@
 	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-row'), function (el) {
 	      if (el.getAttribute('data-int-id')) return;
 	      el.addEventListener('click', function () {
-	        if (netSelIntercept) syncInterceptEdit();
-        var id = el.getAttribute('data-id');
+	        syncCurrentDetailEdit();
+	        var id = el.getAttribute('data-id');
         netSelReq = netRequests.find(function (r) { return r.reqId === id; }) || null;
         netSelIntercept = null;
         setNetEditing(false); // 切换到新请求，退出编辑态以便显示新内容
@@ -2151,9 +2174,9 @@
 	    });
 	  }
 
-  function closeNetDetail() {
-    if (netSelIntercept) syncInterceptEdit();
-    netSelReq = null;
+	  function closeNetDetail() {
+	    syncCurrentDetailEdit();
+	    netSelReq = null;
     netSelIntercept = null;
     setNetEditing(false);
     try { if (netDetailBody) netDetailBody.blur(); } catch (e) {}
@@ -2167,46 +2190,75 @@
   function truncUrl(url) {
     return url.length > 60 ? url.slice(0, 60) + '…' : url;
   }
-  function fmtHeaders(obj) {
-    if (!obj) return '(无)';
-    return Object.keys(obj).map(function (k) { return k + ': ' + obj[k]; }).join('\n') || '(无)';
-  }
+	  function fmtHeaders(obj) {
+	    if (!obj) return '(无)';
+	    return Object.keys(obj).map(function (k) { return k + ': ' + obj[k]; }).join('\n') || '(无)';
+	  }
 
-  function renderDetail(force) {
-    if (!netDetailEl || !netDetailBody) return;
-    var pendingIntercept = !!netSelIntercept;
-    if (!netSelReq && !pendingIntercept) {
+	  function isJsonLikeBody(body, headers) {
+	    if (body == null) return false;
+	    var text = String(body).trim();
+	    if (!text) return false;
+	    var ct = headerValue(headers, 'content-type').toLowerCase();
+	    return /json|graphql/.test(ct) || /^[\[{]/.test(text);
+	  }
+
+	  function formatBodyForDisplay(body, headers) {
+	    if (body == null) return '(无)';
+	    var text = String(body);
+	    if (!text.trim()) return text;
+	    if (isJsonLikeBody(text, headers)) {
+	      try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) {}
+	    }
+	    return text;
+	  }
+
+	  function removeHeaderCI(headers, name) {
+	    if (!headers) return headers;
+	    var target = String(name || '').toLowerCase();
+	    Object.keys(headers).forEach(function (k) {
+	      if (k.toLowerCase() === target) delete headers[k];
+	    });
+	    return headers;
+	  }
+
+	  function renderDetail(force) {
+	    if (!netDetailEl || !netDetailBody) return;
+	    var pendingIntercept = !!netSelIntercept;
+	    if (!netSelReq && !pendingIntercept) {
       netDetailEl.style.display = 'none';
       if (netListEl) netListEl.style.flex = '1 1 auto';
       return;
     }
-    netDetailEl.style.display = 'flex';
-    // 详情展开时列表收缩到约 30%，把空间让给请求/响应体
-    if (netListEl) netListEl.style.flex = '0 0 30%';
-    var r = pendingIntercept ? interceptAsReq(netSelIntercept) : netSelReq;
-    var tabs = ['请求头', '请求体', '响应头', '响应体', '明文'];
-    var tabsEl = netDetailEl.querySelector('#bh-detail-tabs');
-    tabsEl.innerHTML = tabs.map(function (t, i) {
-      return '<div class="bh-dtab' + (netDetailTab === i ? ' active' : '') + '" data-i="' + i + '">' + t + '</div>';
-    }).join('');
-    Array.prototype.forEach.call(tabsEl.querySelectorAll('.bh-dtab'), function (el) {
-      el.addEventListener('click', function () {
-        if (pendingIntercept) syncInterceptEdit();
-        netDetailTab = parseInt(el.getAttribute('data-i'));
-        renderDetail(true); // 用户主动切 tab，强制刷新内容
-      });
-    });
-    updateDetailActionButtons(pendingIntercept);
-    // 用户正在编辑且非强制刷新时，不覆盖 textarea 内容（修复"输入不进去"/光标丢失）
-    if (netEditing && !force) return;
-    var content = '';
-    if (pendingIntercept && netDetailTab === 0) content = fmtInterceptHead(netSelIntercept);
-    else if (netDetailTab === 0) content = fmtHeaders(r.reqHeaders);
-    else if (netDetailTab === 1) content = r.reqBody != null ? r.reqBody : '(无)';
-    else if (netDetailTab === 2) {
-      if (pendingIntercept) {
-        content = '(请求已拦截，尚未发送)';
-      } else {
+	    netDetailEl.style.display = 'flex';
+	    // 详情展开时列表收缩到约 30%，把空间让给请求/响应体
+	    if (netListEl) netListEl.style.flex = '0 0 30%';
+	    var r = pendingIntercept ? interceptAsReq(netSelIntercept) : netSelReq;
+	    updateDetailActionButtons(pendingIntercept);
+	    // 编辑中收到网络刷新时不改任何详情 DOM。之前这里仍会重建 tab，
+	    // Android/GeckoView 上会让 IME 的目标 textarea 丢焦点，后续字符穿到页面。
+	    if ((netEditing || netDetailDirty) && !force) return;
+	    var tabs = ['请求头', '请求体', '响应头', '响应体', '明文'];
+	    var tabsEl = netDetailEl.querySelector('#bh-detail-tabs');
+	    tabsEl.innerHTML = tabs.map(function (t, i) {
+	      return '<div class="bh-dtab' + (netDetailTab === i ? ' active' : '') + '" data-i="' + i + '">' + t + '</div>';
+	    }).join('');
+	    Array.prototype.forEach.call(tabsEl.querySelectorAll('.bh-dtab'), function (el) {
+	      el.addEventListener('click', function () {
+	        syncCurrentDetailEdit();
+	        setNetEditing(false);
+	        netDetailTab = parseInt(el.getAttribute('data-i'));
+	        renderDetail(true); // 用户主动切 tab，强制刷新内容
+	      });
+	    });
+	    var content = '';
+	    if (pendingIntercept && netDetailTab === 0) content = fmtInterceptHead(netSelIntercept);
+	    else if (netDetailTab === 0) content = fmtHeaders(r.reqHeaders);
+	    else if (netDetailTab === 1) content = formatBodyForDisplay(r.reqBody, r.reqHeaders);
+	    else if (netDetailTab === 2) {
+	      if (pendingIntercept) {
+	        content = '(请求已拦截，尚未发送)';
+	      } else {
         var lines = fmtHeaders(r.respHeaders);
         if (r.status) lines = 'HTTP/1.1 ' + r.status + ' ' + (statusPhrase(r.status) || '') + '\n' + lines;
         content = lines;
@@ -2214,20 +2266,21 @@
     } else if (netDetailTab === 3) {
       if (pendingIntercept) {
         content = '(请求已拦截，尚未发送)';
-      } else if (r.error) {
-        content = '── 请求失败 ──\n' + r.error + '\n\n原因: ' + shortError(r.error);
-      } else if (r.respBody != null) {
-        content = r.respBody;
-      } else {
-        content = '(等待响应…)';
-      }
+	      } else if (r.error) {
+	        content = '── 请求失败 ──\n' + r.error + '\n\n原因: ' + shortError(r.error);
+	      } else if (r.respBody != null) {
+	        content = formatBodyForDisplay(r.respBody, r.respHeaders);
+	      } else {
+	        content = '(等待响应…)';
+	      }
     } else if (pendingIntercept) {
       content = '拦截中的请求还未发送，没有可关联的明文结果。';
-    } else {
-      content = fmtPlainCandidates(r);
-    }
-    netDetailBody.value = content;
-  }
+	    } else {
+	      content = fmtPlainCandidates(r);
+	    }
+	    netDetailBody.value = content;
+	    netDetailDirty = false;
+	  }
 
   function updateDetailActionButtons(pendingIntercept) {
     if (!netDetailActs) return;
@@ -2898,7 +2951,7 @@
         '<div id="bh-detail-tabs"></div>' +
         '<button id="bh-detail-close" type="button" aria-label="关闭详情">×</button>' +
       '</div>' +
-      '<textarea id="bh-detail-body" spellcheck="false"></textarea>' +
+	      '<textarea id="bh-detail-body" spellcheck="false" wrap="soft"></textarea>' +
       '<div id="bh-detail-acts">' +
         '<button id="bh-act-replay">重放</button>' +
         '<button id="bh-act-copy">复制全部</button>' +
@@ -2906,38 +2959,49 @@
         '<button id="bh-act-curl">复制 curl</button>' +
         '<button id="bh-act-bp">设断点</button>' +
       '</div>';
-    netDetailBody = netDetailEl.querySelector('#bh-detail-body');
-    netDetailActs = netDetailEl.querySelector('#bh-detail-acts');
-    wrap.appendChild(netDetailEl);
+	    netDetailBody = netDetailEl.querySelector('#bh-detail-body');
+	    netDetailActs = netDetailEl.querySelector('#bh-detail-acts');
+	    wrap.appendChild(netDetailEl);
 
-    netDetailEl.querySelector('#bh-detail-close').addEventListener('click', closeNetDetail);
+	    netDetailEl.querySelector('#bh-detail-close').addEventListener('click', closeNetDetail);
+	    ['pointerdown','mousedown','touchstart'].forEach(function (type) {
+	      netDetailActs.addEventListener(type, function (e) {
+	        syncCurrentDetailEdit();
+	        setNetEditing(false);
+	        e.stopPropagation();
+	      }, true);
+	    });
 
-    // textarea 聚焦/输入时进入编辑保护：不再移动详情区，只避免响应刷新覆盖正在编辑的内容。
-    netDetailEl.addEventListener('focusin', function () { setNetEditing(true); });
-    netDetailBody.addEventListener('focus', function () { setNetEditing(true); });
-    netDetailBody.addEventListener('beforeinput', function () { setNetEditing(true); });
-	    netDetailBody.addEventListener('input', function () { setNetEditing(true); });
+	    // textarea 聚焦/输入时进入编辑保护：不再移动详情区，只避免响应刷新覆盖正在编辑的内容。
+	    netDetailBody.addEventListener('focus', function () { setNetEditing(true); });
+	    netDetailBody.addEventListener('blur', function () { setNetEditing(false); });
+	    netDetailBody.addEventListener('beforeinput', function () { setNetEditing(true); netDetailDirty = true; });
+	    netDetailBody.addEventListener('input', function () { setNetEditing(true); netDetailDirty = true; });
 	    netDetailBody.addEventListener('compositionstart', function () { setNetEditing(true); });
 	    netDetailBody.addEventListener('touchstart', function () { setNetEditing(true); }, { passive: true });
-	    ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
+	    ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','keydown','keyup','input','beforeinput','paste','cut','drop','change','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
 	      netDetailBody.addEventListener(type, function (e) {
 	        setNetEditing(true);
-	        e.stopPropagation();
+	        if (/^(beforeinput|input|paste|cut|drop|change)$/.test(type)) netDetailDirty = true;
+	        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+	        else e.stopPropagation();
 	        if (type === 'dblclick') e.preventDefault();
 	      }, true);
 	    });
 
 	    netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
+	      syncCurrentDetailEdit();
+	      setNetEditing(false);
 	      if (netSelIntercept) { sendSelectedIntercept(); return; }
 	      if (!netSelReq) return;
 	      // 如果当前在"请求体"tab 且用户编辑了内容，用编辑后的内容重放
-      if (netDetailTab === 1 && netDetailBody) {
-        var editedBody = netDetailBody.value;
-        replayReq(Object.assign({}, netSelReq, { reqBody: editedBody || null }), '重放');
-      } else {
-        replayReq(netSelReq);
-      }
-    });
+	      if (netDetailTab === 1 && netDetailBody) {
+	        var editedBody = netDetailDirty ? bodyValueFromTextarea(true) : netSelReq.reqBody;
+	        replayReq(Object.assign({}, netSelReq, { reqBody: editedBody || null }), '重放');
+	      } else {
+	        replayReq(netSelReq);
+	      }
+	    });
     netDetailActs.querySelector('#bh-act-copy').addEventListener('click', function () {
       if (!netDetailBody) return;
       var text = netDetailBody.value || '';
@@ -2952,11 +3016,12 @@
       }
       flashBtn(this, '已复制');
     });
-    netDetailActs.querySelector('#bh-act-clear').addEventListener('click', function () {
-      if (netDetailBody) { netDetailBody.value = ''; netDetailBody.focus(); }
-    });
+	    netDetailActs.querySelector('#bh-act-clear').addEventListener('click', function () {
+	      if (netDetailBody) { netDetailBody.value = ''; netDetailDirty = true; setNetEditing(true); netDetailBody.focus(); }
+	    });
 	    netDetailActs.querySelector('#bh-act-curl').addEventListener('click', function () {
-	      if (netSelIntercept) syncInterceptEdit();
+	      syncCurrentDetailEdit();
+	      setNetEditing(false);
 	      var target = netSelIntercept ? interceptAsReq(netSelIntercept) : netSelReq;
 	      if (!target) return;
 	      var text = toCurl(target);
@@ -2964,6 +3029,8 @@
 	      flashBtn(this, '已复制');
 	    });
 	    netDetailActs.querySelector('#bh-act-bp').addEventListener('click', function () {
+	      syncCurrentDetailEdit();
+	      setNetEditing(false);
 	      if (netSelIntercept) { abortSelectedIntercept(); return; }
 	      if (!netSelReq) return;
 	      try { var u = new URL(netSelReq.url); netBreakpoints.push({ pattern: u.pathname, id: Date.now() }); }
