@@ -1606,6 +1606,7 @@
 	  var netModal = null;   // 当前弹窗 element
 	  var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
 	  var netDetailDirty = false;
+	  var netListRefreshPending = false; // 编辑期间被抑制的列表刷新，退出编辑后补刷
 	  var netHideTunnelNoise = false;
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
@@ -2078,6 +2079,10 @@
 
   function renderNetList() {
     if (!netListEl) return;
+    // 正在编辑详情 textarea 时绝不重建列表 DOM。Android/GeckoView 上，IME 合成期间
+    // 任何文档 DOM 变更都会触发 restartInput，使 textarea 丢焦点，后续字符穿到页面输入框
+    // （chatgpt 等流式站点每条响应都会触发刷新）。退出编辑后由 flushPendingNetList() 补刷。
+    if (netEditing) { netListRefreshPending = true; return; }
     var rows = getVisibleRequests();
     var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0;
     if (rows.length === 0 && !showIntercepts) {
@@ -2291,7 +2296,13 @@
   }
 
   function setNetEditing(active) {
+    var was = netEditing;
     netEditing = !!active;
+    // 退出编辑态时补刷一次被抑制的列表刷新
+    if (was && !netEditing && netListRefreshPending) {
+      netListRefreshPending = false;
+      if (netPanelVisible) renderNetList();
+    }
   }
 
   // ── 功能：重放 ──
