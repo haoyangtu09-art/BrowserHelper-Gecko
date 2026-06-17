@@ -1323,10 +1323,14 @@
     '.bh-status-desc{font-size:9px;color:#888;line-height:1.1;max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     // 详情区：展开后占面板大部分高度，让请求/响应体有足够阅读空间
     '#bh-detail{flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:#fff;}',
-    '#bh-detail-tabs{display:flex;border-bottom:1px solid #d0d7de;overflow-x:auto;background:#f6f8fa;flex:0 0 auto;}',
+    '#bh-detail-head{display:flex;align-items:stretch;border-bottom:1px solid #d0d7de;background:#f6f8fa;flex:0 0 auto;}',
+    '#bh-detail-tabs{display:flex;overflow-x:auto;background:#f6f8fa;flex:1 1 auto;min-width:0;}',
     '.bh-dtab{padding:10px 14px;font-size:14px;cursor:pointer;white-space:nowrap;color:#111;',
     '  min-height:42px;display:flex;align-items:center;border-bottom:2px solid transparent;}',
     '.bh-dtab.active{border-bottom-color:#2563eb;font-weight:700;}',
+    '#bh-detail-close{flex:0 0 44px;min-width:44px;border:none;border-left:1px solid #d0d7de;',
+    '  background:#f6f8fa;color:#555;font-size:24px;line-height:1;cursor:pointer;}',
+    '#bh-detail-close:active{background:#e8eaed;color:#111;}',
     // textarea 代替 div：原生支持长按选中复制、单点光标编辑
     '#bh-detail-body{flex:1 1 auto;min-height:200px;overflow:auto;padding:10px;font-size:13px;color:#111;',
     '  white-space:pre;word-break:break-all;font-family:monospace;background:#fff;',
@@ -1336,13 +1340,7 @@
     '#bh-detail-acts button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
     '#bh-detail-acts button:active{background:#e8eaed;}',
-    // 编辑模式：textarea 聚焦时把详情区固定到视口上半部分，
-    // 确保软键盘从底部弹起后，编辑区和按钮仍在键盘上方、可见可点。
-    '#bh-net.bh-editing:before{content:"";position:fixed;inset:0;',
-    '  z-index:2147483639;background:#fff;pointer-events:auto;touch-action:none;}',
-    '#bh-net.bh-editing #bh-detail{position:fixed;left:0;right:0;top:0;height:50vh;',
-    '  z-index:2147483640;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:auto;}',
-    '#bh-net.bh-editing #bh-detail-body{min-height:0;}',
+    // 编辑时不再移动详情区，避免 Android 软键盘/滚动联动造成上下弹跳。
     // 模态弹窗（挂进 #bh-net / shadow root 内，z-index 要高于 eruda 面板内部元素）
     '#bh-modal{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;',
     '  justify-content:center;background:rgba(0,0,0,.5);}',
@@ -1641,6 +1639,14 @@
     });
   }
 
+  function closeNetDetail() {
+    netSelReq = null;
+    setNetEditing(false);
+    try { if (netDetailBody) netDetailBody.blur(); } catch (e) {}
+    renderNetList();
+    renderDetail(true);
+  }
+
   function escHtml(s) {
     return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
@@ -1699,9 +1705,6 @@
 
   function setNetEditing(active) {
     netEditing = !!active;
-    if (!netPanel) return;
-    if (netEditing) netPanel.classList.add('bh-editing');
-    else netPanel.classList.remove('bh-editing');
   }
 
   // ── 功能：重放 ──
@@ -2133,7 +2136,10 @@
     netDetailEl.id = 'bh-detail';
     netDetailEl.style.display = 'none';
     netDetailEl.innerHTML =
-      '<div id="bh-detail-tabs"></div>' +
+      '<div id="bh-detail-head">' +
+        '<div id="bh-detail-tabs"></div>' +
+        '<button id="bh-detail-close" type="button" aria-label="关闭详情">×</button>' +
+      '</div>' +
       '<textarea id="bh-detail-body" spellcheck="false"></textarea>' +
       '<div id="bh-detail-acts">' +
         '<button id="bh-act-replay">重放</button>' +
@@ -2146,24 +2152,15 @@
     netDetailActs = netDetailEl.querySelector('#bh-detail-acts');
     wrap.appendChild(netDetailEl);
 
-    // textarea 聚焦时进入编辑模式：把详情区固定到视口上半，避免被软键盘遮挡。
-    // Android/Gecko 输入法输入时可能产生短暂 blur/viewport 重排，所以不靠 blur 退出；
-    // 只有用户明确点到详情区外时才退出，避免详情区打一字就回到底部。
+    netDetailEl.querySelector('#bh-detail-close').addEventListener('click', closeNetDetail);
+
+    // textarea 聚焦/输入时进入编辑保护：不再移动详情区，只避免响应刷新覆盖正在编辑的内容。
     netDetailEl.addEventListener('focusin', function () { setNetEditing(true); });
     netDetailBody.addEventListener('focus', function () { setNetEditing(true); });
     netDetailBody.addEventListener('beforeinput', function () { setNetEditing(true); });
     netDetailBody.addEventListener('input', function () { setNetEditing(true); });
     netDetailBody.addEventListener('compositionstart', function () { setNetEditing(true); });
     netDetailBody.addEventListener('touchstart', function () { setNetEditing(true); }, { passive: true });
-    function swallowOutsideEditTap(e) {
-      if (!netEditing || !netDetailEl || netDetailEl.contains(e.target)) return;
-      try { e.preventDefault(); } catch (err) {}
-      try { e.stopPropagation(); } catch (err2) {}
-      setNetEditing(false);
-    }
-    wrap.addEventListener('pointerdown', swallowOutsideEditTap, true);
-    wrap.addEventListener('touchstart', swallowOutsideEditTap, true);
-    wrap.addEventListener('click', swallowOutsideEditTap, true);
 
     netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
       if (!netSelReq) return;
