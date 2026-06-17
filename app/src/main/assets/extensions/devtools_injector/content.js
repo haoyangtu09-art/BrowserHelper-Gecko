@@ -448,7 +448,6 @@
 
   // ── 网络拦截层 ───────────────────────────────────────────────────────────────
   var netRequests = [];   // 最近 200 条
-  var NET_MAX_REQUESTS = 200;
   var netEnabled = true;
   var netPanelVisible = false;
   var netBreakpoints = []; // [{pattern, id}]
@@ -466,8 +465,6 @@
 	      '  window.__bhRestoreXHR=window.__bhRestoreXHR||window.XMLHttpRequest;',
 	      '  window.__bhGlobalInterceptEnabled=!!window.__bhGlobalInterceptEnabled;',
 	      '  window.__bhInterceptRules=window.__bhInterceptRules||[];',
-	      '  window.__bhInjectEnabled=!!window.__bhInjectEnabled;',
-	      '  window.__bhInjectRules=window.__bhInjectRules||[];',
 
       // ── 工具 ──
       '  function headersToObj(h){',
@@ -509,17 +506,15 @@
 	      '    try{return headers?Object.keys(headers).length:0;}catch(e){return 0;}',
 	      '  }',
 	      '  function bodyHasValue(body){return body!=null&&String(body).length>0;}',
-	      '  function matchInterceptRule(url,method,body,direction){',
+	      '  function matchInterceptRule(url,method,body){',
 	      '    var rules=window.__bhInterceptRules||[];',
 	      '    if(!rules||!rules.length)return "";',
 	      '    var u=null;',
 	      '    try{u=new URL(String(url||""),location.href);}catch(e){return "";}',
 	      '    method=String(method||"GET").toUpperCase();',
 	      '    var hasBody=bodyHasValue(body);',
-	      '    direction=direction==="response"?"response":"request";',
 	      '    for(var i=rules.length-1;i>=0;i--){',
 	      '      var r=rules[i]||{};',
-	      '      if((r.direction||"request")!==direction)continue;',
 	      '      if(r.host&&r.host!==u.host)continue;',
 	      '      if(r.path&&r.path!==u.pathname)continue;',
 	      '      if(r.method&&String(r.method).toUpperCase()!==method)continue;',
@@ -533,7 +528,7 @@
 	      '    if(!url)return true;',
 	      '    if(method==="OPTIONS"||method==="HEAD")return true;',
 	      '    var len=body==null?0:String(body).length;',
-	      '    if(len===0&&headersCount(headers)===0&&method==="GET")return true;',
+	      '    if(len===0&&headersCount(headers)===0)return true;',
 	      '    var re=/\\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;',
 	      '    if(!re.test(url))return false;',
 	      '    if(len>512)return false;',
@@ -541,82 +536,22 @@
 	      '    return true;',
 	      '  }',
 	      '  function checkGlobalIntercept(url,method,body,headers){',
-	      '    var rule=matchInterceptRule(url,method,body,"request");',
+	      '    var rule=matchInterceptRule(url,method,body);',
 	      '    if(rule==="pass")return false;',
 	      '    if(rule==="intercept")return true;',
 	      '    return !!window.__bhGlobalInterceptEnabled&&!isNoiseReq(url,method,body,headers);',
 	      '  }',
-	      '  function checkResponseIntercept(url,method,reqBody,status,respHeaders,respBody){',
-	      '    return matchInterceptRule(url,method,reqBody,"response")==="intercept";',
-	      '  }',
-	      '  function canBuildResponse(status){return status>=200&&status<=599;}',
-	      '  function replaceAllLiteral(text,find,repl){',
-	      '    text=String(text);find=String(find);',
-	      '    if(!find)return {text:text,changed:false};',
-	      '    var next=text.split(find).join(String(repl));',
-	      '    return {text:next,changed:next!==text};',
-	      '  }',
-	      '  function applyInjectText(text){',
-	      '    var changed=false,out=String(text);',
-	      '    if(!window.__bhInjectEnabled)return {text:out,changed:false};',
-	      '    var rules=window.__bhInjectRules||[];',
-	      '    for(var i=0;i<rules.length;i++){',
-	      '      var r=rules[i]||{};if(!r.match)continue;',
-	      '      var res=replaceAllLiteral(out,r.match,r.replace==null?"":r.replace);',
-	      '      out=res.text;changed=changed||res.changed;',
-	      '    }',
-	      '    return {text:out,changed:changed};',
-	      '  }',
-	      '  function applyInjectHeaders(headers){',
-	      '    var changed=false,out={};headers=headers||{};',
-	      '    Object.keys(headers).forEach(function(k){',
-	      '      var v=headers[k];',
-	      '      if(typeof v==="string"){var res=applyInjectText(v);out[k]=res.text;changed=changed||res.changed;}',
-	      '      else out[k]=v;',
-	      '    });',
-	      '    return {headers:out,changed:changed};',
-	      '  }',
-	      '  function removeHeaderCI(headers,name){',
-	      '    if(!headers)return headers;var target=String(name).toLowerCase();',
-	      '    Object.keys(headers).forEach(function(k){if(k.toLowerCase()===target)delete headers[k];});',
-	      '    return headers;',
-	      '  }',
-	      '  function applyInjectToReq(url,headers,body,bodyMutable){',
-	      '    var out={url:String(url||""),headers:headers||{},body:body,changed:false,bodyChanged:false};',
-	      '    var u=applyInjectText(out.url);out.url=u.text;out.changed=out.changed||u.changed;',
-	      '    var h=applyInjectHeaders(out.headers);out.headers=h.headers;out.changed=out.changed||h.changed;',
-	      '    if(bodyMutable&&body!=null){var b=applyInjectText(body);out.body=b.text;out.changed=out.changed||b.changed;out.bodyChanged=b.changed;}',
-	      '    if(out.bodyChanged)removeHeaderCI(out.headers,"content-length");',
-	      '    return out;',
-	      '  }',
-	      '  function applyInjectToResp(headers,body){',
-	      '    var out={headers:headers||{},body:String(body||""),changed:false,bodyChanged:false};',
-	      '    var h=applyInjectHeaders(out.headers);out.headers=h.headers;out.changed=out.changed||h.changed;',
-	      '    var b=applyInjectText(out.body);out.body=b.text;out.changed=out.changed||b.changed;out.bodyChanged=b.changed;',
-	      '    if(out.bodyChanged)removeHeaderCI(out.headers,"content-length");',
-	      '    return out;',
-	      '  }',
-      '  function waitBp(reqId,url,method,reqHeaders,reqBody,mode,status,respHeaders,respBody){',
+      '  function waitBp(reqId,url,method,reqHeaders,reqBody,mode){',
       '    return new Promise(function(resolve){',
       '      window.__bhBpPending[reqId]=resolve;',
-      '      send({type:"breakpoint",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody,mode:mode||"breakpoint",status:status,respHeaders:respHeaders,respBody:respBody});',
+      '      send({type:"breakpoint",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody,mode:mode||"breakpoint"});',
       '    });',
       '  }',
       '  window.fetch=function(input,init){',
       '    var url=typeof input==="string"?input:(input&&input.url)||"";',
       '    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();',
-      '    var reqHeaders=headersToObj((init&&init.headers)||(input&&input.headers));',
+      '    var reqHeaders=headersToObj(init&&init.headers);',
       '    var reqBody=(init&&init.body!=null)?String(init.body):null;',
-      '    var bodyMutable=!!(init&&typeof init.body==="string");',
-      '    var args=arguments;',
-      '    var inj=applyInjectToReq(url,reqHeaders,reqBody,bodyMutable);',
-      '    if(inj.changed){',
-      '      url=inj.url;reqHeaders=inj.headers;if(bodyMutable)reqBody=inj.body;',
-      '      var injectedInit=Object.assign({},init||{});',
-      '      injectedInit.method=method;injectedInit.headers=reqHeaders;',
-      '      if(bodyMutable)injectedInit.body=reqBody;',
-      '      args=[url,injectedInit];',
-      '    }',
       '    var reqId=uid();',
       '    var t0=Date.now();',
       '    send({type:"req",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody});',
@@ -628,38 +563,21 @@
       '        respBody:mBody,duration:Date.now()-t0});',
       '      return Promise.resolve(new Response(mBody,{status:mStatus,headers:{"x-mock":"1"}}));',
       '    }',
+      '    var args=arguments;',
       '    var thr=window.__bhThrottle;',
       '    var delay=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
       '    var doFetch=function(){return _origFetch.apply(this,args).then(function(resp){',
       '      var status=resp.status;',
       '      var respHeaders=headersToObj(resp.headers);',
-      '      var statusText=resp.statusText||"";',
-      '      return resp.clone().text().then(function(body){',
-      '        var respInj=applyInjectToResp(respHeaders,body);',
-      '        var finalHeaders=respInj.headers;',
-      '        var finalBody=respInj.body;',
-      '        var shownBody=finalBody.slice(0,102400);',
-      '        var buildable=canBuildResponse(status);',
-      '        if(buildable&&checkResponseIntercept(url,method,reqBody,status,finalHeaders,shownBody)){return waitBp(reqId,url,method,reqHeaders,reqBody,"response",status,finalHeaders,shownBody).then(function(r){',
-      '          if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"已丢弃服务器返回",duration:Date.now()-t0});return Promise.reject(new Error("response aborted by breakpoint"));}',
-      '          var outStatus=parseInt(r.status,10)||status;',
-      '          if(!canBuildResponse(outStatus))outStatus=status;',
-      '          var outHeaders=r.respHeaders||finalHeaders;',
-      '          var outBody=r.respBody!=null?r.respBody:shownBody;',
-      '          var ctorBody=(outStatus===204||outStatus===205||outStatus===304)?null:outBody;',
-      '          send({type:"resp",reqId:reqId,status:outStatus,respHeaders:outHeaders,respBody:outBody,duration:Date.now()-t0});',
-      '          return new Response(ctorBody,{status:outStatus,statusText:statusText,headers:outHeaders});',
-      '        });}',
-      '        send({type:"resp",reqId:reqId,status:status,respHeaders:finalHeaders,',
-      '          respBody:shownBody,duration:Date.now()-t0});',
-      '        var finalCtorBody=(status===204||status===205||status===304)?null:finalBody;',
-      '        return respInj.changed&&buildable?new Response(finalCtorBody,{status:status,statusText:statusText,headers:finalHeaders}):resp;',
-      '      }).catch(function(err){',
-      '        if(err&&/response aborted/.test(String(err)))throw err;',
+      '      var clone=resp.clone();',
+      '      clone.text().then(function(body){',
+      '        send({type:"resp",reqId:reqId,status:status,respHeaders:respHeaders,',
+      '          respBody:body.slice(0,102400),duration:Date.now()-t0});',
+      '      }).catch(function(){',
       '        send({type:"resp",reqId:reqId,status:status,respHeaders:respHeaders,',
       '          respBody:"(读取失败)",duration:Date.now()-t0});',
-      '        return resp;',
       '      });',
+      '      return resp;',
       '    }).catch(function(err){',
       '      send({type:"resp",reqId:reqId,status:0,error:String(err),duration:Date.now()-t0});',
       '      throw err;',
@@ -670,16 +588,11 @@
       '    if(bpMode){',
       '      return waitBp(reqId,url,method,reqHeaders,reqBody,bpMode).then(function(r){',
       '        if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"已被断点中止",duration:Date.now()-t0});return Promise.reject(new Error("aborted by breakpoint"));}',
-      '        var nextUrl=r.url||url;',
-      '        var nextHeaders=r.reqHeaders||reqHeaders;',
-      '        var nextBody=(r.reqBody!=null)?r.reqBody:reqBody;',
-      '        var nextInj=applyInjectToReq(nextUrl,nextHeaders,nextBody,nextBody!=null);',
-      '        nextUrl=nextInj.url;nextHeaders=nextInj.headers;nextBody=nextInj.body;',
       '        var ni=Object.assign({},init||{});',
       '        ni.method=r.method||method;',
-      '        ni.headers=nextHeaders;',
-      '        if(nextBody!=null&&nextBody!=="")ni.body=nextBody;',
-      '        args=[nextUrl,ni];',
+      '        if(r.reqHeaders)ni.headers=r.reqHeaders;',
+      '        if(r.reqBody!=null&&r.reqBody!=="")ni.body=r.reqBody;',
+      '        args=[r.url||url,ni];',
       '        return runDelay();',
       '      });',
       '    }',
@@ -698,16 +611,6 @@
       '    xhr.setRequestHeader=function(k,v){_reqHeaders[k]=v;return origSetHeader(k,v);};',
       '    xhr.send=function(body){',
       '      _reqBody=body!=null?String(body):null;',
-      '      var bodyMutable=typeof body==="string";',
-      '      var oldUrl=_url;',
-      '      var oldHeaders=JSON.stringify(_reqHeaders||{});',
-      '      var inj=applyInjectToReq(_url,_reqHeaders,_reqBody,bodyMutable);',
-      '      if(inj.changed){',
-      '        _url=inj.url;_reqHeaders=inj.headers||{};if(bodyMutable){_reqBody=inj.body;body=inj.body;}',
-      '        if(_url!==oldUrl||JSON.stringify(_reqHeaders||{})!==oldHeaders){',
-      '          try{origOpen(_method,_url);Object.keys(_reqHeaders).forEach(function(k){origSetHeader(k,_reqHeaders[k]);});}catch(e){}',
-      '        }',
-      '      }',
       '      _t0=Date.now();',
       '      send({type:"req",reqId:_reqId,url:_url,method:_method,reqHeaders:_reqHeaders,reqBody:_reqBody});',
       '      var mock=checkMock(_url);',
@@ -751,15 +654,9 @@
       '        waitBp(_reqId,_url,_method,_reqHeaders,_reqBody,bpMode).then(function(r){',
       '          if(r.action==="abort"){send({type:"resp",reqId:_reqId,status:0,error:"已被断点中止",duration:Date.now()-_t0});return;}',
       '          var nm=r.method||_method,nu=r.url||_url;',
-      '          var nh=r.reqHeaders||_reqHeaders;',
-      '          var nb=(r.reqBody!=null)?r.reqBody:_reqBody;',
-      '          var inj2=applyInjectToReq(nu,nh,nb,nb!=null);',
-      '          nu=inj2.url;nh=inj2.headers;nb=inj2.body;',
-      '          var headersChanged=JSON.stringify(nh||{})!==JSON.stringify(_reqHeaders||{});',
-      '          if(nm!==_method||nu!==_url||headersChanged){try{origOpen(nm,nu);}catch(e){}}',
-      '          if(nh){try{Object.keys(nh).forEach(function(k){origSetHeader(k,nh[k]);});}catch(e){}}',
-      '          _method=nm;_url=nu;_reqHeaders=nh||{};_reqBody=nb;',
-      '          if(nb!=null&&nb!==""){body=nb;}',
+      '          if(nm!==_method||nu!==_url){try{origOpen(nm,nu);}catch(e){}}',
+      '          if(r.reqHeaders){try{Object.keys(r.reqHeaders).forEach(function(k){origSetHeader(k,r.reqHeaders[k]);});}catch(e){}}',
+      '          if(r.reqBody!=null&&r.reqBody!==""){body=r.reqBody;}',
       '          fireSend();',
       '        });',
       '        return;',
@@ -842,7 +739,6 @@
 	  var netInterceptQueue = [];
 	  var netSelIntercept = null;
 	  var netInterceptRules = [];
-	  var netInjectRules = [];
 	  var netRulesViewEl = null;
 	  var netPlainCandidates = [];
 	  var netPlainSeq = 0;
@@ -869,7 +765,9 @@
         entry.error = d.error || null;
         if (!entry.plain || !entry.plain.length) entry.plain = collectPlainCandidates(entry);
         delete netReqMap[d.reqId];
-        addNetRequest(entry);
+        // 放到列表头部，最多保留 200 条
+        netRequests.unshift(entry);
+        if (netRequests.length > 200) netRequests.length = 200;
         maybeFocusPayload(entry);
         if (netPanelVisible) renderNetList();
         if (netPanelVisible) renderDetail();
@@ -912,7 +810,7 @@
   }
 
   function enqueueBreakpoint(d) {
-    if (d.mode === 'intercept' || d.mode === 'response') {
+    if (d.mode === 'intercept') {
       enqueueIntercept(d);
       return;
     }
@@ -924,8 +822,6 @@
 	    d.ts = Date.now();
 	    d.reqHeaders = d.reqHeaders || {};
 	    d.reqBody = d.reqBody || '';
-	    d.respHeaders = d.respHeaders || {};
-	    d.respBody = d.respBody || '';
 	    netInterceptQueue.push(d);
 	    updateInterceptBtn();
 	    if (netPanelVisible) {
@@ -1049,17 +945,15 @@
 	    function bodyHasValue(body) {
 	      return body != null && String(body).length > 0;
 	    }
-	    function matchInterceptRule(url, method, body, direction) {
+	    function matchInterceptRule(url, method, body) {
 	      var rules = netInterceptRules || [];
 	      if (!rules.length) return '';
 	      var u = null;
 	      try { u = new URL(String(url || ''), location.href); } catch (e) { return ''; }
 	      method = String(method || 'GET').toUpperCase();
 	      var hasBody = bodyHasValue(body);
-	      direction = direction === 'response' ? 'response' : 'request';
 	      for (var i = rules.length - 1; i >= 0; i--) {
 	        var r = rules[i] || {};
-	        if ((r.direction || 'request') !== direction) continue;
 	        if (r.host && r.host !== u.host) continue;
 	        if (r.path && r.path !== u.pathname) continue;
 	        if (r.method && String(r.method).toUpperCase() !== method) continue;
@@ -1074,7 +968,7 @@
 	      if (!url) return true;
 	      if (method === 'OPTIONS' || method === 'HEAD') return true;
 	      var len = body == null ? 0 : String(body).length;
-	      if (len === 0 && headersCount(headers) === 0 && method === 'GET') return true;
+	      if (len === 0 && headersCount(headers) === 0) return true;
 	      var re = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
 	      if (!re.test(url)) return false;
 	      if (len > 512) return false;
@@ -1082,105 +976,15 @@
 	      return true;
 	    }
 	    function checkGlobalIntercept(url, method, body, headers) {
-	      var rule = matchInterceptRule(url, method, body, 'request');
+	      var rule = matchInterceptRule(url, method, body);
 	      if (rule === 'pass') return false;
 	      if (rule === 'intercept') return true;
 	      return !!netGlobalInterceptEnabled && !isNoiseBeforeSend(url, method, body, headers);
 	    }
-	    function checkResponseIntercept(url, method, reqBody, status, respHeaders, respBody) {
-	      return matchInterceptRule(url, method, reqBody, 'response') === 'intercept';
-	    }
-	    function canBuildResponse(status) {
-	      return status >= 200 && status <= 599;
-	    }
-	    function replaceAllLiteral(text, find, repl) {
-	      text = String(text);
-	      find = String(find || '');
-	      if (!find) return { text: text, changed: false };
-	      var next = text.split(find).join(String(repl == null ? '' : repl));
-	      return { text: next, changed: next !== text };
-	    }
-	    function applyInjectText(text) {
-	      var out = String(text);
-	      var changed = false;
-	      if (!netInjectEnabled) return { text: out, changed: false };
-	      var rules = sanitizeInjectRules(netInjectRules);
-	      for (var i = 0; i < rules.length; i++) {
-	        var r = rules[i];
-	        var res = replaceAllLiteral(out, r.match, r.replace);
-	        out = res.text;
-	        changed = changed || res.changed;
-	      }
-	      return { text: out, changed: changed };
-	    }
-	    function applyInjectHeaders(headers) {
-	      var out = {};
-	      var changed = false;
-	      headers = headers || {};
-	      Object.keys(headers).forEach(function (k) {
-	        var v = headers[k];
-	        if (typeof v === 'string') {
-	          var res = applyInjectText(v);
-	          out[k] = res.text;
-	          changed = changed || res.changed;
-	        } else {
-	          out[k] = v;
-	        }
-	      });
-	      return { headers: out, changed: changed };
-	    }
-	    function removeHeaderLocal(headers, name) {
-	      if (!headers) return headers;
-	      var target = String(name || '').toLowerCase();
-	      Object.keys(headers).forEach(function (k) {
-	        if (k.toLowerCase() === target) delete headers[k];
-	      });
-	      return headers;
-	    }
-	    function applyInjectToReq(url, headers, body, bodyMutable) {
-	      var out = { url: String(url || ''), headers: headers || {}, body: body, changed: false, bodyChanged: false };
-	      var u = applyInjectText(out.url);
-	      out.url = u.text;
-	      out.changed = out.changed || u.changed;
-	      var h = applyInjectHeaders(out.headers);
-	      out.headers = h.headers;
-	      out.changed = out.changed || h.changed;
-	      if (bodyMutable && body != null) {
-	        var b = applyInjectText(body);
-	        out.body = b.text;
-	        out.changed = out.changed || b.changed;
-	        out.bodyChanged = b.changed;
-	      }
-	      if (out.bodyChanged) removeHeaderLocal(out.headers, 'content-length');
-	      return out;
-	    }
-	    function applyInjectToResp(headers, body) {
-	      var out = { headers: headers || {}, body: String(body || ''), changed: false, bodyChanged: false };
-	      var h = applyInjectHeaders(out.headers);
-	      out.headers = h.headers;
-	      out.changed = out.changed || h.changed;
-	      var b = applyInjectText(out.body);
-	      out.body = b.text;
-	      out.changed = out.changed || b.changed;
-	      out.bodyChanged = b.changed;
-	      if (out.bodyChanged) removeHeaderLocal(out.headers, 'content-length');
-	      return out;
-	    }
-    function waitBp(reqId, url, method, reqHeaders, reqBody, mode, status, respHeaders, respBody) {
+    function waitBp(reqId, url, method, reqHeaders, reqBody, mode) {
       return new Promise(function (resolve) {
         _bpIsoPending[reqId] = resolve;
-        sendNet({
-          type: 'breakpoint',
-          reqId: reqId,
-          url: url,
-          method: method,
-          reqHeaders: reqHeaders,
-          reqBody: reqBody,
-          mode: mode || 'breakpoint',
-          status: status,
-          respHeaders: respHeaders,
-          respBody: respBody,
-        });
+        sendNet({ type: 'breakpoint', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody, mode: mode || 'breakpoint' });
       });
     }
 
@@ -1189,22 +993,8 @@
     exportFunction(function (input, init) {
       var url = typeof input === 'string' ? input : (input && input.url) || '';
       var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-      var reqHeaders = headersToObj((init && init.headers) || (input && input.headers));
+      var reqHeaders = headersToObj(init && init.headers);
       var reqBody = (init && init.body != null) ? String(init.body) : null;
-      var bodyMutable = !!(init && typeof init.body === 'string');
-      var fInput = input, fInit = init;
-      var inj = applyInjectToReq(url, reqHeaders, reqBody, bodyMutable);
-      if (inj.changed) {
-        url = inj.url;
-        reqHeaders = inj.headers;
-        if (bodyMutable) reqBody = inj.body;
-        var injectedInit = Object.assign({}, init || {});
-        injectedInit.method = method;
-        injectedInit.headers = reqHeaders;
-        if (bodyMutable) injectedInit.body = reqBody;
-        fInput = url;
-        try { fInit = cloneInto(injectedInit, pw); } catch (e) { fInit = injectedInit; }
-      }
       var reqId = uid();
       var t0 = Date.now();
       sendNet({ type: 'req', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody });
@@ -1216,43 +1006,19 @@
       }
       var thr = pw.__bhThrottle;
       var delay = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
+      var fInput = input, fInit = init;
       var doFetch = function () {
         return _origFetch.call(pw, fInput, fInit).then(function (resp) {
           var status = resp.status;
           var respHeaders = headersToObj(resp.headers);
-          var statusText = resp.statusText || '';
-          return resp.clone().text().then(function (body) {
-            var respInj = applyInjectToResp(respHeaders, body);
-            var finalHeaders = respInj.headers;
-            var finalBody = respInj.body;
-            var shownBody = finalBody.slice(0, 102400);
-            var buildable = canBuildResponse(status);
-            if (buildable && checkResponseIntercept(url, method, reqBody, status, finalHeaders, shownBody)) {
-              return waitBp(reqId, url, method, reqHeaders, reqBody, 'response', status, finalHeaders, shownBody).then(function (r) {
-              if (r.action === 'abort') {
-                sendNet({ type: 'resp', reqId: reqId, status: 0, error: '已丢弃服务器返回', duration: Date.now() - t0 });
-                return Promise.reject(new Error('response aborted by breakpoint'));
-              }
-              var outStatus = parseInt(r.status, 10) || status;
-              if (!canBuildResponse(outStatus)) outStatus = status;
-              var outHeaders = r.respHeaders || finalHeaders;
-              var outBody = r.respBody != null ? r.respBody : shownBody;
-              var ctorBody = (outStatus === 204 || outStatus === 205 || outStatus === 304) ? null : outBody;
-              sendNet({ type: 'resp', reqId: reqId, status: outStatus, respHeaders: outHeaders,
-                respBody: outBody, duration: Date.now() - t0 });
-              return new window.Response(ctorBody, { status: outStatus, statusText: statusText, headers: outHeaders });
-              });
-            }
-            sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: finalHeaders,
-              respBody: shownBody, duration: Date.now() - t0 });
-            var finalCtorBody = (status === 204 || status === 205 || status === 304) ? null : finalBody;
-            return respInj.changed && buildable ? new window.Response(finalCtorBody, { status: status, statusText: statusText, headers: finalHeaders }) : resp;
-          }).catch(function (err) {
-            if (err && /response aborted/.test(String(err))) throw err;
+          resp.clone().text().then(function (body) {
+            sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
+              respBody: body.slice(0, 102400), duration: Date.now() - t0 });
+          }).catch(function () {
             sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
               respBody: '(读取失败)', duration: Date.now() - t0 });
-            return resp;
           });
+          return resp;
         }).catch(function (err) {
           sendNet({ type: 'resp', reqId: reqId, status: 0, error: String(err), duration: Date.now() - t0 });
           throw err;
@@ -1268,19 +1034,12 @@
             sendNet({ type: 'resp', reqId: reqId, status: 0, error: '已被断点中止', duration: Date.now() - t0 });
             return Promise.reject(new Error('aborted by breakpoint'));
           }
-          var nextUrl = r.url || url;
-          var nextHeaders = r.reqHeaders || reqHeaders;
-          var nextBody = (r.reqBody != null) ? r.reqBody : reqBody;
-          var nextInj = applyInjectToReq(nextUrl, nextHeaders, nextBody, nextBody != null);
-          nextUrl = nextInj.url;
-          nextHeaders = nextInj.headers;
-          nextBody = nextInj.body;
           var ni = cloneInto(Object.assign({}, (init && {}) || {}, {
             method: r.method || method,
-            headers: nextHeaders,
+            headers: r.reqHeaders || reqHeaders,
           }), pw);
-          if (nextBody != null && nextBody !== '') ni.body = nextBody;
-          fInput = nextUrl; fInit = ni;
+          if (r.reqBody != null && r.reqBody !== '') ni.body = r.reqBody;
+          fInput = r.url || url; fInit = ni;
           return runDelay();
         });
       }
@@ -1292,31 +1051,10 @@
     exportFunction(function () {
       var xhr = new _OrigXHR();
       var _method = 'GET', _url = '', _reqHeaders = {}, _reqBody = null, _reqId = uid(), _t0 = 0;
-      var nativeOpen = xhr.open.bind(xhr);
-      var nativeSend = xhr.send.bind(xhr);
-      var nativeSetHeader = xhr.setRequestHeader.bind(xhr);
-      exportFunction(function (method, url) { _method = method.toUpperCase(); _url = url; return nativeOpen.apply(xhr, arguments); }, xhr, { defineAs: 'open' });
-      exportFunction(function (k, v) { _reqHeaders[k] = v; return nativeSetHeader(k, v); }, xhr, { defineAs: 'setRequestHeader' });
+      exportFunction(function (method, url) { _method = method.toUpperCase(); _url = url; return xhr.open.apply(xhr, arguments); }, xhr, { defineAs: 'open' });
+      exportFunction(function (k, v) { _reqHeaders[k] = v; return xhr.setRequestHeader(k, v); }, xhr, { defineAs: 'setRequestHeader' });
       exportFunction(function (body) {
         _reqBody = body != null ? String(body) : null;
-        var bodyMutable = typeof body === 'string';
-        var oldUrl = _url;
-        var oldHeaders = JSON.stringify(_reqHeaders || {});
-        var inj = applyInjectToReq(_url, _reqHeaders, _reqBody, bodyMutable);
-        if (inj.changed) {
-          _url = inj.url;
-          _reqHeaders = inj.headers || {};
-          if (bodyMutable) {
-            _reqBody = inj.body;
-            body = inj.body;
-          }
-          if (_url !== oldUrl || JSON.stringify(_reqHeaders || {}) !== oldHeaders) {
-            try {
-              nativeOpen(_method, _url);
-              Object.keys(_reqHeaders).forEach(function (k) { nativeSetHeader(k, _reqHeaders[k]); });
-            } catch (e) {}
-          }
-        }
         _t0 = Date.now();
         sendNet({ type: 'req', reqId: _reqId, url: _url, method: _method, reqHeaders: _reqHeaders, reqBody: _reqBody });
         var mock = checkMock(_url);
@@ -1355,7 +1093,7 @@
               respHeaders: respHeaders, respBody: (xhr.responseText || '').slice(0, 102400),
               duration: Date.now() - _t0 });
           });
-          nativeSend(body);
+          xhr.send(body);
         };
         var thr = pw.__bhThrottle;
         var d = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
@@ -1368,17 +1106,9 @@
               return;
             }
             var nm = r.method || _method, nu = r.url || _url;
-            var nh = r.reqHeaders || _reqHeaders;
-            var nb = (r.reqBody != null) ? r.reqBody : _reqBody;
-            var inj2 = applyInjectToReq(nu, nh, nb, nb != null);
-            nu = inj2.url;
-            nh = inj2.headers;
-            nb = inj2.body;
-            var headersChanged = JSON.stringify(nh || {}) !== JSON.stringify(_reqHeaders || {});
-            if (nm !== _method || nu !== _url || headersChanged) { try { nativeOpen(nm, nu); } catch (e) {} }
-            if (nh) { try { Object.keys(nh).forEach(function (k) { nativeSetHeader(k, nh[k]); }); } catch (e) {} }
-            _method = nm; _url = nu; _reqHeaders = nh || {}; _reqBody = nb;
-            if (nb != null && nb !== '') body = nb;
+            if (nm !== _method || nu !== _url) { try { xhr.open(nm, nu); } catch (e) {} }
+            if (r.reqHeaders) { try { Object.keys(r.reqHeaders).forEach(function (k) { xhr.setRequestHeader(k, r.reqHeaders[k]); }); } catch (e) {} }
+            if (r.reqBody != null && r.reqBody !== '') body = r.reqBody;
             fireSend();
           });
           return;
@@ -1427,7 +1157,6 @@
 	    injectInterceptor();
 	    syncGlobalInterceptEnabled();
 	    syncInterceptRules();
-	    syncInjectConfig();
 	    injectBreakpoints();
 	    injectMockRules();
 	    applyThrottle(netThrottle);
@@ -1773,14 +1502,14 @@
     '#bh-bar button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;white-space:nowrap;}',
     '#bh-bar button:active{background:#e8eaed;}',
-    '#bh-filter-wrap,#bh-extra-wrap{position:relative;display:inline-flex;}',
-    '#bh-filter-menu,#bh-extra-menu{display:none;position:absolute;left:0;top:calc(100% + 5px);min-width:128px;',
+    '#bh-filter-wrap{position:relative;display:inline-flex;}',
+    '#bh-filter-menu{display:none;position:absolute;left:0;top:calc(100% + 5px);min-width:128px;',
     '  padding:4px;background:#fff;border:1px solid #d0d7de;border-radius:6px;',
     '  box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:2147483642;}',
-    '#bh-filter-menu.open,#bh-extra-menu.open{display:flex;flex-direction:column;gap:2px;}',
-    '#bh-filter-menu button,#bh-extra-menu button{width:100%;text-align:left;border:none;border-radius:4px;',
+    '#bh-filter-menu.open{display:flex;flex-direction:column;gap:2px;}',
+    '#bh-filter-menu button{width:100%;text-align:left;border:none;border-radius:4px;',
     '  background:#fff;min-height:36px;padding:7px 10px;}',
-    '#bh-filter-menu button:active,#bh-extra-menu button:active{background:#e8eaed;}',
+    '#bh-filter-menu button:active{background:#e8eaed;}',
     '#bh-filter{flex:1;min-width:100px;font-size:14px;padding:8px 10px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;}',
     // 请求列表
@@ -1794,8 +1523,6 @@
 	    '.bh-row:active,.bh-row.bh-sel{background:#dbeafe;}',
 	    '.bh-row.bh-intercept{background:#fff7ed;}',
 	    '.bh-row.bh-intercept.bh-sel,.bh-row.bh-intercept:active{background:#fed7aa;}',
-	    '.bh-row.bh-response{background:#eff6ff;}',
-	    '.bh-row.bh-response.bh-sel,.bh-row.bh-response:active{background:#bfdbfe;}',
     '.bh-method{font-weight:700;min-width:46px;font-size:13px;color:#111;}',
     '.bh-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;}',
     '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#111;}',
@@ -1836,7 +1563,7 @@
 	    '#bh-rules-list{flex:1;min-height:0;overflow-y:auto;}',
 	    '.bh-rule-row{display:flex;align-items:center;gap:8px;padding:10px 12px;min-height:62px;border-bottom:1px solid #eaecef;background:#fff;}',
 	    '.bh-rule-row:active{background:#dbeafe;}',
-	    '.bh-rule-action{flex:0 0 58px;text-align:center;border-radius:4px;padding:3px 0;font-size:12px;font-weight:700;color:#fff;}',
+	    '.bh-rule-action{flex:0 0 42px;text-align:center;border-radius:4px;padding:3px 0;font-size:12px;font-weight:700;color:#fff;}',
 	    '.bh-rule-action.pass{background:#16a34a;}.bh-rule-action.intercept{background:#dc2626;}',
 	    '.bh-rule-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;}',
 	    '.bh-rule-url{font-size:13px;color:#111;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
@@ -1883,9 +1610,7 @@
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
   var netGlobalInterceptEnabled = false;
-  var netInjectEnabled = false;
   var netFilterMenuOpen = false;
-  var netExtraMenuOpen = false;
 
   function statusClass(s, hasError) {
     if (hasError && !s) return 's-err';
@@ -1981,12 +1706,6 @@
     }).join('\n\n────\n\n');
   }
 
-  function addNetRequest(entry) {
-    if (!entry) return;
-    netRequests.unshift(entry);
-    if (netRequests.length > NET_MAX_REQUESTS) netRequests.length = NET_MAX_REQUESTS;
-  }
-
   function byteLen(v) {
     if (v == null) return 0;
     var s = String(v);
@@ -2056,7 +1775,6 @@
 
 	  function ruleKey(rule) {
 	    return [
-	      rule.direction === 'response' ? 'response' : 'request',
 	      rule.host || '',
 	      rule.path || '',
 	      String(rule.method || 'GET').toUpperCase(),
@@ -2070,7 +1788,6 @@
 	      return {
 	        id: String(r.id || (Date.now().toString(36) + Math.random().toString(36).slice(2))),
 	        action: r.action === 'intercept' ? 'intercept' : 'pass',
-	        direction: r.direction === 'response' ? 'response' : 'request',
 	        host: String(r.host || ''),
 	        path: String(r.path || ''),
 	        method: String(r.method || 'GET').toUpperCase(),
@@ -2084,12 +1801,11 @@
 	    });
 	  }
 
-	  function makeInterceptRuleFromReq(r, action, direction) {
+	  function makeInterceptRuleFromReq(r, action) {
 	    var u = normalizeRuleUrl(r && r.url);
 	    return {
 	      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
 	      action: action === 'intercept' ? 'intercept' : 'pass',
-	      direction: direction === 'response' ? 'response' : 'request',
 	      host: u.host,
 	      path: u.path,
 	      method: String((r && r.method) || 'GET').toUpperCase(),
@@ -2141,9 +1857,9 @@
 	    }
 	  }
 
-	  function upsertInterceptRuleFromReq(r, action, direction) {
+	  function upsertInterceptRuleFromReq(r, action) {
 	    if (!r) return null;
-	    var rule = makeInterceptRuleFromReq(r, action, direction);
+	    var rule = makeInterceptRuleFromReq(r, action);
 	    var key = ruleKey(rule);
 	    var replaced = false;
 	    netInterceptRules = sanitizeInterceptRules(netInterceptRules).map(function (old) {
@@ -2168,76 +1884,6 @@
 
 	  function ruleActionLabel(action) {
 	    return action === 'intercept' ? '拦截' : '放行';
-	  }
-
-	  function ruleDirectionLabel(direction) {
-	    return direction === 'response' ? '返回' : '发出';
-	  }
-
-	  function makeId() {
-	    return Date.now().toString(36) + Math.random().toString(36).slice(2);
-	  }
-
-	  function sanitizeInjectRules(rules) {
-	    if (!Array.isArray(rules)) return [];
-	    return rules.map(function (r, i) {
-	      return {
-	        id: String(r.id || makeId()),
-	        name: String(r.name || ('注入 ' + (i + 1))),
-	        match: String(r.match || ''),
-	        replace: String(r.replace == null ? '' : r.replace),
-	        createdAt: r.createdAt || Date.now(),
-	        updatedAt: r.updatedAt || r.createdAt || Date.now(),
-	      };
-	    }).filter(function (r) {
-	      return r.match.length > 0;
-	    });
-	  }
-
-	  function syncInjectConfig() {
-	    var clean = sanitizeInjectRules(netInjectRules);
-	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
-	      try {
-	        window.wrappedJSObject.__bhInjectEnabled = !!netInjectEnabled;
-	        window.wrappedJSObject.__bhInjectRules = cloneInto(clean, window);
-	        return;
-	      } catch (e) {}
-	    }
-	    runInPage('(function(){window.__bhInjectEnabled=' + (netInjectEnabled ? 'true' : 'false') +
-	      ';window.__bhInjectRules=' + JSON.stringify(clean) + ';})();');
-	  }
-
-	  function saveInjectRules() {
-	    netInjectRules = sanitizeInjectRules(netInjectRules);
-	    var st = storageLocal();
-	    if (st && st.set) {
-	      try { st.set({ bhNetInjectRules: netInjectRules, bhNetInjectEnabled: !!netInjectEnabled }).catch(function () {}); } catch (e) {}
-	    }
-	    syncInjectConfig();
-	    updateInjectBtn();
-	  }
-
-	  function loadInjectRules() {
-	    var st = storageLocal();
-	    if (!st || !st.get) {
-	      syncInjectConfig();
-	      updateInjectBtn();
-	      return;
-	    }
-	    try {
-	      st.get(['bhNetInjectRules', 'bhNetInjectEnabled']).then(function (res) {
-	        netInjectRules = sanitizeInjectRules(res && res.bhNetInjectRules);
-	        netInjectEnabled = !!(res && res.bhNetInjectEnabled);
-	        syncInjectConfig();
-	        updateInjectBtn();
-	      }).catch(function () {
-	        syncInjectConfig();
-	        updateInjectBtn();
-	      });
-	    } catch (e) {
-	      syncInjectConfig();
-	      updateInjectBtn();
-	    }
 	  }
 
   function isPayloadReq(r) {
@@ -2280,18 +1926,6 @@
     return lines.join('\n');
   }
 
-  function fmtResponseHead(d) {
-    var lines = [
-      'STATUS: ' + (d.status || 200),
-      '',
-    ];
-    var h = d.respHeaders || {};
-    Object.keys(h).forEach(function (k) {
-      lines.push(k + ': ' + h[k]);
-    });
-    return lines.join('\n');
-  }
-
 	  function parseInterceptHead(text, d) {
 	    var headers = {};
 	    String(text || '').split(/\r?\n/).forEach(function (line) {
@@ -2307,20 +1941,6 @@
 	    d.reqHeaders = headers;
 	  }
 
-	  function parseResponseHead(text, d) {
-	    var headers = {};
-	    String(text || '').split(/\r?\n/).forEach(function (line) {
-	      if (!line.trim()) return;
-	      var idx = line.indexOf(':');
-	      if (idx < 0) return;
-	      var key = line.slice(0, idx).trim();
-	      var val = line.slice(idx + 1).trim();
-	      if (/^status$/i.test(key)) d.status = parseInt(val, 10) || d.status || 200;
-	      else headers[key] = val;
-	    });
-	    d.respHeaders = headers;
-	  }
-
 	  function bodyValueFromTextarea(emptyAsNull) {
 	    if (!netDetailBody) return emptyAsNull ? null : '';
 	    var value = netDetailBody.value;
@@ -2330,18 +1950,11 @@
 
 	  function syncInterceptEdit() {
 	    if (!netSelIntercept || !netDetailBody || !netDetailDirty) return;
-	    var isResp = netSelIntercept.mode === 'response';
-	    if (!isResp && netDetailTab === 0) parseInterceptHead(netDetailBody.value, netSelIntercept);
-	    else if (!isResp && netDetailTab === 1) {
+	    if (netDetailTab === 0) parseInterceptHead(netDetailBody.value, netSelIntercept);
+	    else if (netDetailTab === 1) {
 	      var body = bodyValueFromTextarea(false);
 	      if (body !== netSelIntercept.reqBody) removeHeaderCI(netSelIntercept.reqHeaders, 'content-length');
 	      netSelIntercept.reqBody = body;
-	    } else if (isResp && netDetailTab === 2) {
-	      parseResponseHead(netDetailBody.value, netSelIntercept);
-	    } else if (isResp && netDetailTab === 3) {
-	      var respBody = bodyValueFromTextarea(false);
-	      if (respBody !== netSelIntercept.respBody) removeHeaderCI(netSelIntercept.respHeaders, 'content-length');
-	      netSelIntercept.respBody = respBody;
 	    }
 	    netDetailDirty = false;
 	  }
@@ -2371,20 +1984,19 @@
 	  }
 
   function interceptAsReq(d) {
-    var isResp = d && d.mode === 'response';
     return {
       reqId: d.reqId,
       url: d.url,
       method: d.method,
       reqHeaders: d.reqHeaders || {},
       reqBody: d.reqBody || '',
-      status: isResp ? (d.status || 0) : null,
-      respHeaders: isResp ? (d.respHeaders || {}) : {},
-      respBody: isResp ? (d.respBody || '') : null,
+      status: null,
+      respHeaders: {},
+      respBody: null,
       duration: null,
       error: null,
       ts: d.ts || Date.now(),
-      tag: isResp ? '待接收' : '待发送',
+      tag: '拦截中',
       plain: [],
     };
   }
@@ -2397,8 +2009,7 @@
     netInterceptQueue = netInterceptQueue.filter(function (x) { return x.reqId !== d.reqId; });
     if (netSelIntercept && netSelIntercept.reqId === d.reqId) {
       netSelIntercept = netInterceptQueue[0] || null;
-      netDetailTab = netSelIntercept && netSelIntercept.mode === 'response' ? 3 :
-        (netSelIntercept && byteLen(netSelIntercept.reqBody) > 0 ? 1 : 0);
+      netDetailTab = netSelIntercept && byteLen(netSelIntercept.reqBody) > 0 ? 1 : 0;
       setNetEditing(false);
     }
     updateInterceptBtn();
@@ -2409,15 +2020,6 @@
 	  function sendSelectedIntercept() {
 	    if (!netSelIntercept) return;
 	    syncCurrentDetailEdit();
-	    if (netSelIntercept.mode === 'response') {
-	      finishIntercept(netSelIntercept, {
-	        action: 'continue',
-	        status: netSelIntercept.status || 200,
-	        respHeaders: netSelIntercept.respHeaders || {},
-	        respBody: netSelIntercept.respBody || '',
-	      });
-	      return;
-	    }
 	    finishIntercept(netSelIntercept, {
       action: 'continue',
       url: netSelIntercept.url,
@@ -2435,22 +2037,13 @@
 	  function releaseAllIntercepts() {
 	    netInterceptQueue.slice().forEach(function (d) {
 	      if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncCurrentDetailEdit();
-	      if (d.mode === 'response') {
-	        finishIntercept(d, {
-	          action: 'continue',
-	          status: d.status || 200,
-	          respHeaders: d.respHeaders || {},
-	          respBody: d.respBody || '',
-	        });
-	      } else {
-	        finishIntercept(d, {
-	          action: 'continue',
-	          url: d.url,
-	          method: String(d.method || 'GET').toUpperCase(),
-	          reqHeaders: d.reqHeaders || {},
-	          reqBody: d.reqBody || '',
-	        });
-	      }
+	      finishIntercept(d, {
+	        action: 'continue',
+	        url: d.url,
+	        method: String(d.method || 'GET').toUpperCase(),
+	        reqHeaders: d.reqHeaders || {},
+	        reqBody: d.reqBody || '',
+	      });
 	    });
 	  }
 
@@ -2510,19 +2103,18 @@
         netInterceptQueue.forEach(function (d) {
           var r = interceptAsReq(d);
           var selClass = netSelIntercept && netSelIntercept.reqId === d.reqId ? ' bh-sel' : '';
-          var isResp = d.mode === 'response';
-          var meta = isResp ? ('等待接收 · 返回 ' + fmtBytes(respSize(r))) : ('等待发送 · 发出 ' + fmtBytes(reqSize(r)));
-          html += '<div class="bh-row bh-intercept' + (isResp ? ' bh-response' : '') + selClass + '" data-int-id="' + escHtml(d.reqId) + '">' +
+          var meta = '等待发送 · ↑ ' + fmtBytes(reqSize(r));
+          html += '<div class="bh-row bh-intercept' + selClass + '" data-int-id="' + escHtml(d.reqId) + '">' +
             '<span class="bh-method">' + escHtml(d.method || 'GET') + '</span>' +
             '<span class="bh-main">' +
               '<span class="bh-url" title="' + escHtml(d.url || '') + '">' + escHtml(truncUrl(d.url || '')) + '</span>' +
               '<span class="bh-meta">' + escHtml(meta) + '</span>' +
             '</span>' +
-            '<span class="bh-tag">' + (isResp ? '待接收' : '待发送') + '</span>' +
+            '<span class="bh-tag">待发送</span>' +
             '</div>';
         });
       }
-      if (rows.length) html += '<div class="bh-section-title">请求记录（最近 ' + NET_MAX_REQUESTS + ' 条）</div>';
+      if (rows.length) html += '<div class="bh-section-title">请求记录</div>';
     }
     rows.forEach(function (r) {
       var hasErr = !!r.error;
@@ -2530,7 +2122,7 @@
       var statusNum = r.status ? String(r.status) : (hasErr ? 'ERR' : '…');
       var statusDesc = r.status ? statusPhrase(r.status) : (hasErr ? shortError(r.error) : '');
       var dur = r.duration != null ? r.duration + 'ms' : '…';
-      var meta = '发出 ' + fmtBytes(reqSize(r)) + ' · 返回 ' + fmtBytes(respSize(r)) + ' · ' + dur;
+      var meta = '↑ ' + fmtBytes(reqSize(r)) + ' · ↓ ' + fmtBytes(respSize(r)) + ' · ' + dur;
       var tags = [];
       if (r.tag) tags.push(r.tag);
       if (r.plain && r.plain.length) tags.push('明文');
@@ -2562,8 +2154,7 @@
 	        netSelIntercept = netInterceptQueue.find(function (r) { return r.reqId === id; }) || null;
         netSelReq = null;
         setNetEditing(false);
-        netDetailTab = netSelIntercept && netSelIntercept.mode === 'response' ? 3 :
-          (netSelIntercept && byteLen(netSelIntercept.reqBody) > 0 ? 1 : 0);
+        netDetailTab = netSelIntercept && byteLen(netSelIntercept.reqBody) > 0 ? 1 : 0;
 	        renderNetList();
 	        renderDetail(true);
 	      });
@@ -2657,7 +2248,7 @@
 	    // 编辑中收到网络刷新时不改任何详情 DOM。之前这里仍会重建 tab，
 	    // Android/GeckoView 上会让 IME 的目标 textarea 丢焦点，后续字符穿到页面。
 	    if ((netEditing || netDetailDirty) && !force) return;
-	    var tabs = ['发出头', '发出体', '返回头', '返回体', '明文'];
+	    var tabs = ['请求头', '请求体', '响应头', '响应体', '明文'];
 	    var tabsEl = netDetailEl.querySelector('#bh-detail-tabs');
 	    tabsEl.innerHTML = tabs.map(function (t, i) {
 	      return '<div class="bh-dtab' + (netDetailTab === i ? ' active' : '') + '" data-i="' + i + '">' + t + '</div>';
@@ -2671,24 +2262,19 @@
 	      });
 	    });
 	    var content = '';
-	    var pendingResponse = pendingIntercept && netSelIntercept.mode === 'response';
-	    if (pendingIntercept && netDetailTab === 0) content = '【网页发出到服务器】\n' + fmtInterceptHead(netSelIntercept);
+	    if (pendingIntercept && netDetailTab === 0) content = fmtInterceptHead(netSelIntercept);
 	    else if (netDetailTab === 0) content = fmtHeaders(r.reqHeaders);
 	    else if (netDetailTab === 1) content = formatBodyForDisplay(r.reqBody, r.reqHeaders);
 	    else if (netDetailTab === 2) {
-	      if (pendingResponse) {
-	        content = '【服务器返回到网页，尚未被网页接收】\n' + fmtResponseHead(netSelIntercept);
-	      } else if (pendingIntercept) {
+	      if (pendingIntercept) {
 	        content = '(请求已拦截，尚未发送)';
 	      } else {
         var lines = fmtHeaders(r.respHeaders);
         if (r.status) lines = 'HTTP/1.1 ' + r.status + ' ' + (statusPhrase(r.status) || '') + '\n' + lines;
-        content = '【服务器返回到网页】\n' + lines;
+        content = lines;
       }
     } else if (netDetailTab === 3) {
-      if (pendingResponse) {
-        content = formatBodyForDisplay(netSelIntercept.respBody, netSelIntercept.respHeaders);
-      } else if (pendingIntercept) {
+      if (pendingIntercept) {
         content = '(请求已拦截，尚未发送)';
 	      } else if (r.error) {
 	        content = '── 请求失败 ──\n' + r.error + '\n\n原因: ' + shortError(r.error);
@@ -2697,8 +2283,6 @@
 	      } else {
 	        content = '(等待响应…)';
 	      }
-    } else if (pendingResponse) {
-      content = '返回拦截中的响应还没有交给网页。';
     } else if (pendingIntercept) {
       content = '拦截中的请求还未发送，没有可关联的明文结果。';
 	    } else {
@@ -2712,9 +2296,8 @@
     if (!netDetailActs) return;
     var replay = netDetailActs.querySelector('#bh-act-replay');
     var bp = netDetailActs.querySelector('#bh-act-bp');
-    var pendingResponse = pendingIntercept && netSelIntercept && netSelIntercept.mode === 'response';
-    if (replay) replay.textContent = pendingResponse ? '接收' : (pendingIntercept ? '发送' : '重放');
-    if (bp) bp.textContent = pendingResponse ? '丢弃' : (pendingIntercept ? '中止' : '设断点');
+    if (replay) replay.textContent = pendingIntercept ? '发送' : '重放';
+    if (bp) bp.textContent = pendingIntercept ? '中止' : '设断点';
   }
 
   function setNetEditing(active) {
@@ -2726,11 +2309,10 @@
   function openDetailEditor() {
     if (!netDetailBody) return;
     var isIntercept = !!netSelIntercept;
-    var editable = netSelIntercept && netSelIntercept.mode === 'response'
-      ? (netDetailTab === 2 || netDetailTab === 3)
-      : (netDetailTab === 0 || netDetailTab === 1);
+    // tab 0=请求头 1=请求体 可编辑；普通请求也允许编辑请求头(0)和请求体(1)
+    var editable = (netDetailTab === 0 || netDetailTab === 1);
     if (!editable) return;
-    var titles = ['编辑发出头', '编辑发出体', '编辑返回头', '编辑返回体', ''];
+    var titles = ['编辑请求头', '编辑请求体', '', '', ''];
     var title = titles[netDetailTab] || '编辑';
     openEditOverlay(title, netDetailBody.value, function (text) {
       // 把编辑结果塞进只读 textarea，复用既有的写回逻辑（它从 netDetailBody.value 读取）
@@ -2757,7 +2339,8 @@
       resp.clone().text().then(function (body) {
         entry.respBody = body.slice(0, 102400);
         entry.duration = 0;
-        addNetRequest(entry);
+        netRequests.unshift(entry);
+        if (netRequests.length > 200) netRequests.length = 200;
         maybeFocusPayload(entry);
         if (netPanelVisible) renderNetList();
         if (netPanelVisible) renderDetail();
@@ -2769,7 +2352,7 @@
         reqHeaders: r.reqHeaders, reqBody: r.reqBody,
         status: 0, error: String(err), ts: Date.now(), tag: tag || '重放',
       };
-      addNetRequest(entry);
+      netRequests.unshift(entry);
       maybeFocusPayload(entry);
       if (netPanelVisible) renderNetList();
       if (netPanelVisible) renderDetail();
@@ -2825,10 +2408,8 @@
     var har = JSON.stringify({ log: { version: '1.2', creator: { name: 'BrowserHelper-Gecko', version: '1.0' }, entries: entries } }, null, 2);
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([har], { type: 'application/json' }));
-    var ts = new Date().toISOString().replace(/[:.]/g, '-');
-    a.download = 'BrowserHelper-network-' + ts + '-last-' + Math.min(netRequests.length, NET_MAX_REQUESTS) + '.har';
+    a.download = 'capture.har';
     a.click();
-    flashBtn(netPanel && netPanel.querySelector('#bh-export-har'), '已导出');
   }
 
   // ── 弹窗工具 ──
@@ -2849,8 +2430,7 @@
 	    var box = el.querySelector('#bh-modal-box');
 	    if (box) {
 	      ['pointerdown','pointerup','mousedown','mouseup','click','keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
-	        // Bubble-phase only: target controls must receive click/touch first.
-	        box.addEventListener(type, function (e) { e.stopPropagation(); }, false);
+	        box.addEventListener(type, function (e) { e.stopPropagation(); }, true);
 	      });
 	      box.addEventListener('dblclick', function (e) {
 	        if (e.target && /^(INPUT|TEXTAREA)$/i.test(e.target.tagName || '')) {
@@ -2917,24 +2497,9 @@
 	      '#bh-edit-overlay-bar button{font-size:14px;padding:8px 14px;border-radius:6px;min-height:40px;',
 	      '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
 	      '#bh-edit-overlay-ok{background:#2563eb !important;color:#fff !important;border-color:#2563eb !important;}',
-	      '#bh-edit-overlay-search{display:flex;align-items:center;gap:6px;padding:8px 10px;flex:0 0 auto;',
-	      '  border-bottom:1px solid #d0d7de;background:#fff;}',
-	      '#bh-edit-overlay-search-input{flex:1 1 auto;min-width:0;font-size:14px;padding:8px 10px;',
-	      '  border:1px solid #d0d7de;border-radius:6px;background:#fff;color:#111;}',
-	      '#bh-edit-overlay-count{flex:0 0 auto;min-width:54px;text-align:center;font-size:12px;color:#555;}',
-	      '#bh-edit-overlay-search button{flex:0 0 auto;font-size:13px;padding:8px 10px;border-radius:6px;',
-	      '  min-height:38px;border:1px solid #d0d7de;background:#fff;color:#111;}',
-	      '#bh-edit-overlay-editor{position:relative;flex:1 1 auto;min-height:0;background:#fff;overflow:hidden;}',
-	      '#bh-edit-overlay-highlight,#bh-edit-overlay-textarea{position:absolute;inset:0;width:100%;height:100%;',
-	      '  padding:10px;font-size:14px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;',
-	      '  word-break:break-word;font-family:monospace;}',
-	      '#bh-edit-overlay-highlight{overflow:hidden;color:#111;pointer-events:none;}',
-	      '#bh-edit-overlay-highlight mark{background:#bfdbfe;color:#111;border-radius:2px;',
-	      '  box-shadow:0 0 0 1px #60a5fa inset;padding:0 1px;}',
-	      '#bh-edit-overlay-highlight mark.active{background:#2563eb;color:#fff;box-shadow:0 0 0 1px #1d4ed8 inset;}',
-	      '#bh-edit-overlay-textarea{color:transparent;background:transparent;border:none;outline:none;resize:none;',
-	      '  caret-color:#111;overflow:auto;}',
-	      '#bh-edit-overlay-textarea::selection{background:rgba(37,99,235,.24);color:transparent;}',
+	      '#bh-edit-overlay-textarea{flex:1 1 auto;min-height:0;width:100%;padding:10px;font-size:14px;',
+	      '  color:#111;background:#fff;border:none;outline:none;resize:none;line-height:1.5;',
+	      '  white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:monospace;}',
 	    ].join('');
 	    (document.head || document.documentElement).appendChild(st);
 	  }
@@ -2951,95 +2516,14 @@
 	        '<span id="bh-edit-overlay-title"></span>' +
 	        '<button id="bh-edit-overlay-ok" type="button">完成</button>' +
 	      '</div>' +
-	      '<div id="bh-edit-overlay-search">' +
-	        '<input id="bh-edit-overlay-search-input" type="search" placeholder="搜索字符">' +
-	        '<span id="bh-edit-overlay-count">0/0</span>' +
-	        '<button id="bh-edit-overlay-prev" type="button">上一个</button>' +
-	        '<button id="bh-edit-overlay-next" type="button">下一个</button>' +
-	      '</div>' +
-	      '<div id="bh-edit-overlay-editor">' +
-	        '<pre id="bh-edit-overlay-highlight" aria-hidden="true"></pre>' +
-	        '<textarea id="bh-edit-overlay-textarea" spellcheck="false" wrap="soft"></textarea>' +
-	      '</div>';
+	      '<textarea id="bh-edit-overlay-textarea" spellcheck="false" wrap="soft"></textarea>';
 	    document.body.appendChild(el);
 	    el.querySelector('#bh-edit-overlay-title').textContent = title || '编辑';
 	    var ta = el.querySelector('#bh-edit-overlay-textarea');
-	    var search = el.querySelector('#bh-edit-overlay-search-input');
-	    var countEl = el.querySelector('#bh-edit-overlay-count');
-	    var highlight = el.querySelector('#bh-edit-overlay-highlight');
 	    ta.value = initial == null ? '' : String(initial);
 	    netEditOverlay = el;
 	    netEditTextarea = ta;
 	    netEditOnDone = onDone || null;
-	    var searchMatches = [];
-	    var searchIndex = -1;
-	    function overlayEsc(s) {
-	      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-	    }
-	    function renderSearchHighlights() {
-	      var text = ta.value || '';
-	      var q = search.value || '';
-	      searchMatches = [];
-	      searchIndex = -1;
-	      if (!q) {
-	        highlight.innerHTML = overlayEsc(text) + (/\n$/.test(text) ? ' ' : '');
-	        countEl.textContent = '0/0';
-	        return;
-	      }
-	      var hay = text.toLowerCase();
-	      var needle = q.toLowerCase();
-	      var pos = 0;
-	      var html = '';
-	      var idx = hay.indexOf(needle, pos);
-	      while (idx !== -1) {
-	        searchMatches.push({ start: idx, end: idx + q.length });
-	        html += overlayEsc(text.slice(pos, idx));
-	        html += '<mark data-mi="' + (searchMatches.length - 1) + '">' + overlayEsc(text.slice(idx, idx + q.length)) + '</mark>';
-	        pos = idx + q.length;
-	        idx = hay.indexOf(needle, pos);
-	      }
-	      html += overlayEsc(text.slice(pos)) + (/\n$/.test(text) ? ' ' : '');
-	      highlight.innerHTML = html;
-	      countEl.textContent = searchMatches.length ? ('1/' + searchMatches.length) : '0/0';
-	      if (searchMatches.length) setActiveSearchMatch(0, false);
-	    }
-	    function setActiveSearchMatch(nextIndex, focusText) {
-	      if (!searchMatches.length) {
-	        countEl.textContent = '0/0';
-	        return;
-	      }
-	      searchIndex = (nextIndex + searchMatches.length) % searchMatches.length;
-	      Array.prototype.forEach.call(highlight.querySelectorAll('mark'), function (m) {
-	        if (parseInt(m.getAttribute('data-mi'), 10) === searchIndex) m.classList.add('active');
-	        else m.classList.remove('active');
-	      });
-	      countEl.textContent = (searchIndex + 1) + '/' + searchMatches.length;
-	      var m = searchMatches[searchIndex];
-	      try {
-	        ta.setSelectionRange(m.start, m.end);
-	        if (focusText) ta.focus();
-	      } catch (e) {}
-	      syncHighlightScroll();
-	    }
-	    function syncHighlightScroll() {
-	      if (!highlight || !ta) return;
-	      highlight.scrollTop = ta.scrollTop;
-	      highlight.scrollLeft = ta.scrollLeft;
-	    }
-	    search.addEventListener('input', renderSearchHighlights);
-	    search.addEventListener('keydown', function (e) {
-	      if (e.key !== 'Enter') return;
-	      e.preventDefault();
-	      setActiveSearchMatch(searchIndex + (e.shiftKey ? -1 : 1), true);
-	    });
-	    el.querySelector('#bh-edit-overlay-prev').addEventListener('click', function () {
-	      setActiveSearchMatch(searchIndex - 1, true);
-	    });
-	    el.querySelector('#bh-edit-overlay-next').addEventListener('click', function () {
-	      setActiveSearchMatch(searchIndex + 1, true);
-	    });
-	    ta.addEventListener('input', renderSearchHighlights);
-	    ta.addEventListener('scroll', syncHighlightScroll);
 	    el.querySelector('#bh-edit-overlay-cancel').addEventListener('click', function () {
 	      closeEditOverlay();
 	    });
@@ -3053,7 +2537,6 @@
 	    setTimeout(function () {
 	      try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {}
 	    }, 30);
-	    renderSearchHighlights();
 	  }
 
 	  function closeEditOverlay() {
@@ -3120,9 +2603,8 @@
 	    if (!r) return;
 	    openModal('标记请求',
 	      '<div style="font-size:12px;color:#555;word-break:break-all;">' + escHtml(requestLabel(r)) + '</div>' +
-	      '<button data-mark="pass" data-dir="request" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">发出方向：标记为放行</button>' +
-	      '<button data-mark="intercept" data-dir="request" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">发出方向：标记为拦截</button>' +
-	      '<button data-mark="intercept" data-dir="response" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">返回方向：服务器响应先拦截</button>',
+	      '<button data-mark="pass" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为放行</button>' +
+	      '<button data-mark="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为拦截</button>',
 	      function () { closeModal(); }
 	    );
 	    setTimeout(function () {
@@ -3132,8 +2614,7 @@
 	      Array.prototype.forEach.call(netModal.querySelectorAll('[data-mark]'), function (btn) {
 	        btn.addEventListener('click', function () {
 	          var action = btn.getAttribute('data-mark');
-	          var direction = btn.getAttribute('data-dir') || 'request';
-	          upsertInterceptRuleFromReq(r, action, direction);
+	          upsertInterceptRuleFromReq(r, action);
 	          closeModal();
 	          renderNetList();
 	        });
@@ -3145,11 +2626,10 @@
 	    if (!rule) return;
 	    openModal('修改标记',
 	      '<div style="font-size:12px;color:#555;word-break:break-all;">' +
-	        escHtml(ruleDirectionLabel(rule.direction) + ' · ' + (rule.method || 'GET') + ' ' + (rule.host || '') + (rule.path || '')) +
+	        escHtml((rule.method || 'GET') + ' ' + (rule.host || '') + (rule.path || '')) +
 	      '</div>' +
-	      '<button data-rule-act="pass" data-rule-dir="request" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">发出方向：改为放行</button>' +
-	      '<button data-rule-act="intercept" data-rule-dir="request" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">发出方向：改为拦截</button>' +
-	      '<button data-rule-act="intercept" data-rule-dir="response" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">返回方向：改为拦截</button>' +
+	      '<button data-rule-act="pass" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">改为放行</button>' +
+	      '<button data-rule-act="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">改为拦截</button>' +
 	      '<button data-rule-act="clear" style="padding:10px;border:1px solid #fecaca;border-radius:6px;background:#fff5f5;color:#dc2626;text-align:left;">清除标记</button>',
 	      function () { closeModal(); }
 	    );
@@ -3163,11 +2643,9 @@
 	          if (act === 'clear') {
 	            removeInterceptRule(rule.id);
 	          } else {
-	            var dir = btn.getAttribute('data-rule-dir') || 'request';
 	            netInterceptRules = sanitizeInterceptRules(netInterceptRules).map(function (r) {
 	              if (r.id !== rule.id) return r;
 	              r.action = act === 'intercept' ? 'intercept' : 'pass';
-	              r.direction = dir === 'response' ? 'response' : 'request';
 	              r.updatedAt = Date.now();
 	              return r;
 	            });
@@ -3186,11 +2664,11 @@
 	      return (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
 	    });
 	    var rows = rules.map(function (r) {
-	      var meta = ruleDirectionLabel(r.direction) + ' · ' + (r.host || '(无域名)') + ' · ' + (r.hasBody ? '有正文' : '无正文') + ' · ' +
+	      var meta = (r.host || '(无域名)') + ' · ' + (r.hasBody ? '有正文' : '无正文') + ' · ' +
 	        new Date(r.updatedAt || r.createdAt || Date.now()).toLocaleString();
 	      return '<div class="bh-rule-row" data-rule-id="' + escHtml(r.id) + '">' +
 	        '<span class="bh-rule-action ' + (r.action === 'intercept' ? 'intercept' : 'pass') + '">' +
-	          escHtml(ruleDirectionLabel(r.direction) + ruleActionLabel(r.action)) + '</span>' +
+	          escHtml(ruleActionLabel(r.action)) + '</span>' +
 	        '<span class="bh-rule-main">' +
 	          '<span class="bh-rule-url">' + escHtml((r.method || 'GET') + ' ' + (r.path || r.sampleUrl || '/')) + '</span>' +
 	          '<span class="bh-rule-meta">' + escHtml(meta) + '</span>' +
@@ -3376,16 +2854,6 @@
     }
   }
 
-  function updateExtraMenu() {
-    var extraMenu = netPanel && netPanel.querySelector('#bh-extra-menu');
-    var extraBtn = netPanel && netPanel.querySelector('#bh-extra-menu-btn');
-    if (extraMenu) {
-      if (netExtraMenuOpen) extraMenu.classList.add('open');
-      else extraMenu.classList.remove('open');
-    }
-    if (extraBtn) extraBtn.textContent = '额外 ▾';
-  }
-
 	  function updateInterceptBtn() {
 	    var btn = netPanel && netPanel.querySelector('#bh-intercept-btn');
 	    if (!btn) return;
@@ -3400,81 +2868,6 @@
 	    var count = sanitizeInterceptRules(netInterceptRules).length;
 	    btn.textContent = count ? ('标记 ' + count) : '标记';
 	    btn.style.color = count ? '#2563eb' : '#111';
-	  }
-
-	  function updateInjectBtn() {
-	    var btn = netPanel && netPanel.querySelector('#bh-inject-btn');
-	    if (!btn) return;
-	    var count = sanitizeInjectRules(netInjectRules).length;
-	    btn.textContent = (netInjectEnabled ? '● ' : '○ ') + '注入' + (count ? (' ' + count) : '');
-	    btn.style.color = netInjectEnabled ? '#7c3aed' : '#888';
-	  }
-
-	  function openInjectModal() {
-	    var rules = sanitizeInjectRules(netInjectRules);
-	    var listHtml = rules.map(function (r) {
-	      return '<div data-inj-id="' + escHtml(r.id) + '" style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">' +
-	        '<span style="flex:1;min-width:0;font-size:12px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
-	          escHtml(r.name + ': ' + r.match + ' → ' + r.replace) + '</span>' +
-	        '<button data-inj-rename="' + escHtml(r.id) + '" style="font-size:11px;padding:4px 6px;">重命名</button>' +
-	        '<button data-inj-del="' + escHtml(r.id) + '" style="font-size:11px;padding:4px 6px;">删除</button>' +
-	      '</div>';
-	    }).join('') || '<div style="color:#888;font-size:12px;">暂无注入规则</div>';
-	    openModal('批量注入',
-	      listHtml +
-	      '<label style="margin-top:8px;">名称</label><input id="bh-inj-name" placeholder="如: token 替换">' +
-	      '<label>要匹配的内容</label><textarea id="bh-inj-match" placeholder="原字符串"></textarea>' +
-	      '<label>替换成</label><textarea id="bh-inj-replace" placeholder="新字符串"></textarea>',
-	      function (el) {
-	        var match = el.querySelector('#bh-inj-match').value;
-	        if (match) {
-	          netInjectRules.push({
-	            id: makeId(),
-	            name: el.querySelector('#bh-inj-name').value.trim() || ('注入 ' + (rules.length + 1)),
-	            match: match,
-	            replace: el.querySelector('#bh-inj-replace').value,
-	            createdAt: Date.now(),
-	            updatedAt: Date.now(),
-	          });
-	          saveInjectRules();
-	        }
-	        closeModal();
-	      }
-	    );
-	    setTimeout(function () {
-	      if (!netModal) return;
-	      Array.prototype.forEach.call(netModal.querySelectorAll('[data-inj-del]'), function (btn) {
-	        btn.addEventListener('click', function () {
-	          var id = btn.getAttribute('data-inj-del');
-	          netInjectRules = sanitizeInjectRules(netInjectRules).filter(function (r) { return r.id !== id; });
-	          saveInjectRules();
-	          openInjectModal();
-	        });
-	      });
-	      Array.prototype.forEach.call(netModal.querySelectorAll('[data-inj-rename]'), function (btn) {
-	        btn.addEventListener('click', function () {
-	          var id = btn.getAttribute('data-inj-rename');
-	          var rule = sanitizeInjectRules(netInjectRules).find(function (r) { return r.id === id; });
-	          if (!rule) return;
-	          openModal('重命名注入',
-	            '<label>名称</label><input id="bh-inj-rename-input" value="' + escHtml(rule.name) + '">',
-	            function (el) {
-	              var name = el.querySelector('#bh-inj-rename-input').value.trim();
-	              if (name) {
-	                netInjectRules = sanitizeInjectRules(netInjectRules).map(function (r) {
-	                  if (r.id !== id) return r;
-	                  r.name = name;
-	                  r.updatedAt = Date.now();
-	                  return r;
-	                });
-	                saveInjectRules();
-	              }
-	              closeModal();
-	            }
-	          );
-	        });
-	      });
-	    }, 30);
 	  }
 
   function openThrottleCustom() {
@@ -3536,18 +2929,12 @@
     bar.innerHTML =
       '<button id="bh-toggle">● 监听中</button>' +
       '<button id="bh-clear">清空</button>' +
+      '<button id="bh-export-har">导出 HAR</button>' +
+      '<button id="bh-bp-btn">断点</button>' +
+      '<button id="bh-mock-btn">Mock</button>' +
+	      '<button id="bh-thr-btn">○ 弱网</button>' +
 	      '<button id="bh-intercept-btn">○ 拦截</button>' +
-	      '<button id="bh-inject-btn">○ 注入</button>' +
 	      '<button id="bh-rules-btn">标记</button>' +
-	      '<span id="bh-extra-wrap">' +
-	        '<button id="bh-extra-menu-btn">额外 ▾</button>' +
-	        '<span id="bh-extra-menu">' +
-	          '<button id="bh-export-har">导出全部</button>' +
-	          '<button id="bh-bp-btn">断点</button>' +
-	          '<button id="bh-mock-btn">Mock</button>' +
-	          '<button id="bh-thr-btn">○ 弱网</button>' +
-	        '</span>' +
-	      '</span>' +
 	      '<span id="bh-filter-wrap">' +
         '<button id="bh-filter-menu-btn">过滤 ▾</button>' +
         '<span id="bh-filter-menu">' +
@@ -3576,68 +2963,19 @@
 	      updateInterceptBtn();
 	      renderNetList();
 	    });
-	    (function () {
-	      var injBtn = bar.querySelector('#bh-inject-btn');
-	      var longT = null;
-	      var fired = false;
-	      var startX = 0, startY = 0;
-	      var pointerMode = false;
-	      function clearT() { if (longT) { clearTimeout(longT); longT = null; } }
-	      function point(e) {
-	        var t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
-	        return { x: t.clientX || 0, y: t.clientY || 0 };
-	      }
-	      function down(e) {
-	        var p = point(e);
-	        startX = p.x; startY = p.y; fired = false; clearT();
-	        longT = setTimeout(function () {
-	          fired = true;
-	          longT = null;
-	          openInjectModal();
-	        }, 600);
-	      }
-	      function up(e) {
-	        var p = point(e);
-	        clearT();
-	        if (fired) { fired = false; return; }
-	        if (Math.abs(p.x - startX) > 12 || Math.abs(p.y - startY) > 12) return;
-	        netInjectEnabled = !netInjectEnabled;
-	        saveInjectRules();
-	      }
-	      injBtn.addEventListener('pointerdown', function (e) { pointerMode = true; down(e); });
-	      injBtn.addEventListener('pointerup', function (e) { pointerMode = true; up(e); });
-	      injBtn.addEventListener('pointercancel', clearT);
-	      injBtn.addEventListener('touchstart', function (e) { if (!pointerMode) down(e); }, { passive: true });
-	      injBtn.addEventListener('touchend', function (e) { if (!pointerMode) up(e); e.preventDefault(); });
-	      injBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
-	    }());
 	    bar.querySelector('#bh-rules-btn').addEventListener('click', openRulesView);
-    bar.querySelector('#bh-extra-menu-btn').addEventListener('click', function (e) {
-      try { e.stopPropagation(); } catch (err) {}
-      netExtraMenuOpen = !netExtraMenuOpen;
-      if (netExtraMenuOpen) netFilterMenuOpen = false;
-      updateExtraMenu();
-      updateFilterButtons();
-    });
-    bar.querySelector('#bh-extra-wrap').addEventListener('click', function (e) {
-      try { e.stopPropagation(); } catch (err) {}
-    });
     bar.querySelector('#bh-filter-menu-btn').addEventListener('click', function (e) {
       try { e.stopPropagation(); } catch (err) {}
       netFilterMenuOpen = !netFilterMenuOpen;
-      if (netFilterMenuOpen) netExtraMenuOpen = false;
-      updateExtraMenu();
       updateFilterButtons();
     });
     bar.querySelector('#bh-filter-wrap').addEventListener('click', function (e) {
       try { e.stopPropagation(); } catch (err) {}
     });
     wrap.addEventListener('click', function () {
-      if (!netFilterMenuOpen && !netExtraMenuOpen) return;
+      if (!netFilterMenuOpen) return;
       netFilterMenuOpen = false;
-      netExtraMenuOpen = false;
       updateFilterButtons();
-      updateExtraMenu();
     });
     bar.querySelector('#bh-noise-btn').addEventListener('click', function () {
       netHideTunnelNoise = !netHideTunnelNoise;
@@ -3718,8 +3056,6 @@
 	    updateFilterButtons();
 	    updateInterceptBtn();
 	    updateRulesBtn();
-	    updateInjectBtn();
-	    updateExtraMenu();
 	    // 搜索框也在 shadow root 内，同样改成"点按→light DOM 编辑层"避免 IME 崩坏
 	    netFilterEl.readOnly = true;
 	    netFilterEl.addEventListener('click', function () {
@@ -3877,11 +3213,9 @@
 	    _i18nCore();
 	    installPointerGuard();
 	    loadInterceptRules();
-	    loadInjectRules();
 	    injectInterceptor();
 	    syncGlobalInterceptEnabled();
 	    syncInterceptRules();
-	    syncInjectConfig();
 	    injectPlainProbe();
     // page-world: eruda 在 window.eruda; isolated: self.eruda
     var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
