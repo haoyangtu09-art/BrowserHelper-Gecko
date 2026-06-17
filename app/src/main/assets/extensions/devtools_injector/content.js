@@ -51,22 +51,16 @@
         // inject them into the document's light DOM, where Gecko honors them
         // and the rule still cascades into the shadow tree.
         injectErudaFontFace(code);
-        // Append init call inside the same script so no separate inline
-        // <script> is needed — bypasses pages that block unsafe-inline CSP.
-        var initCode = [
-          '\n(function(){',
-          '  try{',
-          '    if(window.eruda&&window.eruda._isInit){',
-          '      window.eruda._isInit=false;',
-          '      window.eruda._container=null;',
-          '      window.eruda._shadowRoot=null;',
-          '    }',
-          '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});',
-          '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}',
-          '  }catch(e){}',
-          '})();',
-        ].join('');
-        var blob = new Blob([code + initCode], { type: 'application/javascript' });
+        // Only EVALUATE the eruda bundle here; do NOT call eruda.init().
+        // Evaluating the bundle is what makes eruda's chobitsu backend patch the
+        // native window.XMLHttpRequest.prototype / window.fetch. On restore we must
+        // let that happen BEFORE our own interceptor wraps the XHR/fetch constructors,
+        // otherwise eruda reads our exportFunction'd constructor's Xray prototype,
+        // the proto patch throws, the blob aborts, window.eruda is never defined and
+        // verifyEntry reports "page eruda entry not visible". init() is deferred to
+        // initPageEruda() so first-open and restore share the same ordering:
+        //   bundle eval (patch native) -> interceptor -> eruda.init() UI.
+        var blob = new Blob([code], { type: 'application/javascript' });
         blobUrl = URL.createObjectURL(blob);
         var script = document.createElement('script');
         script.src = blobUrl;
@@ -310,8 +304,24 @@
   }
 
   function initPageEruda(cb) {
-    // eruda.init() was already called inside the Blob script (loadPageEruda).
-    // Just verify the entry button appeared in the DOM.
+    // The eruda bundle was only evaluated (not init'd) in loadPageEruda, so its
+    // chobitsu backend has already patched the NATIVE window.XMLHttpRequest /
+    // window.fetch. Now build the UI via eruda.init() in the page world, then
+    // verify the entry button appeared.
+    runInPage([
+      '(function(){',
+      '  try{',
+      '    if(!window.eruda)return;',
+      '    if(window.eruda._isInit){',
+      '      window.eruda._isInit=false;',
+      '      window.eruda._container=null;',
+      '      window.eruda._shadowRoot=null;',
+      '    }',
+      '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});',
+      '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}',
+      '  }catch(e){}',
+      '})();',
+    ].join('\n'));
     verifyEntry(function (visible) {
       if (visible) {
         erudaMode = 'page';
@@ -3763,17 +3773,27 @@
   // 页面导航后自动恢复：
   //   - document_start 阶段：立刻加载持久化配置并注入拦截器（只 hook fetch/XHR，不碰 eruda）
   //   - 页面加载完成（load 或 DOMContentLoaded + 延迟）后：再初始化 eruda + 面板
+  // 页面导航后自动恢复：
+  //   关键顺序约束（与首次打开保持一致，避免 page eruda entry not visible）：
+  //     1. 先 EVALUATE eruda bundle（loadPageEruda 只求值不 init），让 eruda 的
+  //        chobitsu 后端 patch 页面世界的原生 XMLHttpRequest.prototype / fetch；
+  //     2. 再注入我们的拦截器，包装页面世界的 fetch/XHR 构造器（叠在 eruda 之上）；
+  //     3. 页面渲染完成（load）后再 toggle() 调 eruda.init() 构建 UI。
+  //   若先注入拦截器，eruda 求值时会读到被我们 exportFunction 替换过的构造器的 Xray
+  //   原型，原型 patch 抛错导致 window.eruda 永不定义。
   if (wasActive()) {
-    // 1. 提前注入拦截器：document_start 时 fetch/XHR 就被 hook，页面第一个请求就能捕获
     loadNetConfig(function () {
       loadReplaceRules();
-      earlyInjectInterceptor();
-      syncGlobalInterceptEnabled();
-      syncReplaceRules();
+      // 1. 先求值 eruda bundle（patch 原生 fetch/XHR），无论成功失败都继续
+      loadPageEruda(function () {
+        // 2. 求值后再注入拦截器，保证顺序与首次打开一致
+        earlyInjectInterceptor();
+        syncGlobalInterceptEnabled();
+        syncReplaceRules();
+      });
     });
 
-    // 2. eruda 初始化必须等页面渲染足够完成，否则 entry button 没有尺寸导致 verifyEntry 超时
-    //    用 load 事件兜底，load 前若 DOMContentLoaded 已触发则延迟 300ms 再试
+    // 3. eruda UI 初始化必须等页面渲染足够完成，否则 entry button 没尺寸导致 verifyEntry 超时
     function doRestore() {
       if (document.readyState === 'complete') {
         toggle();
