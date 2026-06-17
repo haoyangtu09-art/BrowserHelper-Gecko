@@ -858,7 +858,7 @@
     '#bh-filter{flex:1;min-width:100px;font-size:14px;padding:8px 10px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;}',
     // 请求列表
-    '#bh-list{flex:1;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
+    '#bh-list{flex:1 1 auto;min-height:0;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
     '#bh-empty{padding:20px;text-align:center;color:#888;font-size:14px;}',
     '.bh-row{display:flex;align-items:center;padding:12px 10px;min-height:56px;',
     '  border-bottom:1px solid #eaecef;cursor:pointer;gap:8px;background:#fff;}',
@@ -872,17 +872,17 @@
     '.bh-status-wrap{display:flex;flex-direction:column;align-items:flex-end;min-width:60px;}',
     '.bh-status{font-size:14px;font-weight:700;line-height:1.2;}',
     '.bh-status-desc{font-size:11px;color:#888;line-height:1.2;}',
-    // 详情区
-    '#bh-detail{max-height:55%;overflow:hidden;display:flex;flex-direction:column;background:#fff;}',
-    '#bh-detail-tabs{display:flex;border-bottom:1px solid #d0d7de;overflow-x:auto;background:#f6f8fa;}',
+    // 详情区：展开后占面板大部分高度，让请求/响应体有足够阅读空间
+    '#bh-detail{flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:#fff;}',
+    '#bh-detail-tabs{display:flex;border-bottom:1px solid #d0d7de;overflow-x:auto;background:#f6f8fa;flex:0 0 auto;}',
     '.bh-dtab{padding:10px 14px;font-size:14px;cursor:pointer;white-space:nowrap;color:#111;',
     '  min-height:42px;display:flex;align-items:center;border-bottom:2px solid transparent;}',
     '.bh-dtab.active{border-bottom-color:#2563eb;font-weight:700;}',
     // textarea 代替 div：原生支持长按选中复制、单点光标编辑
-    '#bh-detail-body{flex:1;overflow-y:auto;padding:10px;font-size:13px;color:#111;',
+    '#bh-detail-body{flex:1 1 auto;min-height:200px;overflow:auto;padding:10px;font-size:13px;color:#111;',
     '  white-space:pre;word-break:break-all;font-family:monospace;background:#fff;',
-    '  border:none;outline:none;resize:none;width:100%;}',
-    '#bh-detail-acts{display:flex;gap:8px;padding:8px 10px;flex-wrap:wrap;',
+    '  border:none;outline:none;resize:none;width:100%;line-height:1.5;}',
+    '#bh-detail-acts{display:flex;gap:8px;padding:8px 10px;flex-wrap:wrap;flex:0 0 auto;',
     '  border-top:1px solid #d0d7de;background:#f6f8fa;}',
     '#bh-detail-acts button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
@@ -1021,9 +1021,12 @@
     if (!netDetailEl || !netDetailBody) return;
     if (!netSelReq) {
       netDetailEl.style.display = 'none';
+      if (netListEl) netListEl.style.flex = '1 1 auto';
       return;
     }
     netDetailEl.style.display = 'flex';
+    // 详情展开时列表收缩到约 30%，把空间让给请求/响应体
+    if (netListEl) netListEl.style.flex = '0 0 30%';
     var r = netSelReq;
     var tabs = ['请求头', '请求体', '响应头', '响应体'];
     var tabsEl = netDetailEl.querySelector('#bh-detail-tabs');
@@ -1150,30 +1153,6 @@
     if (netModal) { try { netModal.remove(); } catch (e) {} netModal = null; }
   }
 
-  // ── 功能：编辑重发 ──
-  function editReplay(r) {
-    var headersStr = JSON.stringify(r.reqHeaders || {}, null, 2);
-    openModal('编辑重发',
-      '<label>URL</label><input id="bh-edit-url" value="' + escHtml(r.url) + '">' +
-      '<label>方法</label><select id="bh-edit-method">' +
-        ['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].map(function(m){
-          return '<option' + (m===r.method?' selected':'') + '>' + m + '</option>';
-        }).join('') +
-      '</select>' +
-      '<label>请求头 (JSON)</label><textarea id="bh-edit-headers">' + escHtml(headersStr) + '</textarea>' +
-      '<label>请求体</label><textarea id="bh-edit-body">' + escHtml(r.reqBody || '') + '</textarea>',
-      function (el) {
-        var url = el.querySelector('#bh-edit-url').value;
-        var method = el.querySelector('#bh-edit-method').value;
-        var headersRaw = el.querySelector('#bh-edit-headers').value;
-        var body = el.querySelector('#bh-edit-body').value;
-        var headers = {};
-        try { headers = JSON.parse(headersRaw); } catch (e) {}
-        closeModal();
-        replayReq({ url: url, method: method, reqHeaders: headers, reqBody: body || null }, '编辑重发');
-      }
-    );
-  }
 
   // ── 功能：断点管理 ──
   function openBreakpointModal() {
@@ -1354,32 +1333,52 @@
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
     // 弱网按钮：单点切换开/关，长按弹菜单选预设
+    // 不依赖合成 click（Gecko/Android 上 pointer 事件后 click 可能不触发），
+    // 直接用 pointerdown/pointerup 自洽处理，并加 touch 兜底。
     (function () {
       var thrBtn = bar.querySelector('#bh-thr-btn');
       var longT = null;
       var fired = false;
-      thrBtn.addEventListener('pointerdown', function () {
-        fired = false;
-        longT = setTimeout(function () {
-          fired = true;
-          openThrottleMenu();
-        }, 600);
-      });
-      thrBtn.addEventListener('pointerup', function () {
-        if (longT) { clearTimeout(longT); longT = null; }
-      });
-      thrBtn.addEventListener('click', function () {
-        if (fired) { fired = false; return; } // 长按已处理
-        // 单点：开 → 关，关 → 上次预设或3G
+      var startX = 0, startY = 0;
+      function toggleThrottle() {
         if (netThrottle.enabled) {
           applyThrottle({ latencyMs: 0, kbps: 0 });
         } else {
-          // 恢复上次非零预设，默认3G
           var last = netThrottle._last || { latencyMs: 100, kbps: 200 };
           applyThrottle(last);
         }
+      }
+      function onDown(x, y) {
+        fired = false;
+        startX = x; startY = y;
+        if (longT) clearTimeout(longT);
+        longT = setTimeout(function () {
+          fired = true;
+          longT = null;
+          openThrottleMenu();
+        }, 600);
+      }
+      function onUp(x, y) {
+        if (longT) { clearTimeout(longT); longT = null; }
+        if (fired) { fired = false; return; }          // 长按已处理
+        // 移动过多视为滑动，不触发切换
+        if (Math.abs(x - startX) > 12 || Math.abs(y - startY) > 12) return;
+        toggleThrottle();
+      }
+      function onCancel() { if (longT) { clearTimeout(longT); longT = null; } fired = false; }
+      thrBtn.addEventListener('pointerdown', function (e) { onDown(e.clientX, e.clientY); });
+      thrBtn.addEventListener('pointerup', function (e) { onUp(e.clientX, e.clientY); });
+      thrBtn.addEventListener('pointercancel', onCancel);
+      // touch 兜底（部分 Gecko 版本 pointer 事件不可靠）
+      thrBtn.addEventListener('touchstart', function (e) {
+        var t = e.touches && e.touches[0]; if (t) onDown(t.clientX, t.clientY);
+      }, { passive: true });
+      thrBtn.addEventListener('touchend', function (e) {
+        var t = e.changedTouches && e.changedTouches[0];
+        if (t) onUp(t.clientX, t.clientY); else onUp(startX, startY);
+        e.preventDefault();
       });
-      thrBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); openThrottleMenu(); });
+      thrBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     }());
     netFilterEl.addEventListener('input', renderNetList);
 
@@ -1398,7 +1397,6 @@
       '<textarea id="bh-detail-body" spellcheck="false"></textarea>' +
       '<div id="bh-detail-acts">' +
         '<button id="bh-act-replay">重放</button>' +
-        '<button id="bh-act-edit">编辑重发</button>' +
         '<button id="bh-act-curl">复制 curl</button>' +
         '<button id="bh-act-bp">设断点</button>' +
       '</div>';
@@ -1415,9 +1413,6 @@
       } else {
         replayReq(netSelReq);
       }
-    });
-    netDetailActs.querySelector('#bh-act-edit').addEventListener('click', function () {
-      if (netSelReq) editReplay(netSelReq);
     });
     netDetailActs.querySelector('#bh-act-curl').addEventListener('click', function () {
       if (!netSelReq) return;
@@ -1440,7 +1435,7 @@
   function registerNetTool(erudaObj) {
     if (!erudaObj || !erudaObj.add) return;
     var tool = {
-      name: 'Network',
+      name: '网络',
       _$el: null,
       init: function ($el) {
         this._$el = $el;
@@ -1506,7 +1501,7 @@
       '  window.__bhNetToolAdded=true;',
       '  window.eruda.add(function(devtools){',
       '    return {',
-      '      name:"Network",',  // tab label
+      '      name:"网络",',  // tab label
       '      init:function($el){',
       '        this._$el=$el;',
       '        var node=($el&&$el[0])||($el&&$el.get&&$el.get(0))||$el;',
