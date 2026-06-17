@@ -948,8 +948,13 @@
     '#bh-detail-acts button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
     '#bh-detail-acts button:active{background:#e8eaed;}',
-    // 模态弹窗（挂到 document.body，在 shadow root 外，用固定色）
-    '#bh-modal{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;',
+    // 编辑模式：textarea 聚焦时把详情区固定到视口上半部分，
+    // 确保软键盘从底部弹起后，编辑区和按钮仍在键盘上方、可见可点。
+    '#bh-net.bh-editing #bh-detail{position:fixed;left:0;right:0;top:0;height:50vh;',
+    '  z-index:2147483640;box-shadow:0 4px 16px rgba(0,0,0,.35);}',
+    '#bh-net.bh-editing #bh-detail-body{min-height:0;}',
+    // 模态弹窗（挂进 #bh-net / shadow root 内，z-index 要高于 eruda 面板内部元素）
+    '#bh-modal{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;',
     '  justify-content:center;background:rgba(0,0,0,.5);}',
     '#bh-modal-box{background:#fff;border-radius:8px;color:#111;',
     '  width:90vw;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;}',
@@ -983,6 +988,7 @@
   var netSelReq = null;  // 当前选中的请求条目
   var netDetailTab = 0;  // 0=请求头 1=请求体 2=响应头 3=响应体
   var netModal = null;   // 当前弹窗 element
+  var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
 
   function statusClass(s, hasError) {
     if (hasError && !s) return 's-err';
@@ -1061,8 +1067,10 @@
       el.addEventListener('click', function () {
         var id = el.getAttribute('data-id');
         netSelReq = netRequests.find(function (r) { return r.reqId === id; }) || null;
+        netEditing = false; // 切换到新请求，退出编辑态以便显示新内容
+        netDetailTab = 0;
         renderNetList();
-        renderDetail();
+        renderDetail(true);
       });
     });
   }
@@ -1078,7 +1086,7 @@
     return Object.keys(obj).map(function (k) { return k + ': ' + obj[k]; }).join('\n') || '(无)';
   }
 
-  function renderDetail() {
+  function renderDetail(force) {
     if (!netDetailEl || !netDetailBody) return;
     if (!netSelReq) {
       netDetailEl.style.display = 'none';
@@ -1097,9 +1105,11 @@
     Array.prototype.forEach.call(tabsEl.querySelectorAll('.bh-dtab'), function (el) {
       el.addEventListener('click', function () {
         netDetailTab = parseInt(el.getAttribute('data-i'));
-        renderDetail();
+        renderDetail(true); // 用户主动切 tab，强制刷新内容
       });
     });
+    // 用户正在编辑且非强制刷新时，不覆盖 textarea 内容（修复"输入不进去"/光标丢失）
+    if (netEditing && !force) return;
     var content = '';
     if (netDetailTab === 0) content = fmtHeaders(r.reqHeaders);
     else if (netDetailTab === 1) content = r.reqBody != null ? r.reqBody : '(无)';
@@ -1149,6 +1159,18 @@
       netRequests.unshift(entry);
       if (netPanelVisible) renderNetList();
     });
+  }
+
+  // 按钮点击后短暂显示反馈文字，再恢复原文字
+  function flashBtn(btn, msg) {
+    if (!btn) return;
+    if (btn._flashT) { clearTimeout(btn._flashT); }
+    else { btn._orig = btn.textContent; }
+    btn.textContent = msg;
+    btn._flashT = setTimeout(function () {
+      btn.textContent = btn._orig;
+      btn._flashT = null;
+    }, 1000);
   }
 
   // ── 功能：复制 curl ──
@@ -1207,7 +1229,13 @@
     el.querySelector('#bh-btn-cancel').addEventListener('click', closeModal);
     el.querySelector('#bh-btn-ok').addEventListener('click', function () { onOk(el); });
     el.addEventListener('click', function (e) { if (e.target === el) closeModal(); });
-    document.body.appendChild(el);
+    // 关键：弹窗必须挂进 #bh-net（在 eruda 的 shadow root 内），原因：
+    //   1. #bh-modal 的 CSS 写在 NET_STYLE 里，只对 shadow root 内的元素生效，
+    //      挂 document.body 会完全没样式；
+    //   2. eruda 面板 z-index=9999999，挂 document.body 的弹窗会被它整个盖住，
+    //      表现为"点了按钮没反应"（其实弹窗开了但不可见/不可点）。
+    // 挂进 #bh-net 后弹窗与面板同处一个堆叠上下文，position:fixed 覆盖视口即可见可点。
+    (netPanel || document.body).appendChild(el);
     netModal = el;
   }
   function closeModal() {
@@ -1285,6 +1313,11 @@
 
   function injectMockRules() {
     var rulesJson = JSON.stringify(netMockRules);
+    // isolated 模式（强 CSP）：runInPage 的 blob <script> 可能被 CSP 拦截，
+    // 直接通过 wrappedJSObject + cloneInto 写到 page world，确保拦截器能读到。
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
+      try { window.wrappedJSObject.__bhMockRules = cloneInto(netMockRules, window); return; } catch (e) {}
+    }
     runInPage('(function(){window.__bhMockRules=' + rulesJson + ';})();');
   }
 
@@ -1304,7 +1337,13 @@
     netThrottle.latencyMs = cfg.latencyMs;
     netThrottle.kbps = cfg.kbps;
     netThrottle.enabled = cfg.latencyMs > 0 || cfg.kbps > 0;
-    runInPage('(function(){window.__bhThrottle=' + JSON.stringify(netThrottle) + ';})();');
+    // isolated 模式直写 page world，避免 blob <script> 被强 CSP 拦截
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
+      try { window.wrappedJSObject.__bhThrottle = cloneInto(netThrottle, window); }
+      catch (e) { runInPage('(function(){window.__bhThrottle=' + JSON.stringify(netThrottle) + ';})();'); }
+    } else {
+      runInPage('(function(){window.__bhThrottle=' + JSON.stringify(netThrottle) + ';})();');
+    }
     updateThrottleBtn();
   }
 
@@ -1458,12 +1497,25 @@
       '<textarea id="bh-detail-body" spellcheck="false"></textarea>' +
       '<div id="bh-detail-acts">' +
         '<button id="bh-act-replay">重放</button>' +
+        '<button id="bh-act-copy">复制全部</button>' +
+        '<button id="bh-act-clear">清空</button>' +
         '<button id="bh-act-curl">复制 curl</button>' +
         '<button id="bh-act-bp">设断点</button>' +
       '</div>';
     netDetailBody = netDetailEl.querySelector('#bh-detail-body');
     netDetailActs = netDetailEl.querySelector('#bh-detail-acts');
     wrap.appendChild(netDetailEl);
+
+    // textarea 聚焦时进入编辑模式：把详情区固定到视口上半，避免被软键盘遮挡；
+    // 同时置 netEditing=true，让 renderDetail 不再覆盖用户正在编辑的内容（修复"输入不进去"）。
+    netDetailBody.addEventListener('focus', function () {
+      netEditing = true;
+      wrap.classList.add('bh-editing');
+    });
+    netDetailBody.addEventListener('blur', function () {
+      netEditing = false;
+      wrap.classList.remove('bh-editing');
+    });
 
     netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
       if (!netSelReq) return;
@@ -1475,15 +1527,34 @@
         replayReq(netSelReq);
       }
     });
+    netDetailActs.querySelector('#bh-act-copy').addEventListener('click', function () {
+      if (!netDetailBody) return;
+      var text = netDetailBody.value || '';
+      // 优先用 textarea 选区复制（shadow root 内 navigator.clipboard 有时受限）
+      try {
+        netDetailBody.focus();
+        netDetailBody.select();
+        var ok = document.execCommand && document.execCommand('copy');
+        if (!ok && navigator.clipboard) navigator.clipboard.writeText(text).catch(function () {});
+      } catch (e) {
+        if (navigator.clipboard) navigator.clipboard.writeText(text).catch(function () {});
+      }
+      flashBtn(this, '已复制');
+    });
+    netDetailActs.querySelector('#bh-act-clear').addEventListener('click', function () {
+      if (netDetailBody) { netDetailBody.value = ''; netDetailBody.focus(); }
+    });
     netDetailActs.querySelector('#bh-act-curl').addEventListener('click', function () {
       if (!netSelReq) return;
       var text = toCurl(netSelReq);
       navigator.clipboard && navigator.clipboard.writeText(text).catch(function () {});
+      flashBtn(this, '已复制');
     });
     netDetailActs.querySelector('#bh-act-bp').addEventListener('click', function () {
       if (!netSelReq) return;
       try { var u = new URL(netSelReq.url); netBreakpoints.push({ pattern: u.pathname, id: Date.now() }); }
       catch (e) { netBreakpoints.push({ pattern: netSelReq.url.slice(0, 40), id: Date.now() }); }
+      flashBtn(this, '已设断点');
       renderNetList();
     });
 
