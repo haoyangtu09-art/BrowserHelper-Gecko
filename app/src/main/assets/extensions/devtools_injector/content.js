@@ -541,6 +541,18 @@
 	      '    if(rule==="intercept")return true;',
 	      '    return !!window.__bhGlobalInterceptEnabled&&!isNoiseReq(url,method,body,headers);',
 	      '  }',
+	      '  function applyReplace(text){',
+	      '    var rules=window.__bhReplaceRules;',
+	      '    if(!rules||!rules.length||text==null)return text;',
+	      '    var s=String(text);',
+	      '    rules.forEach(function(r){',
+	      '      if(!r.from)return;',
+	      '      var out="",idx=0;',
+	      '      while(true){var p=s.indexOf(r.from,idx);if(p===-1){out+=s.slice(idx);break;}out+=s.slice(idx,p)+(r.to||"");idx=p+r.from.length;}',
+	      '      s=out;',
+	      '    });',
+	      '    return s;',
+	      '  }',
       '  function waitBp(reqId,url,method,reqHeaders,reqBody,mode){',
       '    return new Promise(function(resolve){',
       '      window.__bhBpPending[reqId]=resolve;',
@@ -552,6 +564,8 @@
       '    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();',
       '    var reqHeaders=headersToObj(init&&init.headers);',
       '    var reqBody=(init&&init.body!=null)?String(init.body):null;',
+      '    reqBody=applyReplace(reqBody);',
+      '    if(reqBody!=null&&init){var _ni=Object.assign({},init);_ni.body=reqBody;init=_ni;}',
       '    var reqId=uid();',
       '    var t0=Date.now();',
       '    send({type:"req",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody});',
@@ -611,6 +625,7 @@
       '    xhr.setRequestHeader=function(k,v){_reqHeaders[k]=v;return origSetHeader(k,v);};',
       '    xhr.send=function(body){',
       '      _reqBody=body!=null?String(body):null;',
+      '      _reqBody=applyReplace(_reqBody);if(_reqBody!=null)body=_reqBody;',
       '      _t0=Date.now();',
       '      send({type:"req",reqId:_reqId,url:_url,method:_method,reqHeaders:_reqHeaders,reqBody:_reqBody});',
       '      var mock=checkMock(_url);',
@@ -995,6 +1010,13 @@
       var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
       var reqHeaders = headersToObj(init && init.headers);
       var reqBody = (init && init.body != null) ? String(init.body) : null;
+      var replacedBody = applyReplaceRules(reqBody);
+      if (replacedBody !== reqBody) {
+        reqBody = replacedBody;
+        var _ni = Object.assign({}, init || {});
+        _ni.body = reqBody;
+        init = cloneInto(_ni, pw);
+      }
       var reqId = uid();
       var t0 = Date.now();
       sendNet({ type: 'req', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody });
@@ -1055,6 +1077,8 @@
       exportFunction(function (k, v) { _reqHeaders[k] = v; return xhr.setRequestHeader(k, v); }, xhr, { defineAs: 'setRequestHeader' });
       exportFunction(function (body) {
         _reqBody = body != null ? String(body) : null;
+        var _rb2 = applyReplaceRules(_reqBody);
+        if (_rb2 !== _reqBody) { _reqBody = _rb2; body = _rb2; }
         _t0 = Date.now();
         sendNet({ type: 'req', reqId: _reqId, url: _url, method: _method, reqHeaders: _reqHeaders, reqBody: _reqBody });
         var mock = checkMock(_url);
@@ -1131,6 +1155,14 @@
 	      try { window.wrappedJSObject.__bhGlobalInterceptEnabled = !!netGlobalInterceptEnabled; return; } catch (e) {}
 	    }
 	    runInPage('(function(){window.__bhGlobalInterceptEnabled=' + (netGlobalInterceptEnabled ? 'true' : 'false') + ';})();');
+	  }
+
+	  function syncReplaceRules() {
+	    var active = netReplaceEnabled ? netReplaceRules.filter(function (r) { return r.enabled; }) : [];
+	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
+	      try { window.wrappedJSObject.__bhReplaceRules = cloneInto(active, window); return; } catch (e) {}
+	    }
+	    runInPage('(function(){window.__bhReplaceRules=' + JSON.stringify(active) + ';})();');
 	  }
 
 	  function disableInterceptor() {
@@ -2172,7 +2204,7 @@
         netSelReq = netRequests.find(function (r) { return r.reqId === id; }) || null;
         netSelIntercept = null;
         setNetEditing(false); // 切换到新请求，退出编辑态以便显示新内容
-        netDetailTab = 0;
+        // 保留当前 tab，切换请求不重置 tab 选择
 	        renderNetList();
 	        renderDetail(true);
 	      });
@@ -2189,6 +2221,7 @@
 	    netSelReq = null;
     netSelIntercept = null;
     setNetEditing(false);
+    clearDetailSearch();
     try { if (netDetailBody) netDetailBody.blur(); } catch (e) {}
     renderNetList();
     renderDetail(true);
@@ -2290,6 +2323,7 @@
 	    }
 	    netDetailBody.value = content;
 	    netDetailDirty = false;
+	    if (netDetailSearchText) runDetailSearch();
 	  }
 
   function updateDetailActionButtons(pendingIntercept) {
@@ -2429,8 +2463,13 @@
 	    el.addEventListener('click', function (e) { if (e.target === el) closeModal(); });
 	    var box = el.querySelector('#bh-modal-box');
 	    if (box) {
-	      ['pointerdown','pointerup','mousedown','mouseup','click','keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
+	      // IME/input 事件在 capture 阶段阻止冒泡（防止 eruda 干扰输入）
+	      ['keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
 	        box.addEventListener(type, function (e) { e.stopPropagation(); }, true);
+	      });
+	      // click/pointer 在 bubble 阶段阻止（capture 阶段不阻止，否则子按钮收不到 click）
+	      ['pointerdown','pointerup','mousedown','mouseup','click'].forEach(function (type) {
+	        box.addEventListener(type, function (e) { e.stopPropagation(); }, false);
 	      });
 	      box.addEventListener('dblclick', function (e) {
 	        if (e.target && /^(INPUT|TEXTAREA)$/i.test(e.target.tagName || '')) {
@@ -2544,6 +2583,70 @@
 	    netEditOverlay = null;
 	    netEditTextarea = null;
 	    netEditOnDone = null;
+	  }
+
+	  // ── 详情搜索 ──
+	  function runDetailSearch() {
+	    netDetailSearchMatches = [];
+	    netDetailSearchIdx = 0;
+	    var text = netDetailSearchText;
+	    var body = netDetailBody ? netDetailBody.value : '';
+	    if (text && body) {
+	      var lower = body.toLowerCase();
+	      var lowerText = text.toLowerCase();
+	      var pos = 0;
+	      while (true) {
+	        var idx = lower.indexOf(lowerText, pos);
+	        if (idx === -1) break;
+	        netDetailSearchMatches.push({ start: idx, end: idx + text.length });
+	        pos = idx + 1;
+	        if (netDetailSearchMatches.length > 500) break; // 防爆
+	      }
+	    }
+	    updateDetailSearchUI();
+	    scrollToCurrentMatch();
+	  }
+
+	  function stepDetailSearch(dir) {
+	    if (!netDetailSearchMatches.length) return;
+	    netDetailSearchIdx = (netDetailSearchIdx + dir + netDetailSearchMatches.length) % netDetailSearchMatches.length;
+	    updateDetailSearchUI();
+	    scrollToCurrentMatch();
+	  }
+
+	  function updateDetailSearchUI() {
+	    if (!netDetailEl) return;
+	    var countEl = netDetailEl.querySelector('#bh-dsearch-count');
+	    var n = netDetailSearchMatches.length;
+	    if (countEl) {
+	      if (!netDetailSearchText) countEl.textContent = '';
+	      else if (!n) countEl.textContent = '无匹配';
+	      else countEl.textContent = (netDetailSearchIdx + 1) + '/' + n;
+	    }
+	    // 用 textarea 的 setSelectionRange 定位到当前匹配（无法高亮，但可滚动+选中）
+	    if (netDetailBody && n > 0) {
+	      var m = netDetailSearchMatches[netDetailSearchIdx];
+	      try {
+	        netDetailBody.focus();
+	        netDetailBody.setSelectionRange(m.start, m.end);
+	      } catch (e) {}
+	    }
+	  }
+
+	  function scrollToCurrentMatch() {
+	    // textarea 没有原生高亮，setSelectionRange 已经定位；不需要额外滚动逻辑
+	  }
+
+	  function clearDetailSearch() {
+	    netDetailSearchText = '';
+	    netDetailSearchMatches = [];
+	    netDetailSearchIdx = 0;
+	    if (netDetailEl) {
+	      var dsearchEl = netDetailEl.querySelector('#bh-dsearch');
+	      if (dsearchEl) dsearchEl.value = '';
+	      var countEl = netDetailEl.querySelector('#bh-dsearch-count');
+	      if (countEl) countEl.textContent = '';
+	    }
 	  }
 
 	  function bindLongPress(el, fn) {
@@ -2819,9 +2922,9 @@
   function updateThrottleBtn() {
     var btn = (netPanel && netPanel.querySelector('#bh-thr-btn')) || document.getElementById('bh-thr-btn');
     if (!btn) return;
-    // 跟"监听中"一样：左边圆球区分开/关。● 实心=开启(橙)，○ 空心=关闭(灰)
     btn.textContent = (netThrottle.enabled ? '● ' : '○ ') + '弱网';
     btn.style.color = netThrottle.enabled ? '#ea580c' : '#888';
+    updateExtraMenu();
   }
 
   function updateFilterButtons() {
@@ -2868,7 +2971,103 @@
 	    var count = sanitizeInterceptRules(netInterceptRules).length;
 	    btn.textContent = count ? ('标记 ' + count) : '标记';
 	    btn.style.color = count ? '#2563eb' : '#111';
+	    updateExtraMenu();
 	  }
+
+  function updateExtraMenu() {
+    var btn = netPanel && netPanel.querySelector('#bh-extra-btn');
+    var menu = netPanel && netPanel.querySelector('#bh-extra-menu');
+    if (menu) {
+      if (netExtraMenuOpen) menu.classList.add('open');
+      else menu.classList.remove('open');
+    }
+    if (btn) {
+      var active = netThrottle.enabled || sanitizeInterceptRules(netInterceptRules).length;
+      btn.style.color = active ? '#2563eb' : '#111';
+      btn.style.borderColor = active ? '#93c5fd' : '#d0d7de';
+    }
+  }
+
+  function updateReplaceBtn() {
+    var btn = netPanel && netPanel.querySelector('#bh-replace-btn');
+    if (!btn) return;
+    var count = netReplaceRules.filter(function (r) { return r.enabled; }).length;
+    var suffix = count ? ' ' + count : (netReplaceRules.length ? ' ' + netReplaceRules.length : '');
+    btn.textContent = (netReplaceEnabled ? '● ' : '○ ') + '替换' + suffix;
+    btn.style.color = netReplaceEnabled ? '#7c3aed' : '#888';
+    syncReplaceRules();
+  }
+
+  function openReplaceModal() {
+    var listHtml = netReplaceRules.map(function (rule, i) {
+      var fromShort = rule.from.length > 20 ? rule.from.slice(0, 20) + '…' : rule.from;
+      var toShort = rule.to.length > 20 ? rule.to.slice(0, 20) + '…' : rule.to;
+      return '<div style="display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid #eaecef;">' +
+        '<span style="flex:1;font-size:12px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+          escHtml(fromShort) + ' → ' + escHtml(toShort) + '</span>' +
+        '<button data-ri-toggle="' + i + '" style="font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid #d0d7de;background:' + (rule.enabled ? '#dbeafe' : '#fff') + ';">' +
+          (rule.enabled ? '开' : '关') + '</button>' +
+        '<button data-ri-del="' + i + '" style="font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid #fecaca;background:#fff5f5;color:#dc2626;">删</button>' +
+      '</div>';
+    }).join('') || '<div style="color:#888;font-size:12px;padding:8px 0;">暂无替换规则</div>';
+    openModal('字符替换',
+      listHtml +
+      '<label style="margin-top:8px;">被替换字符串</label><input id="bh-repl-from" placeholder="要被替换的内容">' +
+      '<label>替换为</label><input id="bh-repl-to" placeholder="替换进去的内容（空=删除）">',
+      function (el) {
+        var from = el.querySelector('#bh-repl-from').value;
+        var to = el.querySelector('#bh-repl-to').value;
+        if (from) {
+          netReplaceRules.push({ id: Date.now().toString(36), from: from, to: to, enabled: true });
+          updateReplaceBtn();
+        }
+        closeModal();
+      }
+    );
+    setTimeout(function () {
+      if (!netModal) return;
+      Array.prototype.forEach.call(netModal.querySelectorAll('[data-ri-toggle]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var i = parseInt(btn.getAttribute('data-ri-toggle'));
+          if (netReplaceRules[i]) netReplaceRules[i].enabled = !netReplaceRules[i].enabled;
+          updateReplaceBtn();
+          openReplaceModal();
+        });
+      });
+      Array.prototype.forEach.call(netModal.querySelectorAll('[data-ri-del]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var i = parseInt(btn.getAttribute('data-ri-del'));
+          netReplaceRules.splice(i, 1);
+          updateReplaceBtn();
+          openReplaceModal();
+        });
+      });
+    }, 20);
+  }
+
+  function applyReplaceRules(text) {
+    if (!netReplaceEnabled || !netReplaceRules.length) return text;
+    var result = text;
+    netReplaceRules.forEach(function (rule) {
+      if (!rule.enabled || !rule.from) return;
+      try {
+        // 用简单字符串替换（全部匹配）
+        var from = rule.from;
+        var to = rule.to || '';
+        var out = '';
+        var idx = 0;
+        while (true) {
+          var pos = result.indexOf(from, idx);
+          if (pos === -1) { out += result.slice(idx); break; }
+          out += result.slice(idx, pos) + to;
+          idx = pos + from.length;
+        }
+        result = out;
+      } catch (e) {}
+    });
+    return result;
+  }
+
 
   function openThrottleCustom() {
     openModal('自定义弱网',
@@ -2929,13 +3128,19 @@
     bar.innerHTML =
       '<button id="bh-toggle">● 监听中</button>' +
       '<button id="bh-clear">清空</button>' +
-      '<button id="bh-export-har">导出 HAR</button>' +
-      '<button id="bh-bp-btn">断点</button>' +
-      '<button id="bh-mock-btn">Mock</button>' +
-	      '<button id="bh-thr-btn">○ 弱网</button>' +
-	      '<button id="bh-intercept-btn">○ 拦截</button>' +
-	      '<button id="bh-rules-btn">标记</button>' +
-	      '<span id="bh-filter-wrap">' +
+      '<button id="bh-intercept-btn">○ 拦截</button>' +
+      '<button id="bh-replace-btn">○ 替换</button>' +
+      '<span id="bh-extra-wrap">' +
+        '<button id="bh-extra-btn">额外 ▾</button>' +
+        '<span id="bh-extra-menu">' +
+          '<button id="bh-export-har">导出 HAR</button>' +
+          '<button id="bh-bp-btn">断点</button>' +
+          '<button id="bh-mock-btn">Mock</button>' +
+          '<button id="bh-thr-btn">○ 弱网</button>' +
+          '<button id="bh-rules-btn">标记</button>' +
+        '</span>' +
+      '</span>' +
+      '<span id="bh-filter-wrap">' +
         '<button id="bh-filter-menu-btn">过滤 ▾</button>' +
         '<span id="bh-filter-menu">' +
           '<button id="bh-noise-btn">○ 净化</button>' +
@@ -2960,10 +3165,51 @@
 	    bar.querySelector('#bh-intercept-btn').addEventListener('click', function () {
 	      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
 	      syncGlobalInterceptEnabled();
+	      if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
 	      updateInterceptBtn();
 	      renderNetList();
 	    });
 	    bar.querySelector('#bh-rules-btn').addEventListener('click', openRulesView);
+    bar.querySelector('#bh-extra-btn').addEventListener('click', function (e) {
+      try { e.stopPropagation(); } catch (err) {}
+      netExtraMenuOpen = !netExtraMenuOpen;
+      updateExtraMenu();
+    });
+    bar.querySelector('#bh-extra-wrap').addEventListener('click', function (e) {
+      try { e.stopPropagation(); } catch (err) {}
+    });
+    (function () {
+      var replBtn = bar.querySelector('#bh-replace-btn');
+      var replLong = null, replFired = false, replX = 0, replY = 0, replPtrMode = false;
+      function replDown(x, y) {
+        replFired = false; replX = x; replY = y;
+        if (replLong) clearTimeout(replLong);
+        replLong = setTimeout(function () { replFired = true; replLong = null; openReplaceModal(); }, 600);
+      }
+      function replUp(x, y) {
+        if (replLong) { clearTimeout(replLong); replLong = null; }
+        if (replFired) { replFired = false; return; }
+        if (Math.abs(x - replX) > 12 || Math.abs(y - replY) > 12) return;
+        netReplaceEnabled = !netReplaceEnabled;
+        updateReplaceBtn();
+      }
+      function replCancel() { if (replLong) { clearTimeout(replLong); replLong = null; } replFired = false; }
+      replBtn.addEventListener('pointerdown', function (e) { replPtrMode = true; replDown(e.clientX, e.clientY); });
+      replBtn.addEventListener('pointerup', function (e) { replPtrMode = true; replUp(e.clientX, e.clientY); });
+      replBtn.addEventListener('pointercancel', replCancel);
+      replBtn.addEventListener('touchstart', function (e) {
+        if (replPtrMode) return;
+        var t = e.touches && e.touches[0]; if (t) replDown(t.clientX, t.clientY);
+      }, { passive: true });
+      replBtn.addEventListener('touchend', function (e) {
+        if (replPtrMode) return;
+        var t = e.changedTouches && e.changedTouches[0];
+        if (t) replUp(t.clientX, t.clientY); else replUp(replX, replY);
+        e.preventDefault();
+      });
+      replBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+      replBtn.removeEventListener('click', function () {});
+    }());
     bar.querySelector('#bh-filter-menu-btn').addEventListener('click', function (e) {
       try { e.stopPropagation(); } catch (err) {}
       netFilterMenuOpen = !netFilterMenuOpen;
@@ -2973,9 +3219,10 @@
       try { e.stopPropagation(); } catch (err) {}
     });
     wrap.addEventListener('click', function () {
-      if (!netFilterMenuOpen) return;
-      netFilterMenuOpen = false;
-      updateFilterButtons();
+      var changed = false;
+      if (netFilterMenuOpen) { netFilterMenuOpen = false; changed = true; }
+      if (netExtraMenuOpen) { netExtraMenuOpen = false; updateExtraMenu(); }
+      if (changed) updateFilterButtons();
     });
     bar.querySelector('#bh-noise-btn').addEventListener('click', function () {
       netHideTunnelNoise = !netHideTunnelNoise;
@@ -3056,6 +3303,8 @@
 	    updateFilterButtons();
 	    updateInterceptBtn();
 	    updateRulesBtn();
+	    updateReplaceBtn();
+	    updateExtraMenu();
 	    // 搜索框也在 shadow root 内，同样改成"点按→light DOM 编辑层"避免 IME 崩坏
 	    netFilterEl.readOnly = true;
 	    netFilterEl.addEventListener('click', function () {
@@ -3080,6 +3329,14 @@
         '<div id="bh-detail-tabs"></div>' +
         '<button id="bh-detail-close" type="button" aria-label="关闭详情">×</button>' +
       '</div>' +
+      '<div id="bh-detail-search">' +
+        '<input id="bh-dsearch" placeholder="搜索内容…" autocomplete="off" spellcheck="false">' +
+        '<span id="bh-dsearch-count"></span>' +
+        '<span id="bh-dsearch-nav">' +
+          '<button id="bh-dsearch-prev" type="button">↑</button>' +
+          '<button id="bh-dsearch-next" type="button">↓</button>' +
+        '</span>' +
+      '</div>' +
 	      '<textarea id="bh-detail-body" spellcheck="false" wrap="soft"></textarea>' +
       '<div id="bh-detail-acts">' +
         '<button id="bh-act-replay">重放</button>' +
@@ -3093,6 +3350,24 @@
 	    wrap.appendChild(netDetailEl);
 
 	    netDetailEl.querySelector('#bh-detail-close').addEventListener('click', closeNetDetail);
+
+	    // 搜索框：在 shadow root 内，改用 light DOM 编辑层输入，绕过 Gecko IME bug
+	    var dsearchEl = netDetailEl.querySelector('#bh-dsearch');
+	    dsearchEl.readOnly = true;
+	    dsearchEl.addEventListener('click', function () {
+	      openEditOverlay('搜索内容', dsearchEl.value, function (text) {
+	        dsearchEl.value = text;
+	        netDetailSearchText = text.trim();
+	        runDetailSearch();
+	      });
+	    });
+	    netDetailEl.querySelector('#bh-dsearch-prev').addEventListener('click', function () {
+	      stepDetailSearch(-1);
+	    });
+	    netDetailEl.querySelector('#bh-dsearch-next').addEventListener('click', function () {
+	      stepDetailSearch(1);
+	    });
+
 	    ['pointerdown','mousedown','touchstart'].forEach(function (type) {
 	      netDetailActs.addEventListener(type, function (e) {
 	        syncCurrentDetailEdit();
