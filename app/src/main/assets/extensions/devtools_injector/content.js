@@ -447,6 +447,25 @@
       '    }',
       '    return null;',
       '  }',
+      // ── 断点：命中则暂停请求，等 content world 编辑后放行/中止 ──
+      '  function checkBp(url){',
+      '    var bps=window.__bhBreakpoints;',
+      '    if(!bps||!bps.length)return false;',
+      '    for(var i=0;i<bps.length;i++){if(url.indexOf(bps[i].pattern)!==-1)return true;}',
+      '    return false;',
+      '  }',
+      '  window.__bhBpPending=window.__bhBpPending||{};',
+      '  window.addEventListener("message",function(e){',
+      '    var d=e.data;if(!d||!d.__bhNet||d.type!=="bpResolve")return;',
+      '    var fn=window.__bhBpPending[d.reqId];',
+      '    if(fn){delete window.__bhBpPending[d.reqId];fn(d);}',
+      '  });',
+      '  function waitBp(reqId,url,method,reqHeaders,reqBody){',
+      '    return new Promise(function(resolve){',
+      '      window.__bhBpPending[reqId]=resolve;',
+      '      send({type:"breakpoint",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody});',
+      '    });',
+      '  }',
       '  window.fetch=function(input,init){',
       '    var url=typeof input==="string"?input:(input&&input.url)||"";',
       '    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();',
@@ -482,7 +501,20 @@
       '      send({type:"resp",reqId:reqId,status:0,error:String(err),duration:Date.now()-t0});',
       '      throw err;',
       '    });}.bind(this);',
-      '    return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();',
+      '    var runDelay=function(){return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();};',
+      // 命中断点：暂停，等编辑结果。修改后的 URL/头/体替换原参数后再发
+      '    if(checkBp(url)){',
+      '      return waitBp(reqId,url,method,reqHeaders,reqBody).then(function(r){',
+      '        if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"已被断点中止",duration:Date.now()-t0});return Promise.reject(new Error("aborted by breakpoint"));}',
+      '        var ni=Object.assign({},init||{});',
+      '        ni.method=r.method||method;',
+      '        if(r.reqHeaders)ni.headers=r.reqHeaders;',
+      '        if(r.reqBody!=null&&r.reqBody!=="")ni.body=r.reqBody;',
+      '        args=[r.url||url,ni];',
+      '        return runDelay();',
+      '      });',
+      '    }',
+      '    return runDelay();',
       '  };',
 
       // ── XHR 拦截 ──
@@ -533,7 +565,20 @@
       '      });',
       '      origSend.apply(xhr,arguments);};',
       '      var thr=window.__bhThrottle;var d=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
-      '      if(d>0){setTimeout(doSend,d);}else{doSend();}',
+      '      var fireSend=function(){if(d>0){setTimeout(doSend,d);}else{doSend();}};',
+      // 命中断点：暂停，等编辑结果。改了 url/method 需重新 open，改了头需重设
+      '      if(checkBp(_url)){',
+      '        waitBp(_reqId,_url,_method,_reqHeaders,_reqBody).then(function(r){',
+      '          if(r.action==="abort"){send({type:"resp",reqId:_reqId,status:0,error:"已被断点中止",duration:Date.now()-_t0});return;}',
+      '          var nm=r.method||_method,nu=r.url||_url;',
+      '          if(nm!==_method||nu!==_url){try{origOpen(nm,nu);}catch(e){}}',
+      '          if(r.reqHeaders){try{Object.keys(r.reqHeaders).forEach(function(k){origSetHeader(k,r.reqHeaders[k]);});}catch(e){}}',
+      '          if(r.reqBody!=null&&r.reqBody!==""){body=r.reqBody;}',
+      '          fireSend();',
+      '        });',
+      '        return;',
+      '      }',
+      '      fireSend();',
       '    };',
       '    return xhr;',
       '  };',
@@ -545,6 +590,7 @@
 
   // content script 接收 page world 发来的消息
   var netReqMap = {}; // reqId -> 请求条目（等待响应）
+  var _bpIsoPending = {}; // isolated 模式断点等待表 reqId -> resolve
   window.addEventListener('message', function (e) {
     if (!e.data || !e.data.__bhNet) return;
     var d = e.data;
@@ -577,8 +623,59 @@
       renderDetail();
     } else if (d.type === 'panelHide') {
       netPanelVisible = false;
+    } else if (d.type === 'breakpoint') {
+      // 命中断点：page world 已暂停请求，弹出编辑框让用户改 URL/头/体后放行或中止
+      openBreakpointEditor(d);
+    } else if (d.type === 'bpResolve') {
+      // isolated 模式：断点等待在 content world，直接 resolve（page 模式拦截器自己监听）
+      var fn = _bpIsoPending[d.reqId];
+      if (fn) { delete _bpIsoPending[d.reqId]; fn(d); }
     }
   });
+
+  // 命中断点时的编辑框：放行(可改)/中止
+  function bpResolve(reqId, payload) {
+    payload.__bhNet = true;
+    payload.type = 'bpResolve';
+    payload.reqId = reqId;
+    // 回复 page world（拦截器在那里 await）。content/page 共享 window 的 message 通道
+    try { window.postMessage(payload, '*'); } catch (e) {}
+  }
+  function openBreakpointEditor(d) {
+    var headersStr = JSON.stringify(d.reqHeaders || {}, null, 2);
+    openModal('断点命中 — 编辑请求',
+      '<label>URL</label><input id="bh-bpe-url" value="' + escHtml(d.url) + '">' +
+      '<label>方法</label><input id="bh-bpe-method" value="' + escHtml(d.method) + '">' +
+      '<label>请求头 (JSON)</label><textarea id="bh-bpe-headers">' + escHtml(headersStr) + '</textarea>' +
+      '<label>请求体</label><textarea id="bh-bpe-body">' + escHtml(d.reqBody || '') + '</textarea>',
+      function (el) {
+        var headers = {};
+        try { headers = JSON.parse(el.querySelector('#bh-bpe-headers').value); } catch (e) {}
+        bpResolve(d.reqId, {
+          action: 'continue',
+          url: el.querySelector('#bh-bpe-url').value,
+          method: el.querySelector('#bh-bpe-method').value.toUpperCase(),
+          reqHeaders: headers,
+          reqBody: el.querySelector('#bh-bpe-body').value,
+        });
+        closeModal();
+      }
+    );
+    // 确认按钮文案改成"放行"，并加一个"中止"按钮
+    setTimeout(function () {
+      if (!netModal) return;
+      var ok = netModal.querySelector('#bh-btn-ok');
+      if (ok) ok.textContent = '放行';
+      var cancel = netModal.querySelector('#bh-btn-cancel');
+      if (cancel) {
+        cancel.textContent = '中止请求';
+        cancel.onclick = function () {
+          bpResolve(d.reqId, { action: 'abort' });
+          closeModal();
+        };
+      }
+    }, 20);
+  }
 
   function injectInterceptor() {
     if (erudaMode === 'page') {
@@ -623,6 +720,19 @@
       }
       return null;
     }
+    // 断点（isolated 模式）：用 content-world 的 Promise 等待编辑结果
+    function checkBp(url) {
+      var bps = netBreakpoints;
+      if (!bps || !bps.length) return false;
+      for (var i = 0; i < bps.length; i++) { if (url.indexOf(bps[i].pattern) !== -1) return true; }
+      return false;
+    }
+    function waitBp(reqId, url, method, reqHeaders, reqBody) {
+      return new Promise(function (resolve) {
+        _bpIsoPending[reqId] = resolve;
+        sendNet({ type: 'breakpoint', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody });
+      });
+    }
 
     // ── 替换 page world 的 fetch ──
     var _origFetch = pw.fetch;
@@ -642,8 +752,9 @@
       }
       var thr = pw.__bhThrottle;
       var delay = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
+      var fInput = input, fInit = init;
       var doFetch = function () {
-        return _origFetch.call(pw, input, init).then(function (resp) {
+        return _origFetch.call(pw, fInput, fInit).then(function (resp) {
           var status = resp.status;
           var respHeaders = headersToObj(resp.headers);
           resp.clone().text().then(function (body) {
@@ -659,7 +770,25 @@
           throw err;
         });
       };
-      return delay > 0 ? new Promise(function (res) { setTimeout(function () { res(doFetch()); }, delay); }) : doFetch();
+      var runDelay = function () {
+        return delay > 0 ? new Promise(function (res) { setTimeout(function () { res(doFetch()); }, delay); }) : doFetch();
+      };
+      if (checkBp(url)) {
+        return waitBp(reqId, url, method, reqHeaders, reqBody).then(function (r) {
+          if (r.action === 'abort') {
+            sendNet({ type: 'resp', reqId: reqId, status: 0, error: '已被断点中止', duration: Date.now() - t0 });
+            return Promise.reject(new Error('aborted by breakpoint'));
+          }
+          var ni = cloneInto(Object.assign({}, (init && {}) || {}, {
+            method: r.method || method,
+            headers: r.reqHeaders || reqHeaders,
+          }), pw);
+          if (r.reqBody != null && r.reqBody !== '') ni.body = r.reqBody;
+          fInput = r.url || url; fInit = ni;
+          return runDelay();
+        });
+      }
+      return runDelay();
     }, pw, { defineAs: 'fetch' });
 
     // ── 替换 page world 的 XMLHttpRequest ──
@@ -713,7 +842,22 @@
         };
         var thr = pw.__bhThrottle;
         var d = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
-        if (d > 0) { setTimeout(doSend, d); } else { doSend(); }
+        var fireSend = function () { if (d > 0) { setTimeout(doSend, d); } else { doSend(); } };
+        if (checkBp(_url)) {
+          waitBp(_reqId, _url, _method, _reqHeaders, _reqBody).then(function (r) {
+            if (r.action === 'abort') {
+              sendNet({ type: 'resp', reqId: _reqId, status: 0, error: '已被断点中止', duration: Date.now() - _t0 });
+              return;
+            }
+            var nm = r.method || _method, nu = r.url || _url;
+            if (nm !== _method || nu !== _url) { try { xhr.open(nm, nu); } catch (e) {} }
+            if (r.reqHeaders) { try { Object.keys(r.reqHeaders).forEach(function (k) { xhr.setRequestHeader(k, r.reqHeaders[k]); }); } catch (e) {} }
+            if (r.reqBody != null && r.reqBody !== '') body = r.reqBody;
+            fireSend();
+          });
+          return;
+        }
+        fireSend();
       }, xhr, { defineAs: 'send' });
       return xhr;
     }, pw, { defineAs: 'XMLHttpRequest' });
@@ -1257,6 +1401,7 @@
       function (el) {
         var val = el.querySelector('#bh-bp-input').value.trim();
         if (val) netBreakpoints.push({ pattern: val, id: Date.now() });
+        injectBreakpoints();
         closeModal();
         renderNetList();
       }
@@ -1268,10 +1413,19 @@
         btn.addEventListener('click', function () {
           var i = parseInt(btn.getAttribute('data-bpi'));
           netBreakpoints.splice(i, 1);
+          injectBreakpoints();
           openBreakpointModal();
         });
       });
     }, 50);
+  }
+
+  // 把断点列表同步到 page world，供拦截器命中判断
+  function injectBreakpoints() {
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
+      try { window.wrappedJSObject.__bhBreakpoints = cloneInto(netBreakpoints, window); return; } catch (e) {}
+    }
+    runInPage('(function(){window.__bhBreakpoints=' + JSON.stringify(netBreakpoints) + ';})();');
   }
 
   // ── 功能：Mock 规则 ──
@@ -1554,6 +1708,7 @@
       if (!netSelReq) return;
       try { var u = new URL(netSelReq.url); netBreakpoints.push({ pattern: u.pathname, id: Date.now() }); }
       catch (e) { netBreakpoints.push({ pattern: netSelReq.url.slice(0, 40), id: Date.now() }); }
+      injectBreakpoints();
       flashBtn(this, '已设断点');
       renderNetList();
     });
