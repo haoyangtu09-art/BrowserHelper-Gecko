@@ -461,6 +461,7 @@
       '(function(){',
       '  if(window.__bhNetInstalled)return;',
       '  window.__bhNetInstalled=true;',
+      '  window.__bhGlobalInterceptEnabled=!!window.__bhGlobalInterceptEnabled;',
 
       // ── 工具 ──
       '  function headersToObj(h){',
@@ -498,10 +499,23 @@
       '    var fn=window.__bhBpPending[d.reqId];',
       '    if(fn){delete window.__bhBpPending[d.reqId];fn(d);}',
       '  });',
-      '  function waitBp(reqId,url,method,reqHeaders,reqBody){',
+      '  function isNoiseReq(url,method,body){',
+      '    url=String(url||"").toLowerCase();method=String(method||"GET").toUpperCase();',
+      '    if(method==="OPTIONS"||method==="HEAD")return true;',
+      '    var len=body==null?0:String(body).length;',
+      '    var re=/\\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;',
+      '    if(!re.test(url))return false;',
+      '    if(len>512)return false;',
+      '    if(method!=="GET"&&len>0)return false;',
+      '    return true;',
+      '  }',
+      '  function checkGlobalIntercept(url,method,body){',
+      '    return !!window.__bhGlobalInterceptEnabled&&!isNoiseReq(url,method,body);',
+      '  }',
+      '  function waitBp(reqId,url,method,reqHeaders,reqBody,mode){',
       '    return new Promise(function(resolve){',
       '      window.__bhBpPending[reqId]=resolve;',
-      '      send({type:"breakpoint",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody});',
+      '      send({type:"breakpoint",reqId:reqId,url:url,method:method,reqHeaders:reqHeaders,reqBody:reqBody,mode:mode||"breakpoint"});',
       '    });',
       '  }',
       '  window.fetch=function(input,init){',
@@ -541,8 +555,9 @@
       '    });}.bind(this);',
       '    var runDelay=function(){return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();};',
       // 命中断点：暂停，等编辑结果。修改后的 URL/头/体替换原参数后再发
-      '    if(checkBp(url)){',
-      '      return waitBp(reqId,url,method,reqHeaders,reqBody).then(function(r){',
+      '    var bpMode=checkBp(url)?"breakpoint":(checkGlobalIntercept(url,method,reqBody)?"intercept":"");',
+      '    if(bpMode){',
+      '      return waitBp(reqId,url,method,reqHeaders,reqBody,bpMode).then(function(r){',
       '        if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"已被断点中止",duration:Date.now()-t0});return Promise.reject(new Error("aborted by breakpoint"));}',
       '        var ni=Object.assign({},init||{});',
       '        ni.method=r.method||method;',
@@ -605,8 +620,9 @@
       '      var thr=window.__bhThrottle;var d=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
       '      var fireSend=function(){if(d>0){setTimeout(doSend,d);}else{doSend();}};',
       // 命中断点：暂停，等编辑结果。改了 url/method 需重新 open，改了头需重设
-      '      if(checkBp(_url)){',
-      '        waitBp(_reqId,_url,_method,_reqHeaders,_reqBody).then(function(r){',
+      '      var bpMode=checkBp(_url)?"breakpoint":(checkGlobalIntercept(_url,_method,_reqBody)?"intercept":"");',
+      '      if(bpMode){',
+      '        waitBp(_reqId,_url,_method,_reqHeaders,_reqBody,bpMode).then(function(r){',
       '          if(r.action==="abort"){send({type:"resp",reqId:_reqId,status:0,error:"已被断点中止",duration:Date.now()-_t0});return;}',
       '          var nm=r.method||_method,nu=r.url||_url;',
       '          if(nm!==_method||nu!==_url){try{origOpen(nm,nu);}catch(e){}}',
@@ -689,6 +705,8 @@
   // content script 接收 page world 发来的消息
   var netReqMap = {}; // reqId -> 请求条目（等待响应）
   var _bpIsoPending = {}; // isolated 模式断点等待表 reqId -> resolve
+  var netBreakpointQueue = [];
+  var netActiveBreakpoint = null;
   var netPlainCandidates = [];
   var netPlainSeq = 0;
   window.addEventListener('message', function (e) {
@@ -729,8 +747,8 @@
     } else if (d.type === 'panelHide') {
       netPanelVisible = false;
     } else if (d.type === 'breakpoint') {
-      // 命中断点：page world 已暂停请求，弹出编辑框让用户改 URL/头/体后放行或中止
-      openBreakpointEditor(d);
+      // 命中断点/全局拦截：page world 已暂停请求，排队弹编辑框，防止多个请求互相覆盖
+      enqueueBreakpoint(d);
     } else if (d.type === 'bpResolve') {
       // isolated 模式：断点等待在 content world，直接 resolve（page 模式拦截器自己监听）
       var fn = _bpIsoPending[d.reqId];
@@ -748,9 +766,31 @@
     // 回复 page world（拦截器在那里 await）。content/page 共享 window 的 message 通道
     try { window.postMessage(payload, '*'); } catch (e) {}
   }
+
+  function enqueueBreakpoint(d) {
+    netBreakpointQueue.push(d);
+    if (!netActiveBreakpoint) openNextBreakpoint();
+  }
+
+  function openNextBreakpoint() {
+    if (netActiveBreakpoint || !netBreakpointQueue.length) return;
+    netActiveBreakpoint = netBreakpointQueue.shift();
+    openBreakpointEditor(netActiveBreakpoint);
+  }
+
+  function finishBreakpoint(d, payload) {
+    if (!d || d.__done) return;
+    d.__done = true;
+    bpResolve(d.reqId, payload);
+    closeModal();
+    if (netActiveBreakpoint && netActiveBreakpoint.reqId === d.reqId) netActiveBreakpoint = null;
+    setTimeout(openNextBreakpoint, 20);
+  }
+
   function openBreakpointEditor(d) {
+    var isGlobal = d.mode === 'intercept';
     var headersStr = JSON.stringify(d.reqHeaders || {}, null, 2);
-    openModal('断点命中 — 编辑请求',
+    openModal(isGlobal ? '请求拦截 — 编辑后发送' : '断点命中 — 编辑请求',
       '<label>URL</label><input id="bh-bpe-url" value="' + escHtml(d.url) + '">' +
       '<label>方法</label><input id="bh-bpe-method" value="' + escHtml(d.method) + '">' +
       '<label>请求头 (JSON)</label><textarea id="bh-bpe-headers">' + escHtml(headersStr) + '</textarea>' +
@@ -758,29 +798,32 @@
       function (el) {
         var headers = {};
         try { headers = JSON.parse(el.querySelector('#bh-bpe-headers').value); } catch (e) {}
-        bpResolve(d.reqId, {
+        finishBreakpoint(d, {
           action: 'continue',
           url: el.querySelector('#bh-bpe-url').value,
           method: el.querySelector('#bh-bpe-method').value.toUpperCase(),
           reqHeaders: headers,
           reqBody: el.querySelector('#bh-bpe-body').value,
         });
-        closeModal();
       }
     );
-    // 确认按钮文案改成"放行"，并加一个"中止"按钮
+    // 确认按钮文案改成"放行/发送"，并加一个"中止"按钮
     setTimeout(function () {
       if (!netModal) return;
       var ok = netModal.querySelector('#bh-btn-ok');
-      if (ok) ok.textContent = '放行';
+      if (ok) ok.textContent = isGlobal ? '发送' : '放行';
       var cancel = netModal.querySelector('#bh-btn-cancel');
       if (cancel) {
         cancel.textContent = '中止请求';
         cancel.onclick = function () {
-          bpResolve(d.reqId, { action: 'abort' });
-          closeModal();
+          finishBreakpoint(d, { action: 'abort' });
         };
       }
+      netModal.addEventListener('click', function (e) {
+        if (e.target !== netModal) return;
+        try { e.preventDefault(); e.stopImmediatePropagation(); } catch (err) {}
+        finishBreakpoint(d, { action: 'abort' });
+      }, true);
     }, 20);
   }
 
@@ -834,10 +877,24 @@
       for (var i = 0; i < bps.length; i++) { if (url.indexOf(bps[i].pattern) !== -1) return true; }
       return false;
     }
-    function waitBp(reqId, url, method, reqHeaders, reqBody) {
+    function isNoiseBeforeSend(url, method, body) {
+      url = String(url || '').toLowerCase();
+      method = String(method || 'GET').toUpperCase();
+      if (method === 'OPTIONS' || method === 'HEAD') return true;
+      var len = body == null ? 0 : String(body).length;
+      var re = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
+      if (!re.test(url)) return false;
+      if (len > 512) return false;
+      if (method !== 'GET' && len > 0) return false;
+      return true;
+    }
+    function checkGlobalIntercept(url, method, body) {
+      return !!netGlobalInterceptEnabled && !isNoiseBeforeSend(url, method, body);
+    }
+    function waitBp(reqId, url, method, reqHeaders, reqBody, mode) {
       return new Promise(function (resolve) {
         _bpIsoPending[reqId] = resolve;
-        sendNet({ type: 'breakpoint', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody });
+        sendNet({ type: 'breakpoint', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody, mode: mode || 'breakpoint' });
       });
     }
 
@@ -880,8 +937,9 @@
       var runDelay = function () {
         return delay > 0 ? new Promise(function (res) { setTimeout(function () { res(doFetch()); }, delay); }) : doFetch();
       };
-      if (checkBp(url)) {
-        return waitBp(reqId, url, method, reqHeaders, reqBody).then(function (r) {
+      var bpMode = checkBp(url) ? 'breakpoint' : (checkGlobalIntercept(url, method, reqBody) ? 'intercept' : '');
+      if (bpMode) {
+        return waitBp(reqId, url, method, reqHeaders, reqBody, bpMode).then(function (r) {
           if (r.action === 'abort') {
             sendNet({ type: 'resp', reqId: reqId, status: 0, error: '已被断点中止', duration: Date.now() - t0 });
             return Promise.reject(new Error('aborted by breakpoint'));
@@ -950,8 +1008,9 @@
         var thr = pw.__bhThrottle;
         var d = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
         var fireSend = function () { if (d > 0) { setTimeout(doSend, d); } else { doSend(); } };
-        if (checkBp(_url)) {
-          waitBp(_reqId, _url, _method, _reqHeaders, _reqBody).then(function (r) {
+        var bpMode = checkBp(_url) ? 'breakpoint' : (checkGlobalIntercept(_url, _method, _reqBody) ? 'intercept' : '');
+        if (bpMode) {
+          waitBp(_reqId, _url, _method, _reqHeaders, _reqBody, bpMode).then(function (r) {
             if (r.action === 'abort') {
               sendNet({ type: 'resp', reqId: _reqId, status: 0, error: '已被断点中止', duration: Date.now() - _t0 });
               return;
@@ -975,6 +1034,13 @@
       try { window.wrappedJSObject.__bhPlainProbeEnabled = !!netPlainProbeEnabled; return; } catch (e) {}
     }
     runInPage('(function(){window.__bhPlainProbeEnabled=' + (netPlainProbeEnabled ? 'true' : 'false') + ';})();');
+  }
+
+  function syncGlobalInterceptEnabled() {
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+      try { window.wrappedJSObject.__bhGlobalInterceptEnabled = !!netGlobalInterceptEnabled; return; } catch (e) {}
+    }
+    runInPage('(function(){window.__bhGlobalInterceptEnabled=' + (netGlobalInterceptEnabled ? 'true' : 'false') + ';})();');
   }
 
   function injectPlainProbe() {
@@ -1298,11 +1364,19 @@
     '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
     '  background:#fff;color:#111;pointer-events:auto;touch-action:auto;}',
     // 顶部工具栏
-    '#bh-bar{display:flex;align-items:center;gap:8px;padding:8px 10px;',
+    '#bh-bar{position:relative;z-index:2;display:flex;align-items:center;gap:8px;padding:8px 10px;',
     '  border-bottom:1px solid #d0d7de;flex-wrap:wrap;background:#f6f8fa;}',
     '#bh-bar button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;white-space:nowrap;}',
     '#bh-bar button:active{background:#e8eaed;}',
+    '#bh-filter-wrap{position:relative;display:inline-flex;}',
+    '#bh-filter-menu{display:none;position:absolute;left:0;top:calc(100% + 5px);min-width:128px;',
+    '  padding:4px;background:#fff;border:1px solid #d0d7de;border-radius:6px;',
+    '  box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:2147483642;}',
+    '#bh-filter-menu.open{display:flex;flex-direction:column;gap:2px;}',
+    '#bh-filter-menu button{width:100%;text-align:left;border:none;border-radius:4px;',
+    '  background:#fff;min-height:36px;padding:7px 10px;}',
+    '#bh-filter-menu button:active{background:#e8eaed;}',
     '#bh-filter{flex:1;min-width:100px;font-size:14px;padding:8px 10px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;}',
     // 请求列表
@@ -1380,6 +1454,8 @@
   var netHideTunnelNoise = false;
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
+  var netGlobalInterceptEnabled = false;
+  var netFilterMenuOpen = false;
 
   function statusClass(s, hasError) {
     if (hasError && !s) return 's-err';
@@ -1948,9 +2024,21 @@
   }
 
   function updateFilterButtons() {
+    var filterBtn = netPanel && netPanel.querySelector('#bh-filter-menu-btn');
+    var filterMenu = netPanel && netPanel.querySelector('#bh-filter-menu');
     var noiseBtn = netPanel && netPanel.querySelector('#bh-noise-btn');
     var payloadBtn = netPanel && netPanel.querySelector('#bh-payload-btn');
     var plainBtn = netPanel && netPanel.querySelector('#bh-plain-btn');
+    var active = netHideTunnelNoise || netPayloadOnly || netPlainProbeEnabled;
+    if (filterBtn) {
+      filterBtn.textContent = '过滤 ▾';
+      filterBtn.style.color = active ? '#2563eb' : '#111';
+      filterBtn.style.borderColor = active ? '#93c5fd' : '#d0d7de';
+    }
+    if (filterMenu) {
+      if (netFilterMenuOpen) filterMenu.classList.add('open');
+      else filterMenu.classList.remove('open');
+    }
     if (noiseBtn) {
       noiseBtn.textContent = (netHideTunnelNoise ? '● ' : '○ ') + '净化';
       noiseBtn.style.color = netHideTunnelNoise ? '#2563eb' : '#888';
@@ -1963,6 +2051,13 @@
       plainBtn.textContent = (netPlainProbeEnabled ? '● ' : '○ ') + '明文';
       plainBtn.style.color = netPlainProbeEnabled ? '#dc2626' : '#888';
     }
+  }
+
+  function updateInterceptBtn() {
+    var btn = netPanel && netPanel.querySelector('#bh-intercept-btn');
+    if (!btn) return;
+    btn.textContent = (netGlobalInterceptEnabled ? '● ' : '○ ') + '拦截';
+    btn.style.color = netGlobalInterceptEnabled ? '#dc2626' : '#888';
   }
 
   function openThrottleCustom() {
@@ -2025,10 +2120,16 @@
       '<button id="bh-bp-btn">断点</button>' +
       '<button id="bh-mock-btn">Mock</button>' +
       '<button id="bh-thr-btn">○ 弱网</button>' +
-      '<button id="bh-noise-btn">○ 净化</button>' +
-      '<button id="bh-payload-btn">○ 正文</button>' +
-      '<button id="bh-plain-btn">○ 明文</button>' +
-      '<input id="bh-filter" placeholder="过滤 URL…">';
+      '<button id="bh-intercept-btn">○ 拦截</button>' +
+      '<span id="bh-filter-wrap">' +
+        '<button id="bh-filter-menu-btn">过滤 ▾</button>' +
+        '<span id="bh-filter-menu">' +
+          '<button id="bh-noise-btn">○ 净化</button>' +
+          '<button id="bh-payload-btn">○ 正文</button>' +
+          '<button id="bh-plain-btn">○ 明文</button>' +
+        '</span>' +
+      '</span>' +
+      '<input id="bh-filter" placeholder="搜索 URL…">';
     wrap.appendChild(bar);
     netFilterEl = bar.querySelector('#bh-filter');
     netEnableBtn = bar.querySelector('#bh-toggle');
@@ -2046,6 +2147,24 @@
     bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
+    bar.querySelector('#bh-intercept-btn').addEventListener('click', function () {
+      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
+      syncGlobalInterceptEnabled();
+      updateInterceptBtn();
+    });
+    bar.querySelector('#bh-filter-menu-btn').addEventListener('click', function (e) {
+      try { e.stopPropagation(); } catch (err) {}
+      netFilterMenuOpen = !netFilterMenuOpen;
+      updateFilterButtons();
+    });
+    bar.querySelector('#bh-filter-wrap').addEventListener('click', function (e) {
+      try { e.stopPropagation(); } catch (err) {}
+    });
+    wrap.addEventListener('click', function () {
+      if (!netFilterMenuOpen) return;
+      netFilterMenuOpen = false;
+      updateFilterButtons();
+    });
     bar.querySelector('#bh-noise-btn').addEventListener('click', function () {
       netHideTunnelNoise = !netHideTunnelNoise;
       updateFilterButtons();
@@ -2123,6 +2242,7 @@
     }());
     updateThrottleBtn();
     updateFilterButtons();
+    updateInterceptBtn();
     netFilterEl.addEventListener('input', renderNetList);
 
     // 请求列表
@@ -2243,6 +2363,7 @@
     _i18nCore();
     installPointerGuard();
     injectInterceptor();
+    syncGlobalInterceptEnabled();
     injectPlainProbe();
     // page-world: eruda 在 window.eruda; isolated: self.eruda
     var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
