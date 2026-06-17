@@ -3187,6 +3187,59 @@
     } catch (e) {}
   }
 
+  // ── 网络配置持久化（拦截开关、过滤状态等）──
+  var NET_CONFIG_KEY = 'bhNetConfig';
+
+  function saveNetConfig() {
+    var st = storageLocal();
+    if (!st || !st.set) return;
+    try {
+      st.set({ bhNetConfig: {
+        globalIntercept: netGlobalInterceptEnabled,
+        plainProbe: netPlainProbeEnabled,
+        hideTunnelNoise: netHideTunnelNoise,
+        payloadOnly: netPayloadOnly,
+        replaceEnabled: netReplaceEnabled,
+      }}).catch(function () {});
+    } catch (e) {}
+  }
+
+  function loadNetConfig(cb) {
+    var st = storageLocal();
+    if (!st || !st.get) { if (cb) cb(); return; }
+    try {
+      st.get(NET_CONFIG_KEY).then(function (res) {
+        var cfg = res && res[NET_CONFIG_KEY];
+        if (cfg) {
+          netGlobalInterceptEnabled = !!cfg.globalIntercept;
+          netPlainProbeEnabled = !!cfg.plainProbe;
+          netHideTunnelNoise = !!cfg.hideTunnelNoise;
+          netPayloadOnly = !!cfg.payloadOnly;
+          netReplaceEnabled = !!cfg.replaceEnabled;
+        }
+        if (cb) cb();
+      }).catch(function () { if (cb) cb(); });
+    } catch (e) { if (cb) cb(); }
+  }
+
+  // document_start 时提前注入拦截器（不依赖 DOM），让页面第一个请求就能被捕获
+  function earlyInjectInterceptor() {
+    // isolated world：直接用 exportFunction，不需要 DOM
+    if (typeof exportFunction !== 'undefined' && typeof window.wrappedJSObject !== 'undefined') {
+      injectInterceptorViaExportFunction();
+      return;
+    }
+    // page world：需要往 DOM 插 <script>，等 documentElement 可用
+    function doInject() {
+      runInPage(INTERCEPT_JS);
+    }
+    if (document.documentElement) {
+      doInject();
+    } else {
+      document.addEventListener('DOMContentLoaded', doInject, { once: true });
+    }
+  }
+
   function applyReplaceRules(text) {
     if (!netReplaceEnabled || !netReplaceRules.length) return text;
     var result = text;
@@ -3308,6 +3361,7 @@
 	      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
 	      syncGlobalInterceptEnabled();
 	      if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
+	      saveNetConfig();
 	      updateInterceptBtn();
 	      renderNetList();
 	    });
@@ -3333,6 +3387,7 @@
         if (replFired) { replFired = false; return; }
         if (Math.abs(x - replX) > 12 || Math.abs(y - replY) > 12) return;
         netReplaceEnabled = !netReplaceEnabled;
+        saveNetConfig();
         updateReplaceBtn();
       }
       function replCancel() { if (replLong) { clearTimeout(replLong); replLong = null; } replFired = false; }
@@ -3368,18 +3423,21 @@
     });
     bar.querySelector('#bh-noise-btn').addEventListener('click', function () {
       netHideTunnelNoise = !netHideTunnelNoise;
+      saveNetConfig();
       updateFilterButtons();
       renderNetList();
       if (netSelReq && getVisibleRequests().indexOf(netSelReq) === -1) selectFirstVisibleRequest(false);
     });
     bar.querySelector('#bh-payload-btn').addEventListener('click', function () {
       netPayloadOnly = !netPayloadOnly;
+      saveNetConfig();
       updateFilterButtons();
       if (netPayloadOnly) selectFirstVisibleRequest(true);
       else { renderNetList(); renderDetail(true); }
     });
     bar.querySelector('#bh-plain-btn').addEventListener('click', function () {
       netPlainProbeEnabled = !netPlainProbeEnabled;
+      saveNetConfig();
       updateFilterButtons();
       injectPlainProbe();
       if (netSelReq) {
@@ -3629,12 +3687,20 @@
 	  function installI18n() {
 	    _i18nCore();
 	    installPointerGuard();
-	    loadInterceptRules();
-	    loadReplaceRules();
-	    injectInterceptor();
-	    syncGlobalInterceptEnabled();
-	    syncInterceptRules();
-	    injectPlainProbe();
+	    // 加载持久化配置（若已在 earlyInjectInterceptor 阶段加载过，这里会覆盖为相同值；若首次开启则在此加载）
+	    loadNetConfig(function () {
+	      loadInterceptRules();
+	      loadReplaceRules();
+	      injectInterceptor();
+	      syncGlobalInterceptEnabled();
+	      syncInterceptRules();
+	      syncReplaceRules();
+	      injectPlainProbe();
+	      // 同步持久化状态到面板 UI（按钮颜色/文字）
+	      updateInterceptBtn();
+	      updateFilterButtons();
+	      updateReplaceBtn();
+	    });
     // page-world: eruda 在 window.eruda; isolated: self.eruda
     var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
     if (erudaMode === 'page') {
@@ -3700,13 +3766,30 @@
 
   connect();
 
-  // 页面导航后自动恢复：如果上一个页面是激活状态，新页面加载完也自动注入
+  // 页面导航后自动恢复：
+  //   - document_start 阶段：若上次 DevTools 是开启的，立刻加载持久化配置并注入拦截器
+  //     （此时 DOM 可能还不存在，只 hook fetch/XHR，不碰 eruda）
+  //   - DOMContentLoaded 后：再完整初始化 eruda + 面板 + 同步配置到 page world
   if (wasActive()) {
-    // 等 DOM ready 再恢复，避免在 document-start 时 body 还不存在
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () { toggle(); });
-    } else {
+    // 1. 提前注入拦截器：document_start 时 fetch/XHR 就被 hook，页面第一个请求就能捕获
+    loadNetConfig(function () {
+      // 加载替换规则（storage 读取异步，尽早开始）
+      loadReplaceRules();
+      // isolated world 可直接 hook；page world 需要 documentElement
+      earlyInjectInterceptor();
+      // 同步全局拦截开关到 page world（拦截器刚注入，需要告知初始状态）
+      syncGlobalInterceptEnabled();
+      syncReplaceRules();
+    });
+
+    // 2. DOM 就绪后再初始化 eruda + 面板
+    function doRestore() {
       toggle();
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', doRestore, { once: true });
+    } else {
+      doRestore();
     }
   }
 })();
