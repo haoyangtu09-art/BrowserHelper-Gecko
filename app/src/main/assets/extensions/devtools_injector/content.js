@@ -1040,21 +1040,24 @@
       var thr = pw.__bhThrottle;
       var delay = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
       var fInput = input, fInit = init;
-      // 抓包日志：挂在 page-world promise 上做副作用，绝不把这条 content-world 链返回给页面
+      // 抓包日志：挂在 page-world promise 上做副作用，绝不把这条 content-world 链返回给页面。
+      // 关键：page-world promise 的 .then/.catch 回调必须用 exportFunction 导出，
+      // 否则把 content-world 原始函数传给页面世界的 promise 会触发
+      // "Permission denied to access object"（每次请求 settle 时刷屏）。
       function observe(p) {
-        p.then(function (resp) {
+        p.then(exportFunction(function (resp) {
           var status = resp.status;
           var respHeaders = headersToObj(resp.headers);
-          resp.clone().text().then(function (body) {
+          resp.clone().text().then(exportFunction(function (body) {
             sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
               respBody: body.slice(0, 102400), duration: Date.now() - t0 });
-          }).catch(function () {
+          }, pw), exportFunction(function () {
             sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
               respBody: '(读取失败)', duration: Date.now() - t0 });
-          });
-        }).catch(function (err) {
+          }, pw));
+        }, pw), exportFunction(function (err) {
           sendNet({ type: 'resp', reqId: reqId, status: 0, error: String(err), duration: Date.now() - t0 });
-        });
+        }, pw));
       }
       var doFetch = function () {
         var p = _origFetch.call(pw, fInput, fInit); // page-world promise
