@@ -459,9 +459,12 @@
   var INTERCEPT_JS = (function () {
     return [
       '(function(){',
-      '  if(window.__bhNetInstalled)return;',
-      '  window.__bhNetInstalled=true;',
-      '  window.__bhGlobalInterceptEnabled=!!window.__bhGlobalInterceptEnabled;',
+	      '  if(window.__bhNetInstalled)return;',
+	      '  window.__bhNetInstalled=true;',
+	      '  window.__bhRestoreFetch=window.__bhRestoreFetch||window.fetch;',
+	      '  window.__bhRestoreXHR=window.__bhRestoreXHR||window.XMLHttpRequest;',
+	      '  window.__bhGlobalInterceptEnabled=!!window.__bhGlobalInterceptEnabled;',
+	      '  window.__bhInterceptRules=window.__bhInterceptRules||[];',
 
       // ── 工具 ──
       '  function headersToObj(h){',
@@ -477,7 +480,7 @@
       '  }',
 
       // ── fetch 拦截 ──
-      '  var _origFetch=window.fetch;',
+	      '  var _origFetch=window.__bhRestoreFetch||window.fetch;',
       '  function checkMock(url){',
       '    var rules=window.__bhMockRules;',
       '    if(!rules||!rules.length)return null;',
@@ -499,19 +502,45 @@
       '    var fn=window.__bhBpPending[d.reqId];',
       '    if(fn){delete window.__bhBpPending[d.reqId];fn(d);}',
       '  });',
-      '  function isNoiseReq(url,method,body){',
-      '    url=String(url||"").toLowerCase();method=String(method||"GET").toUpperCase();',
-      '    if(method==="OPTIONS"||method==="HEAD")return true;',
-      '    var len=body==null?0:String(body).length;',
-      '    var re=/\\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;',
-      '    if(!re.test(url))return false;',
-      '    if(len>512)return false;',
-      '    if(method!=="GET"&&len>0)return false;',
-      '    return true;',
-      '  }',
-      '  function checkGlobalIntercept(url,method,body){',
-      '    return !!window.__bhGlobalInterceptEnabled&&!isNoiseReq(url,method,body);',
-      '  }',
+	      '  function headersCount(headers){',
+	      '    try{return headers?Object.keys(headers).length:0;}catch(e){return 0;}',
+	      '  }',
+	      '  function bodyHasValue(body){return body!=null&&String(body).length>0;}',
+	      '  function matchInterceptRule(url,method,body){',
+	      '    var rules=window.__bhInterceptRules||[];',
+	      '    if(!rules||!rules.length)return "";',
+	      '    var u=null;',
+	      '    try{u=new URL(String(url||""),location.href);}catch(e){return "";}',
+	      '    method=String(method||"GET").toUpperCase();',
+	      '    var hasBody=bodyHasValue(body);',
+	      '    for(var i=rules.length-1;i>=0;i--){',
+	      '      var r=rules[i]||{};',
+	      '      if(r.host&&r.host!==u.host)continue;',
+	      '      if(r.path&&r.path!==u.pathname)continue;',
+	      '      if(r.method&&String(r.method).toUpperCase()!==method)continue;',
+	      '      if(!!r.hasBody!==hasBody)continue;',
+	      '      return r.action||"";',
+	      '    }',
+	      '    return "";',
+	      '  }',
+	      '  function isNoiseReq(url,method,body,headers){',
+	      '    url=String(url||"").toLowerCase();method=String(method||"GET").toUpperCase();',
+	      '    if(!url)return true;',
+	      '    if(method==="OPTIONS"||method==="HEAD")return true;',
+	      '    var len=body==null?0:String(body).length;',
+	      '    if(len===0&&headersCount(headers)===0)return true;',
+	      '    var re=/\\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;',
+	      '    if(!re.test(url))return false;',
+	      '    if(len>512)return false;',
+	      '    if(method!=="GET"&&len>0)return false;',
+	      '    return true;',
+	      '  }',
+	      '  function checkGlobalIntercept(url,method,body,headers){',
+	      '    var rule=matchInterceptRule(url,method,body);',
+	      '    if(rule==="pass")return false;',
+	      '    if(rule==="intercept")return true;',
+	      '    return !!window.__bhGlobalInterceptEnabled&&!isNoiseReq(url,method,body,headers);',
+	      '  }',
       '  function waitBp(reqId,url,method,reqHeaders,reqBody,mode){',
       '    return new Promise(function(resolve){',
       '      window.__bhBpPending[reqId]=resolve;',
@@ -555,7 +584,7 @@
       '    });}.bind(this);',
       '    var runDelay=function(){return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();};',
       // 命中断点：暂停，等编辑结果。修改后的 URL/头/体替换原参数后再发
-      '    var bpMode=checkBp(url)?"breakpoint":(checkGlobalIntercept(url,method,reqBody)?"intercept":"");',
+	      '    var bpMode=checkBp(url)?"breakpoint":(checkGlobalIntercept(url,method,reqBody,reqHeaders)?"intercept":"");',
       '    if(bpMode){',
       '      return waitBp(reqId,url,method,reqHeaders,reqBody,bpMode).then(function(r){',
       '        if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"已被断点中止",duration:Date.now()-t0});return Promise.reject(new Error("aborted by breakpoint"));}',
@@ -571,7 +600,7 @@
       '  };',
 
       // ── XHR 拦截 ──
-      '  var _XHR=window.XMLHttpRequest;',
+	      '  var _XHR=window.__bhRestoreXHR||window.XMLHttpRequest;',
       '  window.XMLHttpRequest=function(){',
       '    var xhr=new _XHR();',
       '    var _method="GET",_url="",_reqHeaders={},_reqBody=null,_reqId=uid(),_t0=0;',
@@ -620,7 +649,7 @@
       '      var thr=window.__bhThrottle;var d=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
       '      var fireSend=function(){if(d>0){setTimeout(doSend,d);}else{doSend();}};',
       // 命中断点：暂停，等编辑结果。改了 url/method 需重新 open，改了头需重设
-      '      var bpMode=checkBp(_url)?"breakpoint":(checkGlobalIntercept(_url,_method,_reqBody)?"intercept":"");',
+	      '      var bpMode=checkBp(_url)?"breakpoint":(checkGlobalIntercept(_url,_method,_reqBody,_reqHeaders)?"intercept":"");',
       '      if(bpMode){',
       '        waitBp(_reqId,_url,_method,_reqHeaders,_reqBody,bpMode).then(function(r){',
       '          if(r.action==="abort"){send({type:"resp",reqId:_reqId,status:0,error:"已被断点中止",duration:Date.now()-_t0});return;}',
@@ -704,11 +733,15 @@
 
   // content script 接收 page world 发来的消息
   var netReqMap = {}; // reqId -> 请求条目（等待响应）
-  var _bpIsoPending = {}; // isolated 模式断点等待表 reqId -> resolve
-  var netBreakpointQueue = [];
-  var netActiveBreakpoint = null;
-  var netPlainCandidates = [];
-  var netPlainSeq = 0;
+	  var _bpIsoPending = {}; // isolated 模式断点等待表 reqId -> resolve
+	  var netBreakpointQueue = [];
+	  var netActiveBreakpoint = null;
+	  var netInterceptQueue = [];
+	  var netSelIntercept = null;
+	  var netInterceptRules = [];
+	  var netRulesViewEl = null;
+	  var netPlainCandidates = [];
+	  var netPlainSeq = 0;
   window.addEventListener('message', function (e) {
     if (!e.data || !e.data.__bhNet) return;
     var d = e.data;
@@ -760,6 +793,15 @@
 
   // 命中断点时的编辑框：放行(可改)/中止
   function bpResolve(reqId, payload) {
+    if (payload && payload.action === 'continue') {
+      var entry = netReqMap[reqId];
+      if (entry) {
+        entry.url = payload.url || entry.url;
+        entry.method = payload.method || entry.method;
+        entry.reqHeaders = payload.reqHeaders || entry.reqHeaders;
+        if (payload.reqBody != null) entry.reqBody = payload.reqBody;
+      }
+    }
     payload.__bhNet = true;
     payload.type = 'bpResolve';
     payload.reqId = reqId;
@@ -768,8 +810,28 @@
   }
 
   function enqueueBreakpoint(d) {
+    if (d.mode === 'intercept') {
+      enqueueIntercept(d);
+      return;
+    }
     netBreakpointQueue.push(d);
     if (!netActiveBreakpoint) openNextBreakpoint();
+  }
+
+  function enqueueIntercept(d) {
+    d.ts = Date.now();
+    d.reqHeaders = d.reqHeaders || {};
+    d.reqBody = d.reqBody || '';
+    netInterceptQueue.push(d);
+    if (!netSelReq && !netSelIntercept) {
+      netSelIntercept = d;
+      netDetailTab = byteLen(d.reqBody) > 0 ? 1 : 0;
+    }
+    updateInterceptBtn();
+    if (netPanelVisible) {
+      renderNetList();
+      renderDetail(true);
+    }
   }
 
   function openNextBreakpoint() {
@@ -846,9 +908,13 @@
       runInPage(INTERCEPT_JS);
       return;
     }
-    var pw = window.wrappedJSObject; // page world window
-    if (pw.__bhNetInstalled) return;
-    pw.__bhNetInstalled = true;
+	    var pw = window.wrappedJSObject; // page world window
+	    if (pw.__bhNetInstalled) return;
+	    pw.__bhNetInstalled = true;
+	    try {
+	      pw.__bhRestoreFetch = pw.__bhRestoreFetch || pw.fetch;
+	      pw.__bhRestoreXHR = pw.__bhRestoreXHR || pw.XMLHttpRequest;
+	    } catch (e) {}
 
     // ── 工具函数（在 content world 执行，操作 page world 对象需 cloneInto）──
     function headersToObj(h) {
@@ -877,20 +943,48 @@
       for (var i = 0; i < bps.length; i++) { if (url.indexOf(bps[i].pattern) !== -1) return true; }
       return false;
     }
-    function isNoiseBeforeSend(url, method, body) {
-      url = String(url || '').toLowerCase();
-      method = String(method || 'GET').toUpperCase();
-      if (method === 'OPTIONS' || method === 'HEAD') return true;
-      var len = body == null ? 0 : String(body).length;
-      var re = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
-      if (!re.test(url)) return false;
-      if (len > 512) return false;
-      if (method !== 'GET' && len > 0) return false;
-      return true;
-    }
-    function checkGlobalIntercept(url, method, body) {
-      return !!netGlobalInterceptEnabled && !isNoiseBeforeSend(url, method, body);
-    }
+	    function headersCount(headers) {
+	      try { return headers ? Object.keys(headers).length : 0; } catch (e) { return 0; }
+	    }
+	    function bodyHasValue(body) {
+	      return body != null && String(body).length > 0;
+	    }
+	    function matchInterceptRule(url, method, body) {
+	      var rules = netInterceptRules || [];
+	      if (!rules.length) return '';
+	      var u = null;
+	      try { u = new URL(String(url || ''), location.href); } catch (e) { return ''; }
+	      method = String(method || 'GET').toUpperCase();
+	      var hasBody = bodyHasValue(body);
+	      for (var i = rules.length - 1; i >= 0; i--) {
+	        var r = rules[i] || {};
+	        if (r.host && r.host !== u.host) continue;
+	        if (r.path && r.path !== u.pathname) continue;
+	        if (r.method && String(r.method).toUpperCase() !== method) continue;
+	        if (!!r.hasBody !== hasBody) continue;
+	        return r.action || '';
+	      }
+	      return '';
+	    }
+	    function isNoiseBeforeSend(url, method, body, headers) {
+	      url = String(url || '').toLowerCase();
+	      method = String(method || 'GET').toUpperCase();
+	      if (!url) return true;
+	      if (method === 'OPTIONS' || method === 'HEAD') return true;
+	      var len = body == null ? 0 : String(body).length;
+	      if (len === 0 && headersCount(headers) === 0) return true;
+	      var re = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
+	      if (!re.test(url)) return false;
+	      if (len > 512) return false;
+	      if (method !== 'GET' && len > 0) return false;
+	      return true;
+	    }
+	    function checkGlobalIntercept(url, method, body, headers) {
+	      var rule = matchInterceptRule(url, method, body);
+	      if (rule === 'pass') return false;
+	      if (rule === 'intercept') return true;
+	      return !!netGlobalInterceptEnabled && !isNoiseBeforeSend(url, method, body, headers);
+	    }
     function waitBp(reqId, url, method, reqHeaders, reqBody, mode) {
       return new Promise(function (resolve) {
         _bpIsoPending[reqId] = resolve;
@@ -899,7 +993,7 @@
     }
 
     // ── 替换 page world 的 fetch ──
-    var _origFetch = pw.fetch;
+	    var _origFetch = pw.__bhRestoreFetch || pw.fetch;
     exportFunction(function (input, init) {
       var url = typeof input === 'string' ? input : (input && input.url) || '';
       var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
@@ -937,7 +1031,7 @@
       var runDelay = function () {
         return delay > 0 ? new Promise(function (res) { setTimeout(function () { res(doFetch()); }, delay); }) : doFetch();
       };
-      var bpMode = checkBp(url) ? 'breakpoint' : (checkGlobalIntercept(url, method, reqBody) ? 'intercept' : '');
+	      var bpMode = checkBp(url) ? 'breakpoint' : (checkGlobalIntercept(url, method, reqBody, reqHeaders) ? 'intercept' : '');
       if (bpMode) {
         return waitBp(reqId, url, method, reqHeaders, reqBody, bpMode).then(function (r) {
           if (r.action === 'abort') {
@@ -957,7 +1051,7 @@
     }, pw, { defineAs: 'fetch' });
 
     // ── 替换 page world 的 XMLHttpRequest ──
-    var _OrigXHR = pw.XMLHttpRequest;
+	    var _OrigXHR = pw.__bhRestoreXHR || pw.XMLHttpRequest;
     exportFunction(function () {
       var xhr = new _OrigXHR();
       var _method = 'GET', _url = '', _reqHeaders = {}, _reqBody = null, _reqId = uid(), _t0 = 0;
@@ -1008,7 +1102,7 @@
         var thr = pw.__bhThrottle;
         var d = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
         var fireSend = function () { if (d > 0) { setTimeout(doSend, d); } else { doSend(); } };
-        var bpMode = checkBp(_url) ? 'breakpoint' : (checkGlobalIntercept(_url, _method, _reqBody) ? 'intercept' : '');
+	        var bpMode = checkBp(_url) ? 'breakpoint' : (checkGlobalIntercept(_url, _method, _reqBody, _reqHeaders) ? 'intercept' : '');
         if (bpMode) {
           waitBp(_reqId, _url, _method, _reqHeaders, _reqBody, bpMode).then(function (r) {
             if (r.action === 'abort') {
@@ -1036,14 +1130,44 @@
     runInPage('(function(){window.__bhPlainProbeEnabled=' + (netPlainProbeEnabled ? 'true' : 'false') + ';})();');
   }
 
-  function syncGlobalInterceptEnabled() {
-    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
-      try { window.wrappedJSObject.__bhGlobalInterceptEnabled = !!netGlobalInterceptEnabled; return; } catch (e) {}
-    }
-    runInPage('(function(){window.__bhGlobalInterceptEnabled=' + (netGlobalInterceptEnabled ? 'true' : 'false') + ';})();');
-  }
+	  function syncGlobalInterceptEnabled() {
+	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+	      try { window.wrappedJSObject.__bhGlobalInterceptEnabled = !!netGlobalInterceptEnabled; return; } catch (e) {}
+	    }
+	    runInPage('(function(){window.__bhGlobalInterceptEnabled=' + (netGlobalInterceptEnabled ? 'true' : 'false') + ';})();');
+	  }
 
-  function injectPlainProbe() {
+	  function disableInterceptor() {
+	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+	      try {
+	        var pw = window.wrappedJSObject;
+	        pw.__bhNetInstalled = false;
+	        if (pw.__bhRestoreFetch) pw.fetch = pw.__bhRestoreFetch;
+	        if (pw.__bhRestoreXHR) pw.XMLHttpRequest = pw.__bhRestoreXHR;
+	        return;
+	      } catch (e) {}
+	    }
+	    runInPage('(function(){window.__bhNetInstalled=false;if(window.__bhRestoreFetch){window.fetch=window.__bhRestoreFetch;}if(window.__bhRestoreXHR){window.XMLHttpRequest=window.__bhRestoreXHR;}})();');
+	  }
+
+	  function setNetworkCaptureEnabled(enabled) {
+	    netEnabled = !!enabled;
+	    if (netEnableBtn) netEnableBtn.textContent = netEnabled ? '● 监听中' : '○ 已停止';
+	    if (!netEnabled) {
+	      releaseAllIntercepts();
+	      disableInterceptor();
+	      return;
+	    }
+	    injectInterceptor();
+	    syncGlobalInterceptEnabled();
+	    syncInterceptRules();
+	    injectBreakpoints();
+	    injectMockRules();
+	    applyThrottle(netThrottle);
+	    injectPlainProbe();
+	  }
+
+	  function injectPlainProbe() {
     syncPlainProbeEnabled();
     if (erudaMode === 'page') {
       runInPage(PLAIN_PROBE_JS);
@@ -1233,9 +1357,22 @@
     // ── Elements 盒模型分类名（DOM 里是小写，靠 capitalize 显示）──
     ['margin', '外边距'], ['border', '边框'], ['padding', '内边距'],
     ['content', '内容'], ['element.style', 'element.style'],
-    // ── Info / Snippets 分区与条目名 ──
-    ['User Agent', '用户代理'], ['Device', '设备'],
-    ['Border All', '显示所有边框'], ['Refresh Page', '刷新页面'],
+	    // ── Info / Snippets 分区与条目名 ──
+	    ['User Agent', '用户代理'], ['Device', '设备'],
+	    ['URL', '网址'], ['Url', '网址'], ['Origin', '源'], ['Domain', '域名'],
+	    ['Hash', '片段'], ['Query', '查询参数'], ['Document', '文档'],
+	    ['App Name', '应用名称'], ['App Version', '应用版本'],
+	    ['Browser Version', '浏览器版本'], ['Engine Version', '引擎版本'],
+	    ['Product', '产品'], ['Product Sub', '产品子版本'], ['Vendor Sub', '厂商子版本'],
+	    ['Build ID', '构建 ID'], ['Do Not Track', '禁止跟踪'],
+	    ['Device Pixel Ratio', '设备像素比'], ['Screen Size', '屏幕尺寸'],
+	    ['Window Size', '窗口尺寸'], ['Touch Support', '触控支持'],
+	    ['Timezone', '时区'], ['Timezone Offset', '时区偏移'],
+	    ['Connection', '网络连接'], ['Effective Type', '有效网络类型'],
+	    ['Downlink', '下行速度'], ['RTT', '往返延迟'], ['Save Data', '省流量模式'],
+	    ['Java Enabled', 'Java 已启用'], ['PDF Viewer Enabled', 'PDF 查看器已启用'],
+	    ['Storage', '存储'], ['Quota', '配额'], ['Usage', '用量'],
+	    ['Border All', '显示所有边框'], ['Refresh Page', '刷新页面'],
     ['Search Text', '搜索文本'], ['Edit Page', '编辑页面'],
     ['Fit Screen', '适应屏幕'],
   ];
@@ -1380,11 +1517,16 @@
     '#bh-filter{flex:1;min-width:100px;font-size:14px;padding:8px 10px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;}',
     // 请求列表
-    '#bh-list{flex:1 1 auto;min-height:0;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
-    '#bh-empty{padding:20px;text-align:center;color:#888;font-size:14px;}',
-    '.bh-row{position:relative;display:flex;align-items:center;padding:10px 66px 10px 10px;min-height:58px;',
-    '  border-bottom:1px solid #eaecef;cursor:pointer;gap:8px;background:#fff;}',
-    '.bh-row:active,.bh-row.bh-sel{background:#dbeafe;}',
+	    '#bh-list{flex:1 1 auto;min-height:0;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
+	    '#bh-empty{padding:20px;text-align:center;color:#888;font-size:14px;}',
+	    '.bh-section-title{position:sticky;top:0;z-index:1;padding:6px 10px;border-bottom:1px solid #d0d7de;',
+	    '  background:#f6f8fa;color:#374151;font-size:12px;font-weight:700;}',
+	    '.bh-section-empty{padding:12px 10px;border-bottom:1px solid #eaecef;color:#888;font-size:12px;background:#fff;}',
+	    '.bh-row{position:relative;display:flex;align-items:center;padding:10px 66px 10px 10px;min-height:58px;',
+	    '  border-bottom:1px solid #eaecef;cursor:pointer;gap:8px;background:#fff;}',
+	    '.bh-row:active,.bh-row.bh-sel{background:#dbeafe;}',
+	    '.bh-row.bh-intercept{background:#fff7ed;}',
+	    '.bh-row.bh-intercept.bh-sel,.bh-row.bh-intercept:active{background:#fed7aa;}',
     '.bh-method{font-weight:700;min-width:46px;font-size:13px;color:#111;}',
     '.bh-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;}',
     '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#111;}',
@@ -1413,9 +1555,25 @@
     '  border-top:1px solid #d0d7de;background:#f6f8fa;}',
     '#bh-detail-acts button{font-size:14px;padding:8px 12px;border-radius:6px;min-height:40px;',
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
-    '#bh-detail-acts button:active{background:#e8eaed;}',
-    // 编辑时不再移动详情区，避免 Android 软键盘/滚动联动造成上下弹跳。
-    // 模态弹窗（挂进 #bh-net / shadow root 内，z-index 要高于 eruda 面板内部元素）
+	    '#bh-detail-acts button:active{background:#e8eaed;}',
+	    // 编辑时不再移动详情区，避免 Android 软键盘/滚动联动造成上下弹跳。
+	    '#bh-rules-view{display:none;position:fixed;inset:0;z-index:2147483646;background:#fff;color:#111;',
+	    '  flex-direction:column;pointer-events:auto;touch-action:auto;}',
+	    '#bh-rules-view.open{display:flex;}',
+	    '#bh-rules-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
+	    '#bh-rules-title{flex:1;font-size:15px;font-weight:700;}',
+	    '#bh-rules-close{flex:0 0 44px;min-width:44px;border:1px solid #d0d7de;border-radius:6px;background:#fff;color:#555;',
+	    '  font-size:24px;line-height:1;min-height:40px;}',
+	    '#bh-rules-list{flex:1;min-height:0;overflow-y:auto;}',
+	    '.bh-rule-row{display:flex;align-items:center;gap:8px;padding:10px 12px;min-height:62px;border-bottom:1px solid #eaecef;background:#fff;}',
+	    '.bh-rule-row:active{background:#dbeafe;}',
+	    '.bh-rule-action{flex:0 0 42px;text-align:center;border-radius:4px;padding:3px 0;font-size:12px;font-weight:700;color:#fff;}',
+	    '.bh-rule-action.pass{background:#16a34a;}.bh-rule-action.intercept{background:#dc2626;}',
+	    '.bh-rule-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;}',
+	    '.bh-rule-url{font-size:13px;color:#111;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+	    '.bh-rule-meta{font-size:11px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+	    '.bh-rule-empty{padding:24px;text-align:center;color:#888;font-size:13px;}',
+	    // 模态弹窗（挂进 #bh-net / shadow root 内，z-index 要高于 eruda 面板内部元素）
     '#bh-modal{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;',
     '  justify-content:center;background:rgba(0,0,0,.5);}',
     '#bh-modal-box{background:#fff;border-radius:8px;color:#111;',
@@ -1593,12 +1751,143 @@
     return headersByteLen(r.respHeaders) + byteLen(r.respBody);
   }
 
-  function fmtBytes(n) {
-    n = Math.max(0, n || 0);
-    if (n < 1024) return n + 'B';
-    if (n < 1024 * 1024) return (n < 10 * 1024 ? (n / 1024).toFixed(1) : Math.round(n / 1024)) + 'KB';
-    return (n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + 'MB';
-  }
+	  function fmtBytes(n) {
+	    n = Math.max(0, n || 0);
+	    if (n < 1024) return n + 'B';
+	    if (n < 1024 * 1024) return (n < 10 * 1024 ? (n / 1024).toFixed(1) : Math.round(n / 1024)) + 'KB';
+	    return (n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + 'MB';
+	  }
+
+	  function storageLocal() {
+	    try {
+	      return browser && browser.storage && browser.storage.local;
+	    } catch (e) {
+	      return null;
+	    }
+	  }
+
+	  function normalizeRuleUrl(url) {
+	    try {
+	      var u = new URL(String(url || ''), location.href);
+	      return { host: u.host, path: u.pathname, sampleUrl: u.href };
+	    } catch (e) {
+	      var raw = String(url || '');
+	      return { host: '', path: raw.split(/[?#]/)[0], sampleUrl: raw };
+	    }
+	  }
+
+	  function ruleKey(rule) {
+	    return [
+	      rule.host || '',
+	      rule.path || '',
+	      String(rule.method || 'GET').toUpperCase(),
+	      rule.hasBody ? '1' : '0',
+	    ].join('\n');
+	  }
+
+	  function sanitizeInterceptRules(rules) {
+	    if (!Array.isArray(rules)) return [];
+	    return rules.map(function (r) {
+	      return {
+	        id: String(r.id || (Date.now().toString(36) + Math.random().toString(36).slice(2))),
+	        action: r.action === 'intercept' ? 'intercept' : 'pass',
+	        host: String(r.host || ''),
+	        path: String(r.path || ''),
+	        method: String(r.method || 'GET').toUpperCase(),
+	        hasBody: !!r.hasBody,
+	        sampleUrl: String(r.sampleUrl || ''),
+	        createdAt: r.createdAt || Date.now(),
+	        updatedAt: r.updatedAt || r.createdAt || Date.now(),
+	      };
+	    }).filter(function (r) {
+	      return r.action && (r.host || r.path);
+	    });
+	  }
+
+	  function makeInterceptRuleFromReq(r, action) {
+	    var u = normalizeRuleUrl(r && r.url);
+	    return {
+	      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+	      action: action === 'intercept' ? 'intercept' : 'pass',
+	      host: u.host,
+	      path: u.path,
+	      method: String((r && r.method) || 'GET').toUpperCase(),
+	      hasBody: byteLen(r && r.reqBody) > 0,
+	      sampleUrl: u.sampleUrl,
+	      createdAt: Date.now(),
+	      updatedAt: Date.now(),
+	    };
+	  }
+
+	  function syncInterceptRules() {
+	    var clean = sanitizeInterceptRules(netInterceptRules);
+	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
+	      try { window.wrappedJSObject.__bhInterceptRules = cloneInto(clean, window); return; } catch (e) {}
+	    }
+	    runInPage('(function(){window.__bhInterceptRules=' + JSON.stringify(clean) + ';})();');
+	  }
+
+	  function saveInterceptRules() {
+	    netInterceptRules = sanitizeInterceptRules(netInterceptRules);
+	    var st = storageLocal();
+	    if (st && st.set) {
+	      try { st.set({ bhNetInterceptRules: netInterceptRules }).catch(function () {}); } catch (e) {}
+	    }
+	    syncInterceptRules();
+	    updateRulesBtn();
+	    renderRulesView();
+	  }
+
+	  function loadInterceptRules() {
+	    var st = storageLocal();
+	    if (!st || !st.get) {
+	      syncInterceptRules();
+	      return;
+	    }
+	    try {
+	      st.get('bhNetInterceptRules').then(function (res) {
+	        netInterceptRules = sanitizeInterceptRules(res && res.bhNetInterceptRules);
+	        syncInterceptRules();
+	        updateRulesBtn();
+	        renderRulesView();
+	      }).catch(function () {
+	        syncInterceptRules();
+	        updateRulesBtn();
+	      });
+	    } catch (e) {
+	      syncInterceptRules();
+	      updateRulesBtn();
+	    }
+	  }
+
+	  function upsertInterceptRuleFromReq(r, action) {
+	    if (!r) return null;
+	    var rule = makeInterceptRuleFromReq(r, action);
+	    var key = ruleKey(rule);
+	    var replaced = false;
+	    netInterceptRules = sanitizeInterceptRules(netInterceptRules).map(function (old) {
+	      if (ruleKey(old) !== key) return old;
+	      replaced = true;
+	      rule.id = old.id;
+	      rule.createdAt = old.createdAt || rule.createdAt;
+	      rule.updatedAt = Date.now();
+	      return rule;
+	    });
+	    if (!replaced) netInterceptRules.push(rule);
+	    saveInterceptRules();
+	    return rule;
+	  }
+
+	  function removeInterceptRule(ruleId) {
+	    netInterceptRules = sanitizeInterceptRules(netInterceptRules).filter(function (r) {
+	      return r.id !== ruleId;
+	    });
+	    saveInterceptRules();
+	  }
+
+	  function ruleActionLabel(action) {
+	    return action === 'intercept' ? '拦截' : '放行';
+	  }
 
   function isPayloadReq(r) {
     var method = String(r.method || 'GET').toUpperCase();
@@ -1627,7 +1916,105 @@
     return total < 8 * 1024 || sb === 0;
   }
 
-  function getVisibleRequests() {
+  function fmtInterceptHead(d) {
+    var lines = [
+      'METHOD: ' + (d.method || 'GET'),
+      'URL: ' + (d.url || ''),
+      '',
+    ];
+    var h = d.reqHeaders || {};
+    Object.keys(h).forEach(function (k) {
+      lines.push(k + ': ' + h[k]);
+    });
+    return lines.join('\n');
+  }
+
+  function parseInterceptHead(text, d) {
+    var headers = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      if (!line.trim()) return;
+      var idx = line.indexOf(':');
+      if (idx < 0) return;
+      var key = line.slice(0, idx).trim();
+      var val = line.slice(idx + 1).trim();
+      if (/^method$/i.test(key)) d.method = (val || d.method || 'GET').toUpperCase();
+      else if (/^url$/i.test(key)) d.url = val || d.url;
+      else headers[key] = val;
+    });
+    d.reqHeaders = headers;
+  }
+
+  function syncInterceptEdit() {
+    if (!netSelIntercept || !netDetailBody) return;
+    if (netDetailTab === 0) parseInterceptHead(netDetailBody.value, netSelIntercept);
+    else if (netDetailTab === 1) netSelIntercept.reqBody = netDetailBody.value;
+  }
+
+  function interceptAsReq(d) {
+    return {
+      reqId: d.reqId,
+      url: d.url,
+      method: d.method,
+      reqHeaders: d.reqHeaders || {},
+      reqBody: d.reqBody || '',
+      status: null,
+      respHeaders: {},
+      respBody: null,
+      duration: null,
+      error: null,
+      ts: d.ts || Date.now(),
+      tag: '拦截中',
+      plain: [],
+    };
+  }
+
+  function finishIntercept(d, payload) {
+    if (!d || d.__done) return;
+    if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncInterceptEdit();
+    d.__done = true;
+    bpResolve(d.reqId, payload);
+    netInterceptQueue = netInterceptQueue.filter(function (x) { return x.reqId !== d.reqId; });
+    if (netSelIntercept && netSelIntercept.reqId === d.reqId) {
+      netSelIntercept = netInterceptQueue[0] || null;
+      netDetailTab = netSelIntercept && byteLen(netSelIntercept.reqBody) > 0 ? 1 : 0;
+      setNetEditing(false);
+    }
+    updateInterceptBtn();
+    renderNetList();
+    renderDetail(true);
+  }
+
+  function sendSelectedIntercept() {
+    if (!netSelIntercept) return;
+    syncInterceptEdit();
+    finishIntercept(netSelIntercept, {
+      action: 'continue',
+      url: netSelIntercept.url,
+      method: String(netSelIntercept.method || 'GET').toUpperCase(),
+      reqHeaders: netSelIntercept.reqHeaders || {},
+      reqBody: netSelIntercept.reqBody || '',
+    });
+  }
+
+	  function abortSelectedIntercept() {
+	    if (!netSelIntercept) return;
+	    finishIntercept(netSelIntercept, { action: 'abort' });
+	  }
+
+	  function releaseAllIntercepts() {
+	    netInterceptQueue.slice().forEach(function (d) {
+	      if (netSelIntercept && netSelIntercept.reqId === d.reqId) syncInterceptEdit();
+	      finishIntercept(d, {
+	        action: 'continue',
+	        url: d.url,
+	        method: String(d.method || 'GET').toUpperCase(),
+	        reqHeaders: d.reqHeaders || {},
+	        reqBody: d.reqBody || '',
+	      });
+	    });
+	  }
+
+	  function getVisibleRequests() {
     var filter = netFilterEl ? netFilterEl.value.trim().toLowerCase() : '';
     return netRequests.filter(function (r) {
       if (filter && String(r.url || '').toLowerCase().indexOf(filter) === -1) return false;
@@ -1641,6 +2028,7 @@
     var rows = getVisibleRequests();
     if (!rows.length) {
       netSelReq = null;
+      netSelIntercept = null;
       renderNetList();
       renderDetail(true);
       return;
@@ -1651,6 +2039,7 @@
         rows.find(function (r) { return isPayloadReq(r); }) || rows[0];
     }
     netSelReq = picked;
+    netSelIntercept = null;
     netDetailTab = byteLen(picked.reqBody) > 0 ? 1 : 3;
     setNetEditing(false);
     renderNetList();
@@ -1658,7 +2047,7 @@
   }
 
   function maybeFocusPayload(entry) {
-    if (!netPayloadOnly || netEditing || !isPayloadReq(entry)) return;
+    if (!netPayloadOnly || netEditing || netSelIntercept || !isPayloadReq(entry)) return;
     if (netHideTunnelNoise && isTunnelNoiseReq(entry)) return;
     netSelReq = entry;
     netDetailTab = byteLen(entry.reqBody) > 0 ? 1 : 3;
@@ -1667,11 +2056,33 @@
   function renderNetList() {
     if (!netListEl) return;
     var rows = getVisibleRequests();
-    if (rows.length === 0) {
+    var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0;
+    if (rows.length === 0 && !showIntercepts) {
       netListEl.innerHTML = '<div id="bh-empty">暂无匹配请求</div>';
       return;
     }
     var html = '';
+    if (showIntercepts) {
+      html += '<div class="bh-section-title">拦截中 ' + netInterceptQueue.length + '</div>';
+      if (!netInterceptQueue.length) {
+        html += '<div class="bh-section-empty">暂无拦截请求</div>';
+      } else {
+        netInterceptQueue.forEach(function (d) {
+          var r = interceptAsReq(d);
+          var selClass = netSelIntercept && netSelIntercept.reqId === d.reqId ? ' bh-sel' : '';
+          var meta = '等待发送 · ↑ ' + fmtBytes(reqSize(r));
+          html += '<div class="bh-row bh-intercept' + selClass + '" data-int-id="' + escHtml(d.reqId) + '">' +
+            '<span class="bh-method">' + escHtml(d.method || 'GET') + '</span>' +
+            '<span class="bh-main">' +
+              '<span class="bh-url" title="' + escHtml(d.url || '') + '">' + escHtml(truncUrl(d.url || '')) + '</span>' +
+              '<span class="bh-meta">' + escHtml(meta) + '</span>' +
+            '</span>' +
+            '<span class="bh-tag">待发送</span>' +
+            '</div>';
+        });
+      }
+      if (rows.length) html += '<div class="bh-section-title">请求记录</div>';
+    }
     rows.forEach(function (r) {
       var hasErr = !!r.error;
       var sc = statusClass(r.status, hasErr);
@@ -1703,20 +2114,47 @@
     });
     netListEl.innerHTML = html;
     // 绑定点击
-    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-row'), function (el) {
-      el.addEventListener('click', function () {
+	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-intercept'), function (el) {
+	      el.addEventListener('click', function () {
+	        if (netSelIntercept) syncInterceptEdit();
+	        var id = el.getAttribute('data-int-id');
+	        netSelIntercept = netInterceptQueue.find(function (r) { return r.reqId === id; }) || null;
+        netSelReq = null;
+        setNetEditing(false);
+        netDetailTab = netSelIntercept && byteLen(netSelIntercept.reqBody) > 0 ? 1 : 0;
+	        renderNetList();
+	        renderDetail(true);
+	      });
+	      bindLongPress(el, function () {
+	        var id = el.getAttribute('data-int-id');
+	        var d = netInterceptQueue.find(function (r) { return r.reqId === id; });
+	        if (d) openMarkMenu(interceptAsReq(d));
+	      });
+	    });
+	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-row'), function (el) {
+	      if (el.getAttribute('data-int-id')) return;
+	      el.addEventListener('click', function () {
+	        if (netSelIntercept) syncInterceptEdit();
         var id = el.getAttribute('data-id');
         netSelReq = netRequests.find(function (r) { return r.reqId === id; }) || null;
+        netSelIntercept = null;
         setNetEditing(false); // 切换到新请求，退出编辑态以便显示新内容
         netDetailTab = 0;
-        renderNetList();
-        renderDetail(true);
-      });
-    });
-  }
+	        renderNetList();
+	        renderDetail(true);
+	      });
+	      bindLongPress(el, function () {
+	        var id = el.getAttribute('data-id');
+	        var r = netRequests.find(function (x) { return x.reqId === id; });
+	        openMarkMenu(r);
+	      });
+	    });
+	  }
 
   function closeNetDetail() {
+    if (netSelIntercept) syncInterceptEdit();
     netSelReq = null;
+    netSelIntercept = null;
     setNetEditing(false);
     try { if (netDetailBody) netDetailBody.blur(); } catch (e) {}
     renderNetList();
@@ -1736,7 +2174,8 @@
 
   function renderDetail(force) {
     if (!netDetailEl || !netDetailBody) return;
-    if (!netSelReq) {
+    var pendingIntercept = !!netSelIntercept;
+    if (!netSelReq && !pendingIntercept) {
       netDetailEl.style.display = 'none';
       if (netListEl) netListEl.style.flex = '1 1 auto';
       return;
@@ -1744,7 +2183,7 @@
     netDetailEl.style.display = 'flex';
     // 详情展开时列表收缩到约 30%，把空间让给请求/响应体
     if (netListEl) netListEl.style.flex = '0 0 30%';
-    var r = netSelReq;
+    var r = pendingIntercept ? interceptAsReq(netSelIntercept) : netSelReq;
     var tabs = ['请求头', '请求体', '响应头', '响应体', '明文'];
     var tabsEl = netDetailEl.querySelector('#bh-detail-tabs');
     tabsEl.innerHTML = tabs.map(function (t, i) {
@@ -1752,31 +2191,50 @@
     }).join('');
     Array.prototype.forEach.call(tabsEl.querySelectorAll('.bh-dtab'), function (el) {
       el.addEventListener('click', function () {
+        if (pendingIntercept) syncInterceptEdit();
         netDetailTab = parseInt(el.getAttribute('data-i'));
         renderDetail(true); // 用户主动切 tab，强制刷新内容
       });
     });
+    updateDetailActionButtons(pendingIntercept);
     // 用户正在编辑且非强制刷新时，不覆盖 textarea 内容（修复"输入不进去"/光标丢失）
     if (netEditing && !force) return;
     var content = '';
-    if (netDetailTab === 0) content = fmtHeaders(r.reqHeaders);
+    if (pendingIntercept && netDetailTab === 0) content = fmtInterceptHead(netSelIntercept);
+    else if (netDetailTab === 0) content = fmtHeaders(r.reqHeaders);
     else if (netDetailTab === 1) content = r.reqBody != null ? r.reqBody : '(无)';
     else if (netDetailTab === 2) {
-      var lines = fmtHeaders(r.respHeaders);
-      if (r.status) lines = 'HTTP/1.1 ' + r.status + ' ' + (statusPhrase(r.status) || '') + '\n' + lines;
-      content = lines;
+      if (pendingIntercept) {
+        content = '(请求已拦截，尚未发送)';
+      } else {
+        var lines = fmtHeaders(r.respHeaders);
+        if (r.status) lines = 'HTTP/1.1 ' + r.status + ' ' + (statusPhrase(r.status) || '') + '\n' + lines;
+        content = lines;
+      }
     } else if (netDetailTab === 3) {
-      if (r.error) {
+      if (pendingIntercept) {
+        content = '(请求已拦截，尚未发送)';
+      } else if (r.error) {
         content = '── 请求失败 ──\n' + r.error + '\n\n原因: ' + shortError(r.error);
       } else if (r.respBody != null) {
         content = r.respBody;
       } else {
         content = '(等待响应…)';
       }
+    } else if (pendingIntercept) {
+      content = '拦截中的请求还未发送，没有可关联的明文结果。';
     } else {
       content = fmtPlainCandidates(r);
     }
     netDetailBody.value = content;
+  }
+
+  function updateDetailActionButtons(pendingIntercept) {
+    if (!netDetailActs) return;
+    var replay = netDetailActs.querySelector('#bh-act-replay');
+    var bp = netDetailActs.querySelector('#bh-act-bp');
+    if (replay) replay.textContent = pendingIntercept ? '发送' : '重放';
+    if (bp) bp.textContent = pendingIntercept ? '中止' : '设断点';
   }
 
   function setNetEditing(active) {
@@ -1884,10 +2342,23 @@
         '<button id="bh-btn-cancel">取消</button>' +
         '<button id="bh-btn-ok">确认</button>' +
       '</div></div>';
-    el.querySelector('#bh-btn-cancel').addEventListener('click', closeModal);
-    el.querySelector('#bh-btn-ok').addEventListener('click', function () { onOk(el); });
-    el.addEventListener('click', function (e) { if (e.target === el) closeModal(); });
-    // 关键：弹窗必须挂进 #bh-net（在 eruda 的 shadow root 内），原因：
+	    el.querySelector('#bh-btn-cancel').addEventListener('click', closeModal);
+	    el.querySelector('#bh-btn-ok').addEventListener('click', function () { onOk(el); });
+	    el.addEventListener('click', function (e) { if (e.target === el) closeModal(); });
+	    var box = el.querySelector('#bh-modal-box');
+	    if (box) {
+	      ['pointerdown','pointerup','mousedown','mouseup','click','keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
+	        box.addEventListener(type, function (e) { e.stopPropagation(); }, true);
+	      });
+	      box.addEventListener('dblclick', function (e) {
+	        if (e.target && /^(INPUT|TEXTAREA)$/i.test(e.target.tagName || '')) {
+	          e.preventDefault();
+	          e.stopPropagation();
+	          try { e.target.focus(); } catch (err) {}
+	        }
+	      }, true);
+	    }
+	    // 关键：弹窗必须挂进 #bh-net（在 eruda 的 shadow root 内），原因：
     //   1. #bh-modal 的 CSS 写在 NET_STYLE 里，只对 shadow root 内的元素生效，
     //      挂 document.body 会完全没样式；
     //   2. eruda 面板 z-index=9999999，挂 document.body 的弹窗会被它整个盖住，
@@ -1896,12 +2367,167 @@
     (netPanel || document.body).appendChild(el);
     netModal = el;
   }
-  function closeModal() {
-    if (netModal) { try { netModal.remove(); } catch (e) {} netModal = null; }
-  }
+	  function closeModal() {
+	    if (netModal) { try { netModal.remove(); } catch (e) {} netModal = null; }
+	  }
+
+	  function bindLongPress(el, fn) {
+	    if (!el || el.__bhLongPressBound) return;
+	    el.__bhLongPressBound = true;
+	    var timer = null;
+	    var swallowClick = false;
+	    var startX = 0, startY = 0;
+	    var pointerMode = false;
+	    function pointFromEvent(e) {
+	      var t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+	      return { x: t.clientX || 0, y: t.clientY || 0 };
+	    }
+	    function clearTimer() {
+	      if (timer) { clearTimeout(timer); timer = null; }
+	    }
+	    function start(e) {
+	      var p = pointFromEvent(e);
+	      startX = p.x; startY = p.y;
+	      clearTimer();
+	      timer = setTimeout(function () {
+	        timer = null;
+	        swallowClick = true;
+	        try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
+	        fn(e);
+	      }, 650);
+	    }
+	    function move(e) {
+	      if (!timer) return;
+	      var p = pointFromEvent(e);
+	      if (Math.abs(p.x - startX) > 12 || Math.abs(p.y - startY) > 12) clearTimer();
+	    }
+	    function end() { clearTimer(); }
+	    el.addEventListener('pointerdown', function (e) { pointerMode = true; start(e); });
+	    el.addEventListener('pointermove', function (e) { pointerMode = true; move(e); });
+	    el.addEventListener('pointerup', function () { pointerMode = true; end(); });
+	    el.addEventListener('pointercancel', function () { pointerMode = true; end(); });
+	    el.addEventListener('touchstart', function (e) { if (!pointerMode) start(e); }, { passive: false });
+	    el.addEventListener('touchmove', function (e) { if (!pointerMode) move(e); }, { passive: true });
+	    el.addEventListener('touchend', function () { if (!pointerMode) end(); });
+	    el.addEventListener('click', function (e) {
+	      if (!swallowClick) return;
+	      swallowClick = false;
+	      e.preventDefault();
+	      e.stopImmediatePropagation();
+	    }, true);
+	    el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+	  }
+
+	  function requestLabel(r) {
+	    var u = normalizeRuleUrl(r && r.url);
+	    return (String((r && r.method) || 'GET').toUpperCase()) + ' ' +
+	      (u.host ? u.host : '') + (u.path || '');
+	  }
+
+	  function openMarkMenu(r) {
+	    if (!r) return;
+	    openModal('标记请求',
+	      '<div style="font-size:12px;color:#555;word-break:break-all;">' + escHtml(requestLabel(r)) + '</div>' +
+	      '<button data-mark="pass" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为放行</button>' +
+	      '<button data-mark="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">标记为拦截</button>',
+	      function () { closeModal(); }
+	    );
+	    setTimeout(function () {
+	      if (!netModal) return;
+	      var ok = netModal.querySelector('#bh-btn-ok');
+	      if (ok) ok.style.display = 'none';
+	      Array.prototype.forEach.call(netModal.querySelectorAll('[data-mark]'), function (btn) {
+	        btn.addEventListener('click', function () {
+	          var action = btn.getAttribute('data-mark');
+	          upsertInterceptRuleFromReq(r, action);
+	          closeModal();
+	          renderNetList();
+	        });
+	      });
+	    }, 20);
+	  }
+
+	  function openRuleActionMenu(rule) {
+	    if (!rule) return;
+	    openModal('修改标记',
+	      '<div style="font-size:12px;color:#555;word-break:break-all;">' +
+	        escHtml((rule.method || 'GET') + ' ' + (rule.host || '') + (rule.path || '')) +
+	      '</div>' +
+	      '<button data-rule-act="pass" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">改为放行</button>' +
+	      '<button data-rule-act="intercept" style="padding:10px;border:1px solid #d0d7de;border-radius:6px;background:#fff;text-align:left;">改为拦截</button>' +
+	      '<button data-rule-act="clear" style="padding:10px;border:1px solid #fecaca;border-radius:6px;background:#fff5f5;color:#dc2626;text-align:left;">清除标记</button>',
+	      function () { closeModal(); }
+	    );
+	    setTimeout(function () {
+	      if (!netModal) return;
+	      var ok = netModal.querySelector('#bh-btn-ok');
+	      if (ok) ok.style.display = 'none';
+	      Array.prototype.forEach.call(netModal.querySelectorAll('[data-rule-act]'), function (btn) {
+	        btn.addEventListener('click', function () {
+	          var act = btn.getAttribute('data-rule-act');
+	          if (act === 'clear') {
+	            removeInterceptRule(rule.id);
+	          } else {
+	            netInterceptRules = sanitizeInterceptRules(netInterceptRules).map(function (r) {
+	              if (r.id !== rule.id) return r;
+	              r.action = act === 'intercept' ? 'intercept' : 'pass';
+	              r.updatedAt = Date.now();
+	              return r;
+	            });
+	            saveInterceptRules();
+	          }
+	          closeModal();
+	          renderNetList();
+	        });
+	      });
+	    }, 20);
+	  }
+
+	  function renderRulesView() {
+	    if (!netRulesViewEl) return;
+	    var rules = sanitizeInterceptRules(netInterceptRules).slice().sort(function (a, b) {
+	      return (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
+	    });
+	    var rows = rules.map(function (r) {
+	      var meta = (r.host || '(无域名)') + ' · ' + (r.hasBody ? '有正文' : '无正文') + ' · ' +
+	        new Date(r.updatedAt || r.createdAt || Date.now()).toLocaleString();
+	      return '<div class="bh-rule-row" data-rule-id="' + escHtml(r.id) + '">' +
+	        '<span class="bh-rule-action ' + (r.action === 'intercept' ? 'intercept' : 'pass') + '">' +
+	          escHtml(ruleActionLabel(r.action)) + '</span>' +
+	        '<span class="bh-rule-main">' +
+	          '<span class="bh-rule-url">' + escHtml((r.method || 'GET') + ' ' + (r.path || r.sampleUrl || '/')) + '</span>' +
+	          '<span class="bh-rule-meta">' + escHtml(meta) + '</span>' +
+	        '</span>' +
+	      '</div>';
+	    }).join('');
+	    netRulesViewEl.innerHTML =
+	      '<div id="bh-rules-head">' +
+	        '<div id="bh-rules-title">标记的请求 ' + rules.length + '</div>' +
+	        '<button id="bh-rules-close" type="button" aria-label="关闭标记">×</button>' +
+	      '</div>' +
+	      '<div id="bh-rules-list">' + (rows || '<div class="bh-rule-empty">暂无标记</div>') + '</div>';
+	    var close = netRulesViewEl.querySelector('#bh-rules-close');
+	    if (close) close.addEventListener('click', closeRulesView);
+	    Array.prototype.forEach.call(netRulesViewEl.querySelectorAll('.bh-rule-row'), function (el) {
+	      var id = el.getAttribute('data-rule-id');
+	      var rule = rules.find(function (r) { return r.id === id; });
+	      bindLongPress(el, function () { openRuleActionMenu(rule); });
+	    });
+	    updateRulesBtn();
+	  }
+
+	  function openRulesView() {
+	    if (!netRulesViewEl) return;
+	    renderRulesView();
+	    netRulesViewEl.classList.add('open');
+	  }
+
+	  function closeRulesView() {
+	    if (netRulesViewEl) netRulesViewEl.classList.remove('open');
+	  }
 
 
-  // ── 功能：断点管理 ──
+	  // ── 功能：断点管理 ──
   function openBreakpointModal() {
     var listHtml = netBreakpoints.map(function (bp, i) {
       return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">' +
@@ -2053,12 +2679,21 @@
     }
   }
 
-  function updateInterceptBtn() {
-    var btn = netPanel && netPanel.querySelector('#bh-intercept-btn');
-    if (!btn) return;
-    btn.textContent = (netGlobalInterceptEnabled ? '● ' : '○ ') + '拦截';
-    btn.style.color = netGlobalInterceptEnabled ? '#dc2626' : '#888';
-  }
+	  function updateInterceptBtn() {
+	    var btn = netPanel && netPanel.querySelector('#bh-intercept-btn');
+	    if (!btn) return;
+	    var suffix = netInterceptQueue.length ? ' ' + netInterceptQueue.length : '';
+	    btn.textContent = (netGlobalInterceptEnabled ? '● ' : '○ ') + '拦截' + suffix;
+	    btn.style.color = netGlobalInterceptEnabled ? '#dc2626' : '#888';
+	  }
+
+	  function updateRulesBtn() {
+	    var btn = netPanel && netPanel.querySelector('#bh-rules-btn');
+	    if (!btn) return;
+	    var count = sanitizeInterceptRules(netInterceptRules).length;
+	    btn.textContent = count ? ('标记 ' + count) : '标记';
+	    btn.style.color = count ? '#2563eb' : '#111';
+	  }
 
   function openThrottleCustom() {
     openModal('自定义弱网',
@@ -2100,11 +2735,14 @@
 
   // ── 构建面板根 DOM ──
   function buildNetPanel() {
-    var wrap = document.createElement('div');
-    wrap.id = 'bh-net';
-    netPanel = wrap;
+	    var wrap = document.createElement('div');
+	    wrap.id = 'bh-net';
+	    netPanel = wrap;
+	    ['pointerdown','pointerup','touchstart','touchend','mousedown','mouseup','click','dblclick','contextmenu'].forEach(function (type) {
+	      wrap.addEventListener(type, function (e) { e.stopPropagation(); }, false);
+	    });
 
-    // 样式注入：eruda tool 面板在 shadow root 里渲染，document.head 的样式不生效。
+	    // 样式注入：eruda tool 面板在 shadow root 里渲染，document.head 的样式不生效。
     // 把 <style> 放到 wrap 内部，eruda 把 wrap 挂进 shadow root 时样式随之进入。
     var style = document.createElement('style');
     style.textContent = NET_STYLE;
@@ -2119,9 +2757,10 @@
       '<button id="bh-export-har">导出 HAR</button>' +
       '<button id="bh-bp-btn">断点</button>' +
       '<button id="bh-mock-btn">Mock</button>' +
-      '<button id="bh-thr-btn">○ 弱网</button>' +
-      '<button id="bh-intercept-btn">○ 拦截</button>' +
-      '<span id="bh-filter-wrap">' +
+	      '<button id="bh-thr-btn">○ 弱网</button>' +
+	      '<button id="bh-intercept-btn">○ 拦截</button>' +
+	      '<button id="bh-rules-btn">标记</button>' +
+	      '<span id="bh-filter-wrap">' +
         '<button id="bh-filter-menu-btn">过滤 ▾</button>' +
         '<span id="bh-filter-menu">' +
           '<button id="bh-noise-btn">○ 净化</button>' +
@@ -2134,24 +2773,22 @@
     netFilterEl = bar.querySelector('#bh-filter');
     netEnableBtn = bar.querySelector('#bh-toggle');
 
-    netEnableBtn.addEventListener('click', function () {
-      netEnabled = !netEnabled;
-      netEnableBtn.textContent = netEnabled ? '● 监听中' : '○ 已停止';
-      // 停止时从 page world 卸载拦截器
-      if (!netEnabled) runInPage('(function(){window.__bhNetInstalled=false;if(window.__bhRestoreFetch){window.fetch=window.__bhRestoreFetch;}if(window.__bhRestoreXHR){window.XMLHttpRequest=window.__bhRestoreXHR;}})();');
-      else { injectInterceptor(); }
-    });
+	    netEnableBtn.addEventListener('click', function () {
+	      setNetworkCaptureEnabled(!netEnabled);
+	    });
     bar.querySelector('#bh-clear').addEventListener('click', function () {
       netRequests = []; netPlainCandidates = []; netSelReq = null; renderNetList(); renderDetail();
     });
     bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
-    bar.querySelector('#bh-intercept-btn').addEventListener('click', function () {
-      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
-      syncGlobalInterceptEnabled();
-      updateInterceptBtn();
-    });
+	    bar.querySelector('#bh-intercept-btn').addEventListener('click', function () {
+	      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
+	      syncGlobalInterceptEnabled();
+	      updateInterceptBtn();
+	      renderNetList();
+	    });
+	    bar.querySelector('#bh-rules-btn').addEventListener('click', openRulesView);
     bar.querySelector('#bh-filter-menu-btn').addEventListener('click', function (e) {
       try { e.stopPropagation(); } catch (err) {}
       netFilterMenuOpen = !netFilterMenuOpen;
@@ -2240,10 +2877,11 @@
       });
       thrBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     }());
-    updateThrottleBtn();
-    updateFilterButtons();
-    updateInterceptBtn();
-    netFilterEl.addEventListener('input', renderNetList);
+	    updateThrottleBtn();
+	    updateFilterButtons();
+	    updateInterceptBtn();
+	    updateRulesBtn();
+	    netFilterEl.addEventListener('input', renderNetList);
 
     // 请求列表
     netListEl = document.createElement('div');
@@ -2278,13 +2916,21 @@
     netDetailEl.addEventListener('focusin', function () { setNetEditing(true); });
     netDetailBody.addEventListener('focus', function () { setNetEditing(true); });
     netDetailBody.addEventListener('beforeinput', function () { setNetEditing(true); });
-    netDetailBody.addEventListener('input', function () { setNetEditing(true); });
-    netDetailBody.addEventListener('compositionstart', function () { setNetEditing(true); });
-    netDetailBody.addEventListener('touchstart', function () { setNetEditing(true); }, { passive: true });
+	    netDetailBody.addEventListener('input', function () { setNetEditing(true); });
+	    netDetailBody.addEventListener('compositionstart', function () { setNetEditing(true); });
+	    netDetailBody.addEventListener('touchstart', function () { setNetEditing(true); }, { passive: true });
+	    ['pointerdown','pointerup','mousedown','mouseup','click','dblclick','keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
+	      netDetailBody.addEventListener(type, function (e) {
+	        setNetEditing(true);
+	        e.stopPropagation();
+	        if (type === 'dblclick') e.preventDefault();
+	      }, true);
+	    });
 
-    netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
-      if (!netSelReq) return;
-      // 如果当前在"请求体"tab 且用户编辑了内容，用编辑后的内容重放
+	    netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
+	      if (netSelIntercept) { sendSelectedIntercept(); return; }
+	      if (!netSelReq) return;
+	      // 如果当前在"请求体"tab 且用户编辑了内容，用编辑后的内容重放
       if (netDetailTab === 1 && netDetailBody) {
         var editedBody = netDetailBody.value;
         replayReq(Object.assign({}, netSelReq, { reqBody: editedBody || null }), '重放');
@@ -2309,23 +2955,31 @@
     netDetailActs.querySelector('#bh-act-clear').addEventListener('click', function () {
       if (netDetailBody) { netDetailBody.value = ''; netDetailBody.focus(); }
     });
-    netDetailActs.querySelector('#bh-act-curl').addEventListener('click', function () {
-      if (!netSelReq) return;
-      var text = toCurl(netSelReq);
-      navigator.clipboard && navigator.clipboard.writeText(text).catch(function () {});
-      flashBtn(this, '已复制');
-    });
-    netDetailActs.querySelector('#bh-act-bp').addEventListener('click', function () {
-      if (!netSelReq) return;
-      try { var u = new URL(netSelReq.url); netBreakpoints.push({ pattern: u.pathname, id: Date.now() }); }
+	    netDetailActs.querySelector('#bh-act-curl').addEventListener('click', function () {
+	      if (netSelIntercept) syncInterceptEdit();
+	      var target = netSelIntercept ? interceptAsReq(netSelIntercept) : netSelReq;
+	      if (!target) return;
+	      var text = toCurl(target);
+	      navigator.clipboard && navigator.clipboard.writeText(text).catch(function () {});
+	      flashBtn(this, '已复制');
+	    });
+	    netDetailActs.querySelector('#bh-act-bp').addEventListener('click', function () {
+	      if (netSelIntercept) { abortSelectedIntercept(); return; }
+	      if (!netSelReq) return;
+	      try { var u = new URL(netSelReq.url); netBreakpoints.push({ pattern: u.pathname, id: Date.now() }); }
       catch (e) { netBreakpoints.push({ pattern: netSelReq.url.slice(0, 40), id: Date.now() }); }
       injectBreakpoints();
       flashBtn(this, '已设断点');
-      renderNetList();
-    });
+	      renderNetList();
+	    });
 
-    netPanel = wrap;
-    return wrap;
+	    netRulesViewEl = document.createElement('div');
+	    netRulesViewEl.id = 'bh-rules-view';
+	    wrap.appendChild(netRulesViewEl);
+	    renderRulesView();
+
+	    netPanel = wrap;
+	    return wrap;
   }
 
   // ── 注册 eruda 自定义 Tool（isolated world）──
@@ -2359,12 +3013,14 @@
   }
 
   // ── 在 installI18n 同一时机注册 Tool & 注入拦截器 ──
-  function installI18n() {
-    _i18nCore();
-    installPointerGuard();
-    injectInterceptor();
-    syncGlobalInterceptEnabled();
-    injectPlainProbe();
+	  function installI18n() {
+	    _i18nCore();
+	    installPointerGuard();
+	    loadInterceptRules();
+	    injectInterceptor();
+	    syncGlobalInterceptEnabled();
+	    syncInterceptRules();
+	    injectPlainProbe();
     // page-world: eruda 在 window.eruda; isolated: self.eruda
     var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
     if (erudaMode === 'page') {
