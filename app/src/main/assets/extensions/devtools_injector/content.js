@@ -210,6 +210,7 @@
   function patchIsolatedPanelStyles() {
     var host = document.getElementById('eruda');
     if (!host) return;
+    var root = getErudaRoot() || host;
     var vars = {
       '--background': '#fff',
       '--darker-background': '#f6f8fa',
@@ -219,7 +220,7 @@
       '--highlight': '#dbeafe',
     };
     applyStyles(host, vars);
-    applyStyles(host.querySelector('.eruda-container'), Object.assign({}, vars, {
+    applyStyles(root.querySelector('.eruda-container'), Object.assign({}, vars, {
       position: 'fixed',
       left: '0',
       top: '0',
@@ -228,18 +229,55 @@
       'z-index': '2147483647',
       'pointer-events': 'none',
     }));
-    applyStyles(host.querySelector('.eruda-entry-btn'), {
+    applyStyles(root.querySelector('.eruda-entry-btn'), {
       visibility: 'visible',
       display: 'flex',
       'pointer-events': 'auto',
       'z-index': '2147483647',
     });
     Array.prototype.forEach.call(
-      host.querySelectorAll('.eruda-tools,.eruda-tool,.eruda-tab,.eruda-notification,.eruda-modal'),
+      root.querySelectorAll('.eruda-dev-tools,.eruda-tools,.eruda-tool,.eruda-tab,.eruda-notification,.eruda-modal'),
       function (el) {
         applyStyles(el, { 'pointer-events': 'auto' });
       }
     );
+  }
+
+  var pointerGuardStyleId = 'browserhelper-eruda-pointer-guard';
+  var POINTER_GUARD_CSS = [
+    '.eruda-entry-btn,.eruda-dev-tools,.eruda-tools,.eruda-tool,.eruda-tab,.eruda-notification,.eruda-modal{',
+    '  pointer-events:auto!important;',
+    '}',
+    '.eruda-dev-tools,.eruda-tools,.eruda-tool{',
+    '  touch-action:auto!important;',
+    '}',
+  ].join('\n');
+
+  function installPointerGuard() {
+    if (erudaMode === 'page') {
+      runInPage([
+        '(function(){',
+        '  var host=document.getElementById("eruda");',
+        '  var root=host&&(host.shadowRoot||host);',
+        '  if(!root)return;',
+        '  if((root.getElementById&&root.getElementById("' + pointerGuardStyleId + '"))||',
+        '     (root.querySelector&&root.querySelector("#' + pointerGuardStyleId + '")))return;',
+        '  var style=document.createElement("style");',
+        '  style.id="' + pointerGuardStyleId + '";',
+        '  style.textContent=' + JSON.stringify(POINTER_GUARD_CSS) + ';',
+        '  root.appendChild(style);',
+        '})();',
+      ].join('\n'));
+      return;
+    }
+    var root = getErudaRoot();
+    if (!root) return;
+    if ((root.getElementById && root.getElementById(pointerGuardStyleId)) ||
+        (root.querySelector && root.querySelector('#' + pointerGuardStyleId))) return;
+    var style = document.createElement('style');
+    style.id = pointerGuardStyleId;
+    style.textContent = POINTER_GUARD_CSS;
+    root.appendChild(style);
   }
 
   function removeFixStyle() {
@@ -588,9 +626,71 @@
     ].join('\n');
   }());
 
+  var PLAIN_PROBE_JS = (function () {
+    return [
+      '(function(){',
+      '  if(window.__bhPlainProbeInstalled)return;',
+      '  window.__bhPlainProbeInstalled=true;',
+      '  window.__bhPlainProbeEnabled=!!window.__bhPlainProbeEnabled;',
+      '  var MAX=65536;',
+      '  function send(data){try{window.postMessage(Object.assign({__bhNet:true,type:"plain"},data),"*");}catch(e){}}',
+      '  function textFrom(v){',
+      '    if(v==null)return null;',
+      '    if(typeof v==="string")return v;',
+      '    try{',
+      '      if(v instanceof ArrayBuffer){return new TextDecoder("utf-8",{fatal:false}).decode(new Uint8Array(v));}',
+      '      if(ArrayBuffer.isView&&ArrayBuffer.isView(v)){return new TextDecoder("utf-8",{fatal:false}).decode(new Uint8Array(v.buffer,v.byteOffset,v.byteLength));}',
+      '    }catch(e){}',
+      '    return null;',
+      '  }',
+      '  function printableRatio(s){',
+      '    if(!s)return 0;',
+      '    var ok=0,n=Math.min(s.length,2048);',
+      '    for(var i=0;i<n;i++){var c=s.charCodeAt(i);if(c===9||c===10||c===13||c>=32)ok++;}',
+      '    return n?ok/n:0;',
+      '  }',
+      '  function meaningful(s,source){',
+      '    if(!s||s.length<6)return false;',
+      '    if(printableRatio(s)<0.75)return false;',
+      '    if(source==="crypto.encrypt")return true;',
+      '    return /[\\{\\[]|prompt|message|messages|content|conversation|query|variables|graphql|model|token|auth|session|chat/i.test(s);',
+      '  }',
+      '  function capture(source,value,meta){',
+      '    if(!window.__bhPlainProbeEnabled)return;',
+      '    var text=textFrom(value);',
+      '    if(!meaningful(text,source))return;',
+      '    send({source:source,plainText:text.slice(0,MAX),plainSize:text.length,meta:meta||{},ts:Date.now()});',
+      '  }',
+      '  try{',
+      '    var _stringify=JSON.stringify;',
+      '    JSON.stringify=function(){',
+      '      var out=_stringify.apply(this,arguments);',
+      '      capture("JSON.stringify",out,{});',
+      '      return out;',
+      '    };',
+      '  }catch(e){}',
+      '  try{',
+      '    var _encode=TextEncoder&&TextEncoder.prototype&&TextEncoder.prototype.encode;',
+      '    if(_encode){TextEncoder.prototype.encode=function(input){capture("TextEncoder.encode",input,{});return _encode.apply(this,arguments);};}',
+      '  }catch(e){}',
+      '  try{',
+      '    var subtle=crypto&&crypto.subtle;',
+      '    var _encrypt=subtle&&subtle.encrypt;',
+      '    if(_encrypt){subtle.encrypt=function(alg,key,data){var name=(alg&&alg.name)||String(alg||"");capture("crypto.encrypt",data,{algorithm:name});return _encrypt.apply(this,arguments);};}',
+      '  }catch(e){}',
+      '  try{',
+      '    var _wsSend=WebSocket&&WebSocket.prototype&&WebSocket.prototype.send;',
+      '    if(_wsSend){WebSocket.prototype.send=function(data){capture("WebSocket.send",data,{});return _wsSend.apply(this,arguments);};}',
+      '  }catch(e){}',
+      '})();',
+    ].join('\n');
+  }());
+
   // content script 接收 page world 发来的消息
   var netReqMap = {}; // reqId -> 请求条目（等待响应）
   var _bpIsoPending = {}; // isolated 模式断点等待表 reqId -> resolve
+  var netPlainCandidates = [];
+  var netPlainSeq = 0;
   window.addEventListener('message', function (e) {
     if (!e.data || !e.data.__bhNet) return;
     var d = e.data;
@@ -600,7 +700,9 @@
         reqHeaders: d.reqHeaders || {}, reqBody: d.reqBody || null,
         status: null, respHeaders: {}, respBody: null,
         duration: null, error: null, ts: Date.now(), tag: null,
+        plain: [],
       };
+      entry.plain = collectPlainCandidates(entry);
       netReqMap[d.reqId] = entry;
     } else if (d.type === 'resp') {
       var entry = netReqMap[d.reqId];
@@ -610,11 +712,14 @@
         entry.respBody = d.respBody || null;
         entry.duration = d.duration;
         entry.error = d.error || null;
+        if (!entry.plain || !entry.plain.length) entry.plain = collectPlainCandidates(entry);
         delete netReqMap[d.reqId];
         // 放到列表头部，最多保留 200 条
         netRequests.unshift(entry);
         if (netRequests.length > 200) netRequests.length = 200;
+        maybeFocusPayload(entry);
         if (netPanelVisible) renderNetList();
+        if (netPanelVisible) renderDetail();
       }
     } else if (d.type === 'panelShow') {
       // page world 的 eruda tool.show() 通过 postMessage 通知 content world 渲染
@@ -630,6 +735,8 @@
       // isolated 模式：断点等待在 content world，直接 resolve（page 模式拦截器自己监听）
       var fn = _bpIsoPending[d.reqId];
       if (fn) { delete _bpIsoPending[d.reqId]; fn(d); }
+    } else if (d.type === 'plain') {
+      recordPlainCandidate(d);
     }
   });
 
@@ -862,6 +969,131 @@
       return xhr;
     }, pw, { defineAs: 'XMLHttpRequest' });
   }
+
+  function syncPlainProbeEnabled() {
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+      try { window.wrappedJSObject.__bhPlainProbeEnabled = !!netPlainProbeEnabled; return; } catch (e) {}
+    }
+    runInPage('(function(){window.__bhPlainProbeEnabled=' + (netPlainProbeEnabled ? 'true' : 'false') + ';})();');
+  }
+
+  function injectPlainProbe() {
+    syncPlainProbeEnabled();
+    if (erudaMode === 'page') {
+      runInPage(PLAIN_PROBE_JS);
+      setTimeout(syncPlainProbeEnabled, 50);
+      return;
+    }
+    injectPlainProbeViaExportFunction();
+    syncPlainProbeEnabled();
+  }
+
+  function plainTextFromValue(v) {
+    if (v == null) return null;
+    if (typeof v === 'string') return v;
+    try {
+      if (v instanceof ArrayBuffer) {
+        return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(v));
+      }
+      if (ArrayBuffer.isView && ArrayBuffer.isView(v)) {
+        return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+      }
+    } catch (e) {}
+    try {
+      if (v && typeof v.byteLength === 'number') {
+        return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(v.buffer || v, v.byteOffset || 0, v.byteLength));
+      }
+    } catch (e2) {}
+    return null;
+  }
+
+  function plainPrintableRatio(s) {
+    if (!s) return 0;
+    var ok = 0;
+    var n = Math.min(s.length, 2048);
+    for (var i = 0; i < n; i++) {
+      var c = s.charCodeAt(i);
+      if (c === 9 || c === 10 || c === 13 || c >= 32) ok++;
+    }
+    return n ? ok / n : 0;
+  }
+
+  function plainMeaningful(s, source) {
+    if (!s || s.length < 6) return false;
+    if (plainPrintableRatio(s) < 0.75) return false;
+    if (source === 'crypto.encrypt') return true;
+    return /[\{\[]|prompt|message|messages|content|conversation|query|variables|graphql|model|token|auth|session|chat/i.test(s);
+  }
+
+  function capturePlainValue(source, value, meta) {
+    if (!netPlainProbeEnabled) return;
+    var text = plainTextFromValue(value);
+    if (!plainMeaningful(text, source)) return;
+    recordPlainCandidate({
+      source: source,
+      plainText: text.slice(0, 65536),
+      plainSize: text.length,
+      meta: meta || {},
+      ts: Date.now(),
+    });
+  }
+
+  function injectPlainProbeViaExportFunction() {
+    if (typeof exportFunction === 'undefined' || typeof window.wrappedJSObject === 'undefined') {
+      runInPage(PLAIN_PROBE_JS);
+      return;
+    }
+    var pw = window.wrappedJSObject;
+    if (pw.__bhPlainProbeInstalled) return;
+    pw.__bhPlainProbeInstalled = true;
+
+    try {
+      var jsonObj = pw.JSON;
+      var _stringify = jsonObj && jsonObj.stringify;
+      if (_stringify) {
+        exportFunction(function () {
+          var out = _stringify.apply(jsonObj, arguments);
+          capturePlainValue('JSON.stringify', out, {});
+          return out;
+        }, jsonObj, { defineAs: 'stringify' });
+      }
+    } catch (e) {}
+
+    try {
+      var encProto = pw.TextEncoder && pw.TextEncoder.prototype;
+      var _encode = encProto && encProto.encode;
+      if (_encode) {
+        exportFunction(function (input) {
+          capturePlainValue('TextEncoder.encode', input, {});
+          return _encode.apply(this, arguments);
+        }, encProto, { defineAs: 'encode' });
+      }
+    } catch (e2) {}
+
+    try {
+      var subtle = pw.crypto && pw.crypto.subtle;
+      var _encrypt = subtle && subtle.encrypt;
+      if (_encrypt) {
+        exportFunction(function (alg, key, data) {
+          var name = '';
+          try { name = (alg && alg.name) || String(alg || ''); } catch (e) {}
+          capturePlainValue('crypto.encrypt', data, { algorithm: name });
+          return _encrypt.apply(subtle, arguments);
+        }, subtle, { defineAs: 'encrypt' });
+      }
+    } catch (e3) {}
+
+    try {
+      var wsProto = pw.WebSocket && pw.WebSocket.prototype;
+      var _wsSend = wsProto && wsProto.send;
+      if (_wsSend) {
+        exportFunction(function (data) {
+          capturePlainValue('WebSocket.send', data, {});
+          return _wsSend.apply(this, arguments);
+        }, wsProto, { defineAs: 'send' });
+      }
+    } catch (e4) {}
+  }
   // ── /网络拦截层 ──────────────────────────────────────────────────────────────
 
   // ── Eruda 汉化 ──────────────────────────────────────────────────────────────
@@ -888,6 +1120,17 @@
     // Info 面板
     ['Location', '页面地址'], ['System', '系统信息'], ['About', '关于'],
     ['Backend', '后端'], ['Screen', '屏幕'],
+    ['Browser', '浏览器'], ['Engine', '引擎'], ['OS', '操作系统'],
+    ['Device', '设备'], ['CPU', '处理器'], ['Memory', '内存'],
+    ['Language', '语言'], ['Languages', '语言列表'], ['Online', '在线'],
+    ['Offline', '离线'], ['Platform', '平台'], ['Vendor', '厂商'],
+    ['Cookie Enabled', 'Cookie 已启用'], ['Cookies Enabled', 'Cookie 已启用'],
+    ['Hardware Concurrency', '硬件线程数'], ['Max Touch Points', '最大触点数'],
+    ['Resolution', '分辨率'], ['Viewport', '视口'], ['Pixel Ratio', '像素比'],
+    ['Color Depth', '色深'], ['Orientation', '方向'], ['Referrer', '来源页面'],
+    ['Title', '标题'], ['Charset', '字符集'], ['Compat Mode', '兼容模式'],
+    ['History Length', '历史长度'], ['Protocol', '协议'], ['Host', '主机'],
+    ['Hostname', '主机名'], ['Port', '端口'], ['Pathname', '路径'],
     // Settings 面板
     ['Theme', '主题'], ['Transparency', '透明度'], ['Display Size', '显示大小'],
     ['Dark', '深色'], ['Light', '浅色'], ['Apply', '应用'],
@@ -1053,7 +1296,7 @@
     // 面板根：固定浅色主题，不依赖 CSS 变量（shadow root 内变量继承不可靠）
     '#bh-net{display:flex;flex-direction:column;height:100%;font-size:15px;',
     '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
-    '  background:#fff;color:#111;}',
+    '  background:#fff;color:#111;pointer-events:auto;touch-action:auto;}',
     // 顶部工具栏
     '#bh-bar{display:flex;align-items:center;gap:8px;padding:8px 10px;',
     '  border-bottom:1px solid #d0d7de;flex-wrap:wrap;background:#f6f8fa;}',
@@ -1065,18 +1308,19 @@
     // 请求列表
     '#bh-list{flex:1 1 auto;min-height:0;overflow-y:auto;border-bottom:1px solid #d0d7de;}',
     '#bh-empty{padding:20px;text-align:center;color:#888;font-size:14px;}',
-    '.bh-row{display:flex;align-items:center;padding:12px 10px;min-height:56px;',
+    '.bh-row{position:relative;display:flex;align-items:center;padding:10px 66px 10px 10px;min-height:58px;',
     '  border-bottom:1px solid #eaecef;cursor:pointer;gap:8px;background:#fff;}',
     '.bh-row:active,.bh-row.bh-sel{background:#dbeafe;}',
     '.bh-method{font-weight:700;min-width:46px;font-size:13px;color:#111;}',
+    '.bh-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;}',
     '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#111;}',
-    '.bh-dur{min-width:46px;text-align:right;font-size:12px;color:#888;}',
+    '.bh-meta{font-size:11px;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
     '.bh-tag{font-size:11px;padding:2px 6px;border-radius:3px;background:#6366f1;color:#fff;}',
     // 状态颜色
     '.s2{color:#16a34a;}.s3{color:#2563eb;}.s4{color:#ea580c;}.s5{color:#dc2626;}.s0{color:#888;}.s-err{color:#dc2626;font-style:italic;}',
-    '.bh-status-wrap{display:flex;flex-direction:column;align-items:flex-end;min-width:60px;}',
-    '.bh-status{font-size:14px;font-weight:700;line-height:1.2;}',
-    '.bh-status-desc{font-size:11px;color:#888;line-height:1.2;}',
+    '.bh-status-wrap{position:absolute;right:8px;top:7px;display:flex;flex-direction:column;align-items:flex-end;min-width:44px;}',
+    '.bh-status{font-size:11px;font-weight:700;line-height:1.15;}',
+    '.bh-status-desc{font-size:9px;color:#888;line-height:1.1;max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     // 详情区：展开后占面板大部分高度，让请求/响应体有足够阅读空间
     '#bh-detail{flex:1 1 auto;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:#fff;}',
     '#bh-detail-tabs{display:flex;border-bottom:1px solid #d0d7de;overflow-x:auto;background:#f6f8fa;flex:0 0 auto;}',
@@ -1094,8 +1338,10 @@
     '#bh-detail-acts button:active{background:#e8eaed;}',
     // 编辑模式：textarea 聚焦时把详情区固定到视口上半部分，
     // 确保软键盘从底部弹起后，编辑区和按钮仍在键盘上方、可见可点。
+    '#bh-net.bh-editing:before{content:"";position:fixed;inset:0;',
+    '  z-index:2147483639;background:#fff;pointer-events:auto;touch-action:none;}',
     '#bh-net.bh-editing #bh-detail{position:fixed;left:0;right:0;top:0;height:50vh;',
-    '  z-index:2147483640;box-shadow:0 4px 16px rgba(0,0,0,.35);}',
+    '  z-index:2147483640;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:auto;}',
     '#bh-net.bh-editing #bh-detail-body{min-height:0;}',
     // 模态弹窗（挂进 #bh-net / shadow root 内，z-index 要高于 eruda 面板内部元素）
     '#bh-modal{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;',
@@ -1130,9 +1376,12 @@
   var netFilterEl = null;
   var netEnableBtn = null;
   var netSelReq = null;  // 当前选中的请求条目
-  var netDetailTab = 0;  // 0=请求头 1=请求体 2=响应头 3=响应体
+  var netDetailTab = 0;  // 0=请求头 1=请求体 2=响应头 3=响应体 4=明文
   var netModal = null;   // 当前弹窗 element
   var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
+  var netHideTunnelNoise = false;
+  var netPayloadOnly = false;
+  var netPlainProbeEnabled = false;
 
   function statusClass(s, hasError) {
     if (hasError && !s) return 's-err';
@@ -1171,14 +1420,181 @@
     return s.replace(/^.*?:\s*/, '').slice(0, 10);
   }
 
+  function recordPlainCandidate(d) {
+    if (!netPlainProbeEnabled) return;
+    if (!d || !d.plainText) return;
+    var text = String(d.plainText);
+    var cand = {
+      id: ++netPlainSeq,
+      ts: d.ts || Date.now(),
+      source: d.source || 'unknown',
+      text: text,
+      size: d.plainSize || text.length,
+      meta: d.meta || {},
+    };
+    var last = netPlainCandidates[netPlainCandidates.length - 1];
+    if (last && last.source === cand.source && last.text === cand.text && cand.ts - last.ts < 500) return;
+    netPlainCandidates.push(cand);
+    var cutoff = Date.now() - 15000;
+    netPlainCandidates = netPlainCandidates.filter(function (x) { return x.ts >= cutoff; });
+    if (netPlainCandidates.length > 80) netPlainCandidates = netPlainCandidates.slice(netPlainCandidates.length - 80);
+  }
+
+  function collectPlainCandidates(entry) {
+    if (!netPlainProbeEnabled) return [];
+    var ts = entry.ts || Date.now();
+    var out = [];
+    for (var i = netPlainCandidates.length - 1; i >= 0 && out.length < 8; i--) {
+      var c = netPlainCandidates[i];
+      var delta = ts - c.ts;
+      if (delta < -500) continue;
+      if (delta > 5000) break;
+      var dup = out.some(function (x) { return x.text === c.text; });
+      if (!dup) out.push({
+        source: c.source,
+        text: c.text,
+        size: c.size,
+        meta: c.meta,
+        deltaMs: delta,
+      });
+    }
+    return out;
+  }
+
+  function fmtPlainCandidates(r) {
+    if (!netPlainProbeEnabled) {
+      return '明文探针未开启。\n\n开启后会尝试捕获 JSON.stringify、TextEncoder.encode、crypto.subtle.encrypt、WebSocket.send 经过的明文候选，并按时间关联到请求。';
+    }
+    var list = (r && r.plain) || [];
+    if (!list.length) {
+      return '未捕获到明文候选。\n\n可能原因:\n- 页面没有做应用层加密，直接看“请求体”即可\n- 加密发生在 WASM/原生层或自定义二进制流程中\n- 明文生成和请求发送间隔太久，超过关联窗口\n- 明文太短或不像业务数据，被噪声过滤掉';
+    }
+    return list.map(function (c, i) {
+      var meta = '';
+      if (c.meta && c.meta.algorithm) meta = ' · ' + c.meta.algorithm;
+      var delta = c.deltaMs != null ? (' · 请求前 ' + Math.max(0, c.deltaMs) + 'ms') : '';
+      return '[' + (i + 1) + '] ' + c.source + meta + ' · ' + fmtBytes(c.size) + delta + '\n' + c.text;
+    }).join('\n\n────\n\n');
+  }
+
+  function byteLen(v) {
+    if (v == null) return 0;
+    var s = String(v);
+    try { return new Blob([s]).size; } catch (e) {}
+    try { return unescape(encodeURIComponent(s)).length; } catch (e2) {}
+    return s.length;
+  }
+
+  function headersByteLen(obj) {
+    if (!obj) return 0;
+    var n = 0;
+    Object.keys(obj).forEach(function (k) {
+      n += byteLen(k) + 2 + byteLen(obj[k]) + 2;
+    });
+    return n;
+  }
+
+  function headerValue(obj, name) {
+    if (!obj) return '';
+    var target = String(name).toLowerCase();
+    var keys = Object.keys(obj);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase() === target) return String(obj[keys[i]]);
+    }
+    return '';
+  }
+
+  function contentLength(obj) {
+    var n = parseInt(headerValue(obj, 'content-length'), 10);
+    return isNaN(n) || n < 0 ? null : n;
+  }
+
+  function reqSize(r) {
+    return headersByteLen(r.reqHeaders) + byteLen(r.reqBody);
+  }
+
+  function respSize(r) {
+    var cl = contentLength(r.respHeaders);
+    if (cl != null) return cl;
+    return headersByteLen(r.respHeaders) + byteLen(r.respBody);
+  }
+
+  function fmtBytes(n) {
+    n = Math.max(0, n || 0);
+    if (n < 1024) return n + 'B';
+    if (n < 1024 * 1024) return (n < 10 * 1024 ? (n / 1024).toFixed(1) : Math.round(n / 1024)) + 'KB';
+    return (n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + 'MB';
+  }
+
+  function isPayloadReq(r) {
+    var method = String(r.method || 'GET').toUpperCase();
+    var rb = byteLen(r.reqBody);
+    var sb = byteLen(r.respBody);
+    var ct = (headerValue(r.reqHeaders, 'content-type') + ' ' + headerValue(r.respHeaders, 'content-type')).toLowerCase();
+    var url = String(r.url || '').toLowerCase();
+    if (rb > 0) return true;
+    if (/^(POST|PUT|PATCH|DELETE)$/.test(method) && !isTunnelNoiseReq(r)) return true;
+    if (sb > 2048 && /json|graphql|event-stream|text\/event-stream|text\/plain/.test(ct)) return true;
+    if (/chat|conversation|completion|message|messages|graphql|backend-api|generate|prompt|ask/.test(url) &&
+        (method !== 'GET' || sb > 0)) return true;
+    return false;
+  }
+
+  function isTunnelNoiseReq(r) {
+    var url = String(r.url || '').toLowerCase();
+    var method = String(r.method || 'GET').toUpperCase();
+    var rb = byteLen(r.reqBody);
+    var sb = byteLen(r.respBody);
+    var total = reqSize(r) + respSize(r);
+    var noiseRe = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
+    if (!noiseRe.test(url)) return false;
+    if (rb > 512) return false;
+    if (method !== 'GET' && rb > 0) return false;
+    return total < 8 * 1024 || sb === 0;
+  }
+
+  function getVisibleRequests() {
+    var filter = netFilterEl ? netFilterEl.value.trim().toLowerCase() : '';
+    return netRequests.filter(function (r) {
+      if (filter && String(r.url || '').toLowerCase().indexOf(filter) === -1) return false;
+      if (netHideTunnelNoise && isTunnelNoiseReq(r)) return false;
+      if (netPayloadOnly && !isPayloadReq(r)) return false;
+      return true;
+    });
+  }
+
+  function selectFirstVisibleRequest(preferPayload) {
+    var rows = getVisibleRequests();
+    if (!rows.length) {
+      netSelReq = null;
+      renderNetList();
+      renderDetail(true);
+      return;
+    }
+    var picked = rows[0];
+    if (preferPayload) {
+      picked = rows.find(function (r) { return byteLen(r.reqBody) > 0; }) ||
+        rows.find(function (r) { return isPayloadReq(r); }) || rows[0];
+    }
+    netSelReq = picked;
+    netDetailTab = byteLen(picked.reqBody) > 0 ? 1 : 3;
+    setNetEditing(false);
+    renderNetList();
+    renderDetail(true);
+  }
+
+  function maybeFocusPayload(entry) {
+    if (!netPayloadOnly || netEditing || !isPayloadReq(entry)) return;
+    if (netHideTunnelNoise && isTunnelNoiseReq(entry)) return;
+    netSelReq = entry;
+    netDetailTab = byteLen(entry.reqBody) > 0 ? 1 : 3;
+  }
+
   function renderNetList() {
     if (!netListEl) return;
-    var filter = netFilterEl ? netFilterEl.value.trim().toLowerCase() : '';
-    var rows = netRequests.filter(function (r) {
-      return !filter || r.url.toLowerCase().indexOf(filter) !== -1;
-    });
+    var rows = getVisibleRequests();
     if (rows.length === 0) {
-      netListEl.innerHTML = '<div id="bh-empty">暂无请求记录</div>';
+      netListEl.innerHTML = '<div id="bh-empty">暂无匹配请求</div>';
       return;
     }
     var html = '';
@@ -1188,7 +1604,11 @@
       var statusNum = r.status ? String(r.status) : (hasErr ? 'ERR' : '…');
       var statusDesc = r.status ? statusPhrase(r.status) : (hasErr ? shortError(r.error) : '');
       var dur = r.duration != null ? r.duration + 'ms' : '…';
-      var tag = r.tag ? '<span class="bh-tag">' + r.tag + '</span>' : '';
+      var meta = '↑ ' + fmtBytes(reqSize(r)) + ' · ↓ ' + fmtBytes(respSize(r)) + ' · ' + dur;
+      var tags = [];
+      if (r.tag) tags.push(r.tag);
+      if (r.plain && r.plain.length) tags.push('明文');
+      var tag = tags.map(function (t) { return '<span class="bh-tag">' + escHtml(t) + '</span>'; }).join('');
       var bpClass = netBreakpoints.some(function (bp) {
         return r.url.indexOf(bp.pattern) !== -1;
       }) ? ' bh-bp' : '';
@@ -1196,13 +1616,15 @@
       var errTitle = hasErr ? ' title="' + escHtml(r.error) + '"' : '';
       html += '<div class="bh-row' + bpClass + selClass + '" data-id="' + r.reqId + '">' +
         '<span class="bh-method">' + r.method + '</span>' +
-        '<span class="bh-url" title="' + escHtml(r.url) + '">' + escHtml(truncUrl(r.url)) + '</span>' +
+        '<span class="bh-main">' +
+          '<span class="bh-url" title="' + escHtml(r.url) + '">' + escHtml(truncUrl(r.url)) + '</span>' +
+          '<span class="bh-meta">' + escHtml(meta) + '</span>' +
+        '</span>' +
         tag +
         '<span class="bh-status-wrap"' + errTitle + '>' +
           '<span class="bh-status ' + sc + '">' + statusNum + '</span>' +
           (statusDesc ? '<span class="bh-status-desc">' + escHtml(statusDesc) + '</span>' : '') +
         '</span>' +
-        '<span class="bh-dur">' + dur + '</span>' +
         '</div>';
     });
     netListEl.innerHTML = html;
@@ -1211,7 +1633,7 @@
       el.addEventListener('click', function () {
         var id = el.getAttribute('data-id');
         netSelReq = netRequests.find(function (r) { return r.reqId === id; }) || null;
-        netEditing = false; // 切换到新请求，退出编辑态以便显示新内容
+        setNetEditing(false); // 切换到新请求，退出编辑态以便显示新内容
         netDetailTab = 0;
         renderNetList();
         renderDetail(true);
@@ -1241,7 +1663,7 @@
     // 详情展开时列表收缩到约 30%，把空间让给请求/响应体
     if (netListEl) netListEl.style.flex = '0 0 30%';
     var r = netSelReq;
-    var tabs = ['请求头', '请求体', '响应头', '响应体'];
+    var tabs = ['请求头', '请求体', '响应头', '响应体', '明文'];
     var tabsEl = netDetailEl.querySelector('#bh-detail-tabs');
     tabsEl.innerHTML = tabs.map(function (t, i) {
       return '<div class="bh-dtab' + (netDetailTab === i ? ' active' : '') + '" data-i="' + i + '">' + t + '</div>';
@@ -1261,7 +1683,7 @@
       var lines = fmtHeaders(r.respHeaders);
       if (r.status) lines = 'HTTP/1.1 ' + r.status + ' ' + (statusPhrase(r.status) || '') + '\n' + lines;
       content = lines;
-    } else {
+    } else if (netDetailTab === 3) {
       if (r.error) {
         content = '── 请求失败 ──\n' + r.error + '\n\n原因: ' + shortError(r.error);
       } else if (r.respBody != null) {
@@ -1269,8 +1691,17 @@
       } else {
         content = '(等待响应…)';
       }
+    } else {
+      content = fmtPlainCandidates(r);
     }
     netDetailBody.value = content;
+  }
+
+  function setNetEditing(active) {
+    netEditing = !!active;
+    if (!netPanel) return;
+    if (netEditing) netPanel.classList.add('bh-editing');
+    else netPanel.classList.remove('bh-editing');
   }
 
   // ── 功能：重放 ──
@@ -1291,7 +1722,9 @@
         entry.duration = 0;
         netRequests.unshift(entry);
         if (netRequests.length > 200) netRequests.length = 200;
+        maybeFocusPayload(entry);
         if (netPanelVisible) renderNetList();
+        if (netPanelVisible) renderDetail();
       });
     }).catch(function (err) {
       var entry = {
@@ -1301,7 +1734,9 @@
         status: 0, error: String(err), ts: Date.now(), tag: tag || '重放',
       };
       netRequests.unshift(entry);
+      maybeFocusPayload(entry);
       if (netPanelVisible) renderNetList();
+      if (netPanelVisible) renderDetail();
     });
   }
 
@@ -1502,11 +1937,29 @@
   }
 
   function updateThrottleBtn() {
-    var btn = document.getElementById('bh-thr-btn');
+    var btn = (netPanel && netPanel.querySelector('#bh-thr-btn')) || document.getElementById('bh-thr-btn');
     if (!btn) return;
     // 跟"监听中"一样：左边圆球区分开/关。● 实心=开启(橙)，○ 空心=关闭(灰)
     btn.textContent = (netThrottle.enabled ? '● ' : '○ ') + '弱网';
     btn.style.color = netThrottle.enabled ? '#ea580c' : '#888';
+  }
+
+  function updateFilterButtons() {
+    var noiseBtn = netPanel && netPanel.querySelector('#bh-noise-btn');
+    var payloadBtn = netPanel && netPanel.querySelector('#bh-payload-btn');
+    var plainBtn = netPanel && netPanel.querySelector('#bh-plain-btn');
+    if (noiseBtn) {
+      noiseBtn.textContent = (netHideTunnelNoise ? '● ' : '○ ') + '净化';
+      noiseBtn.style.color = netHideTunnelNoise ? '#2563eb' : '#888';
+    }
+    if (payloadBtn) {
+      payloadBtn.textContent = (netPayloadOnly ? '● ' : '○ ') + '正文';
+      payloadBtn.style.color = netPayloadOnly ? '#16a34a' : '#888';
+    }
+    if (plainBtn) {
+      plainBtn.textContent = (netPlainProbeEnabled ? '● ' : '○ ') + '明文';
+      plainBtn.style.color = netPlainProbeEnabled ? '#dc2626' : '#888';
+    }
   }
 
   function openThrottleCustom() {
@@ -1551,6 +2004,7 @@
   function buildNetPanel() {
     var wrap = document.createElement('div');
     wrap.id = 'bh-net';
+    netPanel = wrap;
 
     // 样式注入：eruda tool 面板在 shadow root 里渲染，document.head 的样式不生效。
     // 把 <style> 放到 wrap 内部，eruda 把 wrap 挂进 shadow root 时样式随之进入。
@@ -1568,6 +2022,9 @@
       '<button id="bh-bp-btn">断点</button>' +
       '<button id="bh-mock-btn">Mock</button>' +
       '<button id="bh-thr-btn">○ 弱网</button>' +
+      '<button id="bh-noise-btn">○ 净化</button>' +
+      '<button id="bh-payload-btn">○ 正文</button>' +
+      '<button id="bh-plain-btn">○ 明文</button>' +
       '<input id="bh-filter" placeholder="过滤 URL…">';
     wrap.appendChild(bar);
     netFilterEl = bar.querySelector('#bh-filter');
@@ -1581,11 +2038,35 @@
       else { injectInterceptor(); }
     });
     bar.querySelector('#bh-clear').addEventListener('click', function () {
-      netRequests = []; netSelReq = null; renderNetList(); renderDetail();
+      netRequests = []; netPlainCandidates = []; netSelReq = null; renderNetList(); renderDetail();
     });
     bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
+    bar.querySelector('#bh-noise-btn').addEventListener('click', function () {
+      netHideTunnelNoise = !netHideTunnelNoise;
+      updateFilterButtons();
+      renderNetList();
+      if (netSelReq && getVisibleRequests().indexOf(netSelReq) === -1) selectFirstVisibleRequest(false);
+    });
+    bar.querySelector('#bh-payload-btn').addEventListener('click', function () {
+      netPayloadOnly = !netPayloadOnly;
+      updateFilterButtons();
+      if (netPayloadOnly) selectFirstVisibleRequest(true);
+      else { renderNetList(); renderDetail(true); }
+    });
+    bar.querySelector('#bh-plain-btn').addEventListener('click', function () {
+      netPlainProbeEnabled = !netPlainProbeEnabled;
+      updateFilterButtons();
+      injectPlainProbe();
+      if (netSelReq) {
+        if (netPlainProbeEnabled && (!netSelReq.plain || !netSelReq.plain.length)) {
+          netSelReq.plain = collectPlainCandidates(netSelReq);
+        }
+        netDetailTab = 4;
+        renderDetail(true);
+      }
+    });
     // 弱网按钮：单点切换开/关，长按弹菜单选预设
     // 不依赖合成 click（Gecko/Android 上 pointer 事件后 click 可能不触发），
     // 直接用 pointerdown/pointerup 自洽处理，并加 touch 兜底。
@@ -1594,6 +2075,7 @@
       var longT = null;
       var fired = false;
       var startX = 0, startY = 0;
+      var pointerMode = false;
       function toggleThrottle() {
         if (netThrottle.enabled) {
           applyThrottle({ latencyMs: 0, kbps: 0 });
@@ -1620,20 +2102,24 @@
         toggleThrottle();
       }
       function onCancel() { if (longT) { clearTimeout(longT); longT = null; } fired = false; }
-      thrBtn.addEventListener('pointerdown', function (e) { onDown(e.clientX, e.clientY); });
-      thrBtn.addEventListener('pointerup', function (e) { onUp(e.clientX, e.clientY); });
+      thrBtn.addEventListener('pointerdown', function (e) { pointerMode = true; onDown(e.clientX, e.clientY); });
+      thrBtn.addEventListener('pointerup', function (e) { pointerMode = true; onUp(e.clientX, e.clientY); });
       thrBtn.addEventListener('pointercancel', onCancel);
       // touch 兜底（部分 Gecko 版本 pointer 事件不可靠）
       thrBtn.addEventListener('touchstart', function (e) {
+        if (pointerMode) return;
         var t = e.touches && e.touches[0]; if (t) onDown(t.clientX, t.clientY);
       }, { passive: true });
       thrBtn.addEventListener('touchend', function (e) {
+        if (pointerMode) return;
         var t = e.changedTouches && e.changedTouches[0];
         if (t) onUp(t.clientX, t.clientY); else onUp(startX, startY);
         e.preventDefault();
       });
       thrBtn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     }());
+    updateThrottleBtn();
+    updateFilterButtons();
     netFilterEl.addEventListener('input', renderNetList);
 
     // 请求列表
@@ -1660,16 +2146,24 @@
     netDetailActs = netDetailEl.querySelector('#bh-detail-acts');
     wrap.appendChild(netDetailEl);
 
-    // textarea 聚焦时进入编辑模式：把详情区固定到视口上半，避免被软键盘遮挡；
-    // 同时置 netEditing=true，让 renderDetail 不再覆盖用户正在编辑的内容（修复"输入不进去"）。
-    netDetailBody.addEventListener('focus', function () {
-      netEditing = true;
-      wrap.classList.add('bh-editing');
-    });
-    netDetailBody.addEventListener('blur', function () {
-      netEditing = false;
-      wrap.classList.remove('bh-editing');
-    });
+    // textarea 聚焦时进入编辑模式：把详情区固定到视口上半，避免被软键盘遮挡。
+    // Android/Gecko 输入法输入时可能产生短暂 blur/viewport 重排，所以不靠 blur 退出；
+    // 只有用户明确点到详情区外时才退出，避免详情区打一字就回到底部。
+    netDetailEl.addEventListener('focusin', function () { setNetEditing(true); });
+    netDetailBody.addEventListener('focus', function () { setNetEditing(true); });
+    netDetailBody.addEventListener('beforeinput', function () { setNetEditing(true); });
+    netDetailBody.addEventListener('input', function () { setNetEditing(true); });
+    netDetailBody.addEventListener('compositionstart', function () { setNetEditing(true); });
+    netDetailBody.addEventListener('touchstart', function () { setNetEditing(true); }, { passive: true });
+    function swallowOutsideEditTap(e) {
+      if (!netEditing || !netDetailEl || netDetailEl.contains(e.target)) return;
+      try { e.preventDefault(); } catch (err) {}
+      try { e.stopPropagation(); } catch (err2) {}
+      setNetEditing(false);
+    }
+    wrap.addEventListener('pointerdown', swallowOutsideEditTap, true);
+    wrap.addEventListener('touchstart', swallowOutsideEditTap, true);
+    wrap.addEventListener('click', swallowOutsideEditTap, true);
 
     netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
       if (!netSelReq) return;
@@ -1750,7 +2244,9 @@
   // ── 在 installI18n 同一时机注册 Tool & 注入拦截器 ──
   function installI18n() {
     _i18nCore();
+    installPointerGuard();
     injectInterceptor();
+    injectPlainProbe();
     // page-world: eruda 在 window.eruda; isolated: self.eruda
     var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
     if (erudaMode === 'page') {
