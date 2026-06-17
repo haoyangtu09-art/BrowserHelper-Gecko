@@ -533,7 +533,7 @@
 	      '    if(!url)return true;',
 	      '    if(method==="OPTIONS"||method==="HEAD")return true;',
 	      '    var len=body==null?0:String(body).length;',
-	      '    if(len===0&&headersCount(headers)===0)return true;',
+	      '    if(len===0&&headersCount(headers)===0&&method==="GET")return true;',
 	      '    var re=/\\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;',
 	      '    if(!re.test(url))return false;',
 	      '    if(len>512)return false;',
@@ -605,7 +605,7 @@
       '  window.fetch=function(input,init){',
       '    var url=typeof input==="string"?input:(input&&input.url)||"";',
       '    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();',
-      '    var reqHeaders=headersToObj(init&&init.headers);',
+      '    var reqHeaders=headersToObj((init&&init.headers)||(input&&input.headers));',
       '    var reqBody=(init&&init.body!=null)?String(init.body):null;',
       '    var bodyMutable=!!(init&&typeof init.body==="string");',
       '    var args=arguments;',
@@ -1074,7 +1074,7 @@
 	      if (!url) return true;
 	      if (method === 'OPTIONS' || method === 'HEAD') return true;
 	      var len = body == null ? 0 : String(body).length;
-	      if (len === 0 && headersCount(headers) === 0) return true;
+	      if (len === 0 && headersCount(headers) === 0 && method === 'GET') return true;
 	      var re = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
 	      if (!re.test(url)) return false;
 	      if (len > 512) return false;
@@ -1189,7 +1189,7 @@
     exportFunction(function (input, init) {
       var url = typeof input === 'string' ? input : (input && input.url) || '';
       var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-      var reqHeaders = headersToObj(init && init.headers);
+      var reqHeaders = headersToObj((init && init.headers) || (input && input.headers));
       var reqBody = (init && init.body != null) ? String(init.body) : null;
       var bodyMutable = !!(init && typeof init.body === 'string');
       var fInput = input, fInit = init;
@@ -2849,7 +2849,8 @@
 	    var box = el.querySelector('#bh-modal-box');
 	    if (box) {
 	      ['pointerdown','pointerup','mousedown','mouseup','click','keydown','keyup','input','beforeinput','compositionstart','compositionupdate','compositionend'].forEach(function (type) {
-	        box.addEventListener(type, function (e) { e.stopPropagation(); }, true);
+	        // Bubble-phase only: target controls must receive click/touch first.
+	        box.addEventListener(type, function (e) { e.stopPropagation(); }, false);
 	      });
 	      box.addEventListener('dblclick', function (e) {
 	        if (e.target && /^(INPUT|TEXTAREA)$/i.test(e.target.tagName || '')) {
