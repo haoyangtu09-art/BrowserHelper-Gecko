@@ -1624,6 +1624,24 @@
     '#bh-empty{padding:24px;text-align:center;color:#888;font-size:13px;}',
     // 断点高亮
     '.bh-row.bh-bp{background:#fef3c7;}',
+    // 额外功能下拉菜单
+    '#bh-extra-wrap{position:relative;display:inline-flex;}',
+    '#bh-extra-menu{display:none;position:absolute;left:0;top:calc(100% + 5px);min-width:140px;' +
+    '  padding:4px;background:#fff;border:1px solid #d0d7de;border-radius:6px;' +
+    '  box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:2147483642;}',
+    '#bh-extra-menu.open{display:flex;flex-direction:column;gap:2px;}',
+    '#bh-extra-menu button{width:100%;text-align:left;border:none;border-radius:4px;' +
+    '  background:#fff;min-height:40px;padding:7px 10px;font-size:14px;cursor:pointer;}',
+    '#bh-extra-menu button:active{background:#e8eaed;}',
+    // 详情搜索栏
+    '#bh-detail-search{display:flex;align-items:center;gap:6px;padding:4px 10px;flex:0 0 auto;' +
+    '  border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
+    '#bh-dsearch{flex:1;font-size:13px;padding:5px 8px;border-radius:4px;min-height:32px;' +
+    '  border:1px solid #d0d7de;background:#fff;color:#111;}',
+    '#bh-dsearch-count{font-size:12px;color:#6b7280;white-space:nowrap;min-width:32px;text-align:right;}',
+    '#bh-dsearch-nav button{font-size:16px;padding:2px 8px;border-radius:4px;min-height:32px;' +
+    '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
+    '#bh-dsearch-nav button:active{background:#e8eaed;}',
   ].join('');
 
   var netPanel = null;   // 根 div
@@ -1643,6 +1661,12 @@
   var netPlainProbeEnabled = false;
   var netGlobalInterceptEnabled = false;
   var netFilterMenuOpen = false;
+  var netExtraMenuOpen = false;
+  var netReplaceRules = [];
+  var netReplaceEnabled = false;
+  var netDetailSearchText = '';
+  var netDetailSearchMatches = [];
+  var netDetailSearchIdx = 0;
 
   function statusClass(s, hasError) {
     if (hasError && !s) return 's-err';
