@@ -1034,13 +1034,15 @@
       if (mock) {
         sendNet({ type: 'resp', reqId: reqId, status: mock.status || 200,
           respHeaders: { 'x-mock': '1' }, respBody: mock.body || '', duration: Date.now() - t0 });
-        return Promise.resolve(new window.Response(mock.body || '', { status: mock.status || 200 }));
+        // 必须返回 page-world 的 Promise/Response，否则页面访问会 "Permission denied"
+        return pw.Promise.resolve(new pw.Response(mock.body || '', cloneInto({ status: mock.status || 200 }, pw)));
       }
       var thr = pw.__bhThrottle;
       var delay = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
       var fInput = input, fInit = init;
-      var doFetch = function () {
-        return _origFetch.call(pw, fInput, fInit).then(function (resp) {
+      // 抓包日志：挂在 page-world promise 上做副作用，绝不把这条 content-world 链返回给页面
+      function observe(p) {
+        p.then(function (resp) {
           var status = resp.status;
           var respHeaders = headersToObj(resp.headers);
           resp.clone().text().then(function (body) {
@@ -1050,32 +1052,46 @@
             sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
               respBody: '(读取失败)', duration: Date.now() - t0 });
           });
-          return resp;
         }).catch(function (err) {
           sendNet({ type: 'resp', reqId: reqId, status: 0, error: String(err), duration: Date.now() - t0 });
-          throw err;
-        });
-      };
-      var runDelay = function () {
-        return delay > 0 ? new Promise(function (res) { setTimeout(function () { res(doFetch()); }, delay); }) : doFetch();
-      };
-	      var bpMode = checkBp(url) ? 'breakpoint' : (checkGlobalIntercept(url, method, reqBody, reqHeaders) ? 'intercept' : '');
-      if (bpMode) {
-        return waitBp(reqId, url, method, reqHeaders, reqBody, bpMode).then(function (r) {
-          if (r.action === 'abort') {
-            sendNet({ type: 'resp', reqId: reqId, status: 0, error: '已被断点中止', duration: Date.now() - t0 });
-            return Promise.reject(new Error('aborted by breakpoint'));
-          }
-          var ni = cloneInto(Object.assign({}, (init && {}) || {}, {
-            method: r.method || method,
-            headers: r.reqHeaders || reqHeaders,
-          }), pw);
-          if (r.reqBody != null && r.reqBody !== '') ni.body = r.reqBody;
-          fInput = r.url || url; fInit = ni;
-          return runDelay();
         });
       }
-      return runDelay();
+      var doFetch = function () {
+        var p = _origFetch.call(pw, fInput, fInit); // page-world promise
+        observe(p);
+        return p; // 直接返回页面世界的原生 promise，页面可正常 .then/.catch
+      };
+      var bpMode = checkBp(url) ? 'breakpoint' : (checkGlobalIntercept(url, method, reqBody, reqHeaders) ? 'intercept' : '');
+      // 无断点/拦截/弱网延迟时走快路径，直接返回页面 promise
+      if (!bpMode && delay <= 0) {
+        return doFetch();
+      }
+      // 需要延迟或断点：构造 page-world Promise 以保证返回值属于页面世界
+      return new pw.Promise(exportFunction(function (resolve, reject) {
+        function proceed() {
+          try {
+            doFetch().then(resolve, reject);
+          } catch (e) { reject(e); }
+        }
+        if (bpMode) {
+          waitBp(reqId, url, method, reqHeaders, reqBody, bpMode).then(function (r) {
+            if (r.action === 'abort') {
+              sendNet({ type: 'resp', reqId: reqId, status: 0, error: '已被断点中止', duration: Date.now() - t0 });
+              reject(new pw.Error('aborted by breakpoint'));
+              return;
+            }
+            var ni = cloneInto(Object.assign({}, (init && {}) || {}, {
+              method: r.method || method,
+              headers: r.reqHeaders || reqHeaders,
+            }), pw);
+            if (r.reqBody != null && r.reqBody !== '') ni.body = r.reqBody;
+            fInput = r.url || url; fInit = ni;
+            if (delay > 0) { pw.setTimeout(exportFunction(proceed, pw), delay); } else { proceed(); }
+          });
+        } else {
+          pw.setTimeout(exportFunction(proceed, pw), delay);
+        }
+      }, pw));
     }, pw, { defineAs: 'fetch' });
 
     // ── 替换 page world 的 XMLHttpRequest ──
