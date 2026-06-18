@@ -4642,6 +4642,9 @@
       syncGlobalInterceptNoise();
       syncReplaceScope();
       syncFilterSuppressResp();
+      // 释放早期阶段拦截到的所有请求（UI 尚未就绪，无法手动放行；直接透传原始请求）
+      releaseAllIntercepts();
+      releaseAllRespIntercepts();
       // 卸载早期拦截器，还原原生 XHR/fetch，使 eruda bundle 可安全 patch 原型
       disableInterceptor();
       loadPageEruda(function () {
