@@ -55,6 +55,8 @@ object DevToolsHelper {
         this.sessionUseCases = sessionUseCases
         this.appContext = context.applicationContext
 
+        ProxyProbe.setChannel { obj -> emitToPanel(obj) }
+
         controller.install(
             runtime,
             onSuccess = {
@@ -115,6 +117,10 @@ object DevToolsHelper {
         }
         override fun onPortMessage(message: Any, port: Port) {
                 val data = message as? JSONObject ?: return
+                if (data.optString("ch") == "proxy") {
+                    ProxyProbe.onPanelMessage(data)
+                    return
+                }
                 val status = data.optString("status", "")
                 if (status.isNotEmpty()) {
                     mainHandler.post {
@@ -124,6 +130,16 @@ object DevToolsHelper {
                     }
                 }
             }
+    }
+
+    /** Send a proxy event to the active tab's content port, if connected. */
+    private fun emitToPanel(obj: JSONObject) {
+        mainHandler.post {
+            val engineSession = store?.state?.selectedTab?.engineState?.engineSession ?: return@post
+            if (controller.portConnected(engineSession, CONTENT_PORT)) {
+                controller.sendContentMessage(obj, engineSession, CONTENT_PORT)
+            }
+        }
     }
 
     private fun registerForCurrentTab() {
