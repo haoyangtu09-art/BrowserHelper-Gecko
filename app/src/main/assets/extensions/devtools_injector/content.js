@@ -1486,6 +1486,16 @@
 	    runInPage('(function(){window.__bhGlobalInterceptNoise=' + (netGlobalInterceptNoise ? 'true' : 'false') + ';})();');
 	  }
 
+	  // 由主开关 + 作用域重新计算生效标志，并同步到拦截器（page/isolated 两世界）
+	  function recomputeIntercept() {
+	    netGlobalInterceptEnabled = netInterceptMaster && netScopeReq;
+	    netGlobalRespInterceptEnabled = netInterceptMaster && netScopeResp;
+	    netGlobalInterceptNoise = netScopeNoise;
+	    syncGlobalInterceptEnabled();
+	    syncGlobalRespInterceptEnabled();
+	    syncGlobalInterceptNoise();
+	  }
+
 	  function syncReplaceRules() {
 	    var active = netReplaceEnabled ? netReplaceRules.filter(function (r) { return r.enabled; }) : [];
 	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
@@ -1990,6 +2000,13 @@
 	  var netHideTunnelNoise = false;
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
+  // 主开关（拦截按钮）：决定拦截功能是否生效
+  var netInterceptMaster = false;
+  // 作用域（长按配置）：主开关开启时分别决定是否拦请求/响应/噪音包
+  var netScopeReq = true;
+  var netScopeResp = false;
+  var netScopeNoise = false;
+  // 派生的生效标志（= 主开关 && 对应作用域），拦截器实际读取这三个
   var netGlobalInterceptEnabled = false;
   var netGlobalRespInterceptEnabled = false;
   var netGlobalInterceptNoise = false;
@@ -3537,11 +3554,14 @@
         '<span style="font-size:15px;">' + (on ? '☑' : '☐') + '</span>' +
         '<span>' + escHtml(label) + '</span></button>';
     }
+    var hint = netInterceptMaster
+      ? '拦截功能已开启。以下为作用域：勾选项决定拦哪些。'
+      : '以下为作用域设置，不会开启拦截。设好后点工具栏"拦截"按钮才生效。';
     openModal('拦截配置',
-      row('拦截发出去的请求', netGlobalInterceptEnabled, 'req') +
-      row('拦截服务器响应', netGlobalRespInterceptEnabled, 'resp') +
-      row('拦截噪音包（心跳/遥测等）', netGlobalInterceptNoise, 'noise') +
-      '<div style="color:#888;font-size:11px;margin-top:6px;">开启后所有请求/响应将被暂停，需在面板里手动放行。默认过滤心跳/遥测等噪音包，勾选"拦截噪音包"可一并拦截。</div>',
+      row('拦截发出去的请求', netScopeReq, 'req') +
+      row('拦截服务器响应', netScopeResp, 'resp') +
+      row('拦截噪音包（心跳/遥测等）', netScopeNoise, 'noise') +
+      '<div style="color:#888;font-size:11px;margin-top:6px;">' + escHtml(hint) + '默认过滤心跳/遥测等噪音包，勾选"拦截噪音包"可一并拦截。命中后在面板里手动放行。</div>',
       function () { closeModal(); }
     );
     setTimeout(function () {
@@ -3550,17 +3570,16 @@
         btn.addEventListener('click', function () {
           var act = btn.getAttribute('data-icfg');
           if (act === 'req') {
-            netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
-            syncGlobalInterceptEnabled();
-            if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
+            netScopeReq = !netScopeReq;
           } else if (act === 'resp') {
-            netGlobalRespInterceptEnabled = !netGlobalRespInterceptEnabled;
-            syncGlobalRespInterceptEnabled();
-            if (!netGlobalRespInterceptEnabled && netRespInterceptQueue.length) releaseAllRespIntercepts();
+            netScopeResp = !netScopeResp;
           } else {
-            netGlobalInterceptNoise = !netGlobalInterceptNoise;
-            syncGlobalInterceptNoise();
+            netScopeNoise = !netScopeNoise;
           }
+          recomputeIntercept();
+          // 主开关开启时，关掉某作用域要释放对应已入队的拦截
+          if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
+          if (!netGlobalRespInterceptEnabled && netRespInterceptQueue.length) releaseAllRespIntercepts();
           saveNetConfig();
           updateInterceptBtn();
           renderNetList();
@@ -3649,9 +3668,8 @@
 	    if (!btn) return;
 	    var total = netInterceptQueue.length + netRespInterceptQueue.length;
 	    var suffix = total ? ' ' + total : '';
-	    var anyOn = netGlobalInterceptEnabled || netGlobalRespInterceptEnabled;
-	    btn.textContent = (anyOn ? '● ' : '○ ') + '拦截' + suffix;
-	    btn.style.color = anyOn ? '#dc2626' : '#888';
+	    btn.textContent = (netInterceptMaster ? '● ' : '○ ') + '拦截' + suffix;
+	    btn.style.color = netInterceptMaster ? '#dc2626' : '#888';
 	  }
 
 	  function updateRulesBtn() {
@@ -3768,9 +3786,10 @@
     if (!st || !st.set) return;
     try {
       st.set({ bhNetConfig: {
-        globalIntercept: netGlobalInterceptEnabled,
-        globalRespIntercept: netGlobalRespInterceptEnabled,
-        globalInterceptNoise: netGlobalInterceptNoise,
+        interceptMaster: netInterceptMaster,
+        scopeReq: netScopeReq,
+        scopeResp: netScopeResp,
+        scopeNoise: netScopeNoise,
         plainProbe: netPlainProbeEnabled,
         hideTunnelNoise: netHideTunnelNoise,
         payloadOnly: netPayloadOnly,
@@ -3786,9 +3805,19 @@
       st.get(NET_CONFIG_KEY).then(function (res) {
         var cfg = res && res[NET_CONFIG_KEY];
         if (cfg) {
-          netGlobalInterceptEnabled = !!cfg.globalIntercept;
-          netGlobalRespInterceptEnabled = !!cfg.globalRespIntercept;
-          netGlobalInterceptNoise = !!cfg.globalInterceptNoise;
+          if ('interceptMaster' in cfg || 'scopeReq' in cfg) {
+            netInterceptMaster = !!cfg.interceptMaster;
+            netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
+            netScopeResp = !!cfg.scopeResp;
+            netScopeNoise = !!cfg.scopeNoise;
+          } else {
+            // 兼容旧配置：旧版无主开关，req/resp 各自即开即拦
+            netInterceptMaster = !!cfg.globalIntercept || !!cfg.globalRespIntercept;
+            netScopeReq = !!cfg.globalIntercept;
+            netScopeResp = !!cfg.globalRespIntercept;
+            netScopeNoise = !!cfg.globalInterceptNoise;
+          }
+          recomputeIntercept();
           netPlainProbeEnabled = !!cfg.plainProbe;
           netHideTunnelNoise = !!cfg.hideTunnelNoise;
           netPayloadOnly = !!cfg.payloadOnly;
@@ -3930,17 +3959,11 @@
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
 	    var interceptBtn = bar.querySelector('#bh-intercept-btn');
 	    interceptBtn.addEventListener('click', function () {
-	      var anyOn = netGlobalInterceptEnabled || netGlobalRespInterceptEnabled;
-	      if (anyOn) {
-	        netGlobalInterceptEnabled = false;
-	        netGlobalRespInterceptEnabled = false;
-	        syncGlobalInterceptEnabled();
-	        syncGlobalRespInterceptEnabled();
+	      netInterceptMaster = !netInterceptMaster;
+	      recomputeIntercept();
+	      if (!netInterceptMaster) {
 	        if (netInterceptQueue.length) releaseAllIntercepts();
 	        if (netRespInterceptQueue.length) releaseAllRespIntercepts();
-	      } else {
-	        netGlobalInterceptEnabled = true;
-	        syncGlobalInterceptEnabled();
 	      }
 	      saveNetConfig();
 	      updateInterceptBtn();
