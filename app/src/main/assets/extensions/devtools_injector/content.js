@@ -325,6 +325,8 @@
     verifyEntry(function (visible) {
       if (visible) {
         erudaMode = 'page';
+        // patch page-world eruda console.evaluate to bypass our interceptor
+        runInPage('(function(){try{var c=window.eruda&&window.eruda.get&&window.eruda.get("console");if(!c||typeof c.evaluate!=="function")return;var o=c.evaluate.bind(c);c.evaluate=function(code){window.__bhNoIntercept=true;try{return o(code);}finally{window.__bhNoIntercept=false;}};}catch(e){}})();');
         cb(null);
       } else {
         cb('page eruda entry not visible');
@@ -476,6 +478,9 @@
 	      '  window.__bhGlobalInterceptEnabled=!!window.__bhGlobalInterceptEnabled;',
 	      '  window.__bhGlobalRespInterceptEnabled=!!window.__bhGlobalRespInterceptEnabled;',
 	      '  window.__bhGlobalInterceptNoise=!!window.__bhGlobalInterceptNoise;',
+	      '  window.__bhFilterSuppressResp=!!window.__bhFilterSuppressResp;',
+	      '  window.__bhNoIntercept=false;',
+	      '  if(window.__bhReplaceScope!=="req"&&window.__bhReplaceScope!=="resp")window.__bhReplaceScope=window.__bhReplaceScope||"both";',
 	      '  window.__bhInterceptRules=window.__bhInterceptRules||[];',
 
       // ── 工具 ──
@@ -572,9 +577,19 @@
 	      '    if(rule==="intercept")return true;',
 	      '    return !!window.__bhGlobalInterceptEnabled&&(!!window.__bhGlobalInterceptNoise||!isNoiseReq(url,method,body,headers));',
 	      '  }',
-	      '  function applyReplace(text){',
+	      '  function isSuppressResp(status,body){',
+	      '    if(status===204||status===205)return true;',
+	      '    if(!body)return true;',
+	      '    var t=String(body).trim();',
+	      '    if(t.length>64)return false;',
+	      '    return /^(\\{\\}|\\[\\]|0|1|ok|true|false|\\s*)$/i.test(t);',
+	      '  }',
+	      '  function applyReplace(text,dir){',
 	      '    var rules=window.__bhReplaceRules;',
 	      '    if(!rules||!rules.length||text==null)return text;',
+	      '    var scope=window.__bhReplaceScope||"both";',
+	      '    if(scope==="req"&&dir==="resp")return text;',
+	      '    if(scope==="resp"&&dir==="req")return text;',
 	      '    var s=String(text);',
 	      '    rules.forEach(function(r){',
 	      '      if(!r.from)return;',
@@ -598,11 +613,12 @@
       '    });',
       '  }',
       '  window.fetch=function(input,init){',
+      '    if(window.__bhNoIntercept)return _origFetch.apply(this,arguments);',
       '    var url=typeof input==="string"?input:(input&&input.url)||"";',
       '    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();',
       '    var reqHeaders=headersToObj(init&&init.headers);',
       '    var reqBody=(init&&init.body!=null)?String(init.body):null;',
-      '    reqBody=applyReplace(reqBody);',
+      '    reqBody=applyReplace(reqBody,"req");',
       '    if(reqBody!=null&&init){var _ni=Object.assign({},init);_ni.body=reqBody;init=_ni;}',
       '    var reqId=uid();',
       '    var t0=Date.now();',
@@ -621,16 +637,25 @@
       '    var doFetch=function(){return _origFetch.apply(this,args).then(function(resp){',
       '      var status=resp.status;',
       '      var respHeaders=headersToObj(resp.headers);',
-      // 命中响应断点：读完整 body（流式在此被攒成整段），暂停编辑后用新 Response 放行
-      '      if(respStop){',
+      // 响应替换 or 响应断点：读完整 body，按需替换/暂停后用新 Response 放行
+      '      var _doRR=(window.__bhReplaceScope==="resp"||window.__bhReplaceScope==="both")&&!!(window.__bhReplaceRules&&window.__bhReplaceRules.length);',
+      '      if(respStop||_doRR){',
       '        return resp.text().then(function(body){',
-      '          send({type:"resp",reqId:reqId,status:status,respHeaders:respHeaders,respBody:body.slice(0,102400),duration:Date.now()-t0});',
-      '          return waitRespBp(reqId,status,respHeaders,body,respVia).then(function(r){',
-      '            if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"响应已被中止",duration:Date.now()-t0});throw new Error("aborted by response intercept");}',
-      '            var nb=(r.respBody!=null)?r.respBody:body;var ns=r.status||status;var nh=stripCL(Object.assign({},r.respHeaders||respHeaders));',
-      '            var rb=nullBodyStatus(ns)?null:nb;',
-      '            try{return new Response(rb,{status:ns,headers:nh});}catch(e){try{return new Response(rb,{status:ns});}catch(e2){return new Response(rb);}}',
-      '          });',
+      '          var _realStop=respStop;',
+      '          if(_realStop&&_ir&&!!window.__bhFilterSuppressResp&&isSuppressResp(status,body)){_realStop=false;}',
+      '          var nb=_doRR?applyReplace(body,"resp"):body;',
+      '          send({type:"resp",reqId:reqId,status:status,respHeaders:respHeaders,respBody:(nb||body).slice(0,102400),duration:Date.now()-t0});',
+      '          if(_realStop){',
+      '            return waitRespBp(reqId,status,respHeaders,nb,respVia).then(function(r){',
+      '              if(r.action==="abort"){send({type:"resp",reqId:reqId,status:0,error:"响应已被中止",duration:Date.now()-t0});throw new Error("aborted by response intercept");}',
+      '              var fnb=(r.respBody!=null)?applyReplace(r.respBody,"resp"):nb;',
+      '              var ns=r.status||status;var nh=stripCL(Object.assign({},r.respHeaders||respHeaders));',
+      '              var rb=nullBodyStatus(ns)?null:fnb;',
+      '              try{return new Response(rb,{status:ns,headers:nh});}catch(e){try{return new Response(rb,{status:ns});}catch(e2){return new Response(rb);}}',
+      '            });',
+      '          }',
+      '          var rh=Object.assign({},respHeaders);if(nb!==body)stripCL(rh);',
+      '          try{return new Response(nb,{status:status,headers:rh});}catch(e){try{return new Response(nb,{status:status});}catch(e2){return new Response(nb);}}',
       '        });',
       '      }',
       '      var clone=resp.clone();',
@@ -671,6 +696,7 @@
       // ── XHR 拦截 ──
 	      '  var _XHR=window.__bhRestoreXHR||window.XMLHttpRequest;',
       '  window.XMLHttpRequest=function(){',
+      '    if(window.__bhNoIntercept)return new _XHR();',
       '    var xhr=new _XHR();',
       '    var _method="GET",_url="",_reqHeaders={},_reqBody=null,_reqId=uid(),_t0=0,_done=false,_pausing=false;',
       '    var origOpen=xhr.open.bind(xhr);',
@@ -693,11 +719,14 @@
       '      if(_done||_pausing)return;',
       '      var st=xhr.status;var respHeaders=_readRespHeaders();',
       '      var rtype=xhr.responseType;var textual=(rtype===""||rtype==="text");',
-      '      var body=textual?(xhr.responseText||""):"";',
+      '      var origBody=textual?(xhr.responseText||""):"";',
+      '      var _doRR=textual&&(window.__bhReplaceScope==="resp"||window.__bhReplaceScope==="both")&&!!(window.__bhReplaceRules&&window.__bhReplaceRules.length);',
+      '      var body=_doRR?applyReplace(origBody,"resp"):origBody;',
       '      var _irRule=interceptRespMatch(_url,_method,_reqBody);',
       '      var _ir=_irRule||(!!window.__bhGlobalRespInterceptEnabled&&(!!window.__bhGlobalInterceptNoise||!isNoiseReq(_url,_method,_reqBody,_reqHeaders)));',
       '      var _bpr=bpMatch(_url);',
       '      var respStop=st!==0&&textual&&((!!_bpr&&(_bpr.stage==="resp"||_bpr.stage==="both"))||_ir);',
+      '      if(respStop&&_ir&&!!window.__bhFilterSuppressResp&&isSuppressResp(st,body)){respStop=false;}',
       '      var respVia=_ir?"intercept":"breakpoint";',
       '      if(respStop){',
       '        _pausing=true;',
@@ -705,7 +734,7 @@
       '        waitRespBp(_reqId,st,respHeaders,body,respVia).then(function(r){',
       '          _pausing=false;_done=true;',
       '          if(r.action==="abort"){send({type:"resp",reqId:_reqId,status:0,error:"\\u54CD\\u5E94\\u5DF2\\u88AB\\u4E2D\\u6B62",duration:Date.now()-_t0});_emit("readystatechange");_emit("error");_emit("loadend");return;}',
-      '          var nb=(r.respBody!=null)?r.respBody:body;var ns=r.status||st;var nh=stripCL(Object.assign({},r.respHeaders||respHeaders));',
+      '          var nb=(r.respBody!=null)?applyReplace(r.respBody,"resp"):body;var ns=r.status||st;var nh=stripCL(Object.assign({},r.respHeaders||respHeaders));',
       '          var rb=nullBodyStatus(ns)?"":nb;',
       '          try{Object.defineProperty(xhr,"status",{configurable:true,get:function(){return ns;}});}catch(e){}',
       '          try{Object.defineProperty(xhr,"responseText",{configurable:true,get:function(){return rb;}});}catch(e){}',
@@ -718,6 +747,10 @@
       '      }',
       '      _done=true;',
       '      send({type:"resp",reqId:_reqId,status:st,respHeaders:respHeaders,respBody:body.slice(0,102400),duration:Date.now()-_t0});',
+      '      if(_doRR&&body!==origBody){',
+      '        try{Object.defineProperty(xhr,"responseText",{configurable:true,get:function(){return body;}});}catch(e){}',
+      '        try{Object.defineProperty(xhr,"response",{configurable:true,get:function(){return body;}});}catch(e){}',
+      '      }',
       '      _emit("readystatechange");',
       '      if(st===0){_emit("error");}else{_emit("load");}',
       '      _emit("loadend");',
@@ -726,7 +759,7 @@
       '    xhr.setRequestHeader=function(k,v){_reqHeaders[k]=v;return origSetHeader(k,v);};',
       '    xhr.send=function(body){',
       '      _reqBody=body!=null?String(body):null;',
-      '      _reqBody=applyReplace(_reqBody);if(_reqBody!=null)body=_reqBody;',
+      '      _reqBody=applyReplace(_reqBody,"req");if(_reqBody!=null)body=_reqBody;',
       '      _t0=Date.now();',
       '      send({type:"req",reqId:_reqId,url:_url,method:_method,reqHeaders:_reqHeaders,reqBody:_reqBody});',
       '      var mock=checkMock(_url);',
@@ -841,6 +874,7 @@
 	  var netSelRespIntercept = null;
 	  var netInterceptRules = [];
 	  var netRulesViewEl = null;
+  var netExtViewEl = null;
 	  var netPlainCandidates = [];
 	  var netPlainSeq = 0;
   window.addEventListener('message', function (e) {
@@ -1173,6 +1207,13 @@
 	    }
 	    function stripCL(h) { if (!h) return h; try { Object.keys(h).forEach(function (k) { if (/^content-length$/i.test(k)) delete h[k]; }); } catch (e) {} return h; }
 	    function nullBodyStatus(s) { return s === 101 || s === 204 || s === 205 || s === 304; }
+    function isSuppressResp(status, body) {
+      if (status === 204 || status === 205) return true;
+      if (!body) return true;
+      var t = String(body).trim();
+      if (t.length > 64) return false;
+      return /^(\{\}|\[\]|0|1|ok|true|false|\s*)$/i.test(t);
+    }
 	    function isNoiseBeforeSend(url, method, body, headers) {
 	      url = String(url || '').toLowerCase();
 	      method = String(method || 'GET').toUpperCase();
@@ -1209,11 +1250,12 @@
     // ── 替换 page world 的 fetch ──
 	    var _origFetch = pw.__bhRestoreFetch || pw.fetch;
     exportFunction(function (input, init) {
+      if (netConsoleBypass) { return _origFetch.call(pw, input, init); }
       var url = typeof input === 'string' ? input : (input && input.url) || '';
       var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
       var reqHeaders = headersToObj(init && init.headers);
       var reqBody = (init && init.body != null) ? String(init.body) : null;
-      var replacedBody = applyReplaceRules(reqBody);
+      var replacedBody = applyReplaceRules(reqBody, 'req');
       if (replacedBody !== reqBody) {
         reqBody = replacedBody;
         var _ni = Object.assign({}, init || {});
@@ -1259,24 +1301,37 @@
       var respVia = _ir ? 'intercept' : 'breakpoint';
       // 响应断点（isolated）：读完整 body（流式被攒成整段），暂停编辑后构造 pw.Response 放行。
       // 跨世界：返回值必须是 pw.Response；page-world promise 的回调必须 exportFunction。
+      // handleRespBp: reads body, applies suppress filter + resp replace, then pauses or returns
       function handleRespBp(p) {
         return new pw.Promise(exportFunction(function (resolve, reject) {
           p.then(exportFunction(function (resp) {
             var status = resp.status;
             var respHeaders = headersToObj(resp.headers);
             resp.text().then(exportFunction(function (body) {
+              // suppress filter: skip intercept for ACK/no-content responses
+              var _realStop = true;
+              if (_ir && netScopeFilterSuppressResp && isSuppressResp(status, body)) _realStop = false;
+              var nb = applyReplaceRules(body, 'resp');
               sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
-                respBody: body.slice(0, 102400), duration: Date.now() - t0 });
-              waitRespBp(reqId, status, respHeaders, body, respVia).then(function (r) {
+                respBody: (nb || body).slice(0, 102400), duration: Date.now() - t0 });
+              if (!_realStop) {
+                // Suppressed: skip interception, just return replaced body
+                var rh = Object.assign({}, respHeaders); if (nb !== body) stripCL(rh);
+                try { resolve(new pw.Response(nb, cloneInto({ status: status, headers: rh }, pw))); }
+                catch (e) { try { resolve(new pw.Response(nb, cloneInto({ status: status }, pw))); }
+                  catch (e2) { try { resolve(new pw.Response(nb)); } catch (e3) { reject(new pw.Error(String(e3))); } } }
+                return;
+              }
+              waitRespBp(reqId, status, respHeaders, nb, respVia).then(function (r) {
                 if (r.action === 'abort') {
                   sendNet({ type: 'resp', reqId: reqId, status: 0, error: '响应已被中止', duration: Date.now() - t0 });
                   reject(new pw.Error('aborted by response intercept'));
                   return;
                 }
-                var nb = (r.respBody != null) ? r.respBody : body;
+                var fnb = (r.respBody != null) ? applyReplaceRules(r.respBody, 'resp') : nb;
                 var ns = r.status || status;
                 var nh = stripCL(Object.assign({}, r.respHeaders || respHeaders));
-                var rb = nullBodyStatus(ns) ? null : nb;
+                var rb = nullBodyStatus(ns) ? null : fnb;
                 try { resolve(new pw.Response(rb, cloneInto({ status: ns, headers: nh }, pw))); }
                 catch (e) {
                   try { resolve(new pw.Response(rb, cloneInto({ status: ns }, pw))); }
@@ -1287,9 +1342,29 @@
           }, pw), exportFunction(function (err) { reject(err); }, pw));
         }, pw));
       }
+      // handleRespReplace: reads body, applies resp replace, returns modified Response (no intercept pause)
+      function handleRespReplace(p) {
+        return new pw.Promise(exportFunction(function (resolve, reject) {
+          p.then(exportFunction(function (resp) {
+            var status = resp.status;
+            var respHeaders = headersToObj(resp.headers);
+            resp.text().then(exportFunction(function (body) {
+              var nb = applyReplaceRules(body, 'resp');
+              sendNet({ type: 'resp', reqId: reqId, status: status, respHeaders: respHeaders,
+                respBody: (nb || body).slice(0, 102400), duration: Date.now() - t0 });
+              var rh = Object.assign({}, respHeaders); if (nb !== body) stripCL(rh);
+              try { resolve(new pw.Response(nb, cloneInto({ status: status, headers: rh }, pw))); }
+              catch (e) { try { resolve(new pw.Response(nb, cloneInto({ status: status }, pw))); }
+                catch (e2) { try { resolve(new pw.Response(nb)); } catch (e3) { reject(new pw.Error(String(e3))); } } }
+            }, pw), exportFunction(function () { observe(p); resolve(resp); }, pw));
+          }, pw), exportFunction(function (err) { reject(err); }, pw));
+        }, pw));
+      }
+      var _doRR = (netReplaceScope === 'resp' || netReplaceScope === 'both') && netReplaceEnabled && netReplaceRules.length > 0;
       var doFetch = function () {
         var p = _origFetch.call(pw, fInput, fInit); // page-world promise
         if (respStop) return handleRespBp(p);
+        if (_doRR) return handleRespReplace(p);
         observe(p);
         return p; // 直接返回页面世界的原生 promise，页面可正常 .then/.catch
       };
@@ -1329,6 +1404,7 @@
     // ── 替换 page world 的 XMLHttpRequest ──
 	    var _OrigXHR = pw.__bhRestoreXHR || pw.XMLHttpRequest;
     exportFunction(function () {
+      if (netConsoleBypass) { return new _OrigXHR(); }
       var xhr = new _OrigXHR();
       var w = xhr.wrappedJSObject || xhr;
       var _method = 'GET', _url = '', _reqHeaders = {}, _reqBody = null, _reqId = uid(), _t0 = 0, _done = false, _pausing = false;
@@ -1375,11 +1451,14 @@
         if (_done || _pausing) return;
         var st = xhr.status; var respHeaders = _readRespHeaders();
         var rtype = xhr.responseType; var textual = (rtype === '' || rtype === 'text');
-        var body = textual ? (xhr.responseText || '') : '';
+        var origBody = textual ? (xhr.responseText || '') : '';
+        var _doRR = textual && (netReplaceScope === 'resp' || netReplaceScope === 'both') && netReplaceEnabled && netReplaceRules.length > 0;
+        var body = _doRR ? applyReplaceRules(origBody, 'resp') : origBody;
         var _irRule = interceptRespMatch(_url, _method, _reqBody);
         var _ir = _irRule || (!!netGlobalRespInterceptEnabled && (!!netGlobalInterceptNoise || !isNoiseBeforeSend(_url, _method, _reqBody, _reqHeaders)));
         var _bpr = bpMatch(_url);
         var respStop = st !== 0 && textual && ((!!_bpr && (_bpr.stage === 'resp' || _bpr.stage === 'both')) || _ir);
+        if (respStop && _ir && netScopeFilterSuppressResp && isSuppressResp(st, body)) respStop = false;
         var respVia = _ir ? 'intercept' : 'breakpoint';
         if (respStop) {
           _pausing = true;
@@ -1390,7 +1469,7 @@
               sendNet({ type: 'resp', reqId: _reqId, status: 0, error: '响应已被中止', duration: Date.now() - _t0 });
               _emit('readystatechange'); _emit('error'); _emit('loadend'); return;
             }
-            var nb = (r.respBody != null) ? r.respBody : body; var ns = r.status || st; var nh = stripCL(Object.assign({}, r.respHeaders || respHeaders));
+            var nb = (r.respBody != null) ? applyReplaceRules(r.respBody, 'resp') : body; var ns = r.status || st; var nh = stripCL(Object.assign({}, r.respHeaders || respHeaders));
             var rb = nullBodyStatus(ns) ? '' : nb;
             try { Object.defineProperty(w, 'status', { configurable: true, get: exportFunction(function () { return ns; }, pw) }); } catch (e) {}
             try { Object.defineProperty(w, 'responseText', { configurable: true, get: exportFunction(function () { return rb; }, pw) }); } catch (e) {}
@@ -1403,6 +1482,10 @@
         }
         _done = true;
         sendNet({ type: 'resp', reqId: _reqId, status: st, respHeaders: respHeaders, respBody: body.slice(0, 102400), duration: Date.now() - _t0 });
+        if (_doRR && body !== origBody) {
+          try { Object.defineProperty(w, 'responseText', { configurable: true, get: exportFunction(function () { return body; }, pw) }); } catch (e) {}
+          try { Object.defineProperty(w, 'response', { configurable: true, get: exportFunction(function () { return body; }, pw) }); } catch (e) {}
+        }
         _emit('readystatechange');
         if (st === 0) { _emit('error'); } else { _emit('load'); }
         _emit('loadend');
@@ -1411,7 +1494,7 @@
       exportFunction(function (k, v) { _reqHeaders[k] = v; return xhr.setRequestHeader(k, v); }, xhr, { defineAs: 'setRequestHeader' });
       exportFunction(function (body) {
         _reqBody = body != null ? String(body) : null;
-        var _rb2 = applyReplaceRules(_reqBody);
+        var _rb2 = applyReplaceRules(_reqBody, 'req');
         if (_rb2 !== _reqBody) { _reqBody = _rb2; body = _rb2; }
         _t0 = Date.now();
         sendNet({ type: 'req', reqId: _reqId, url: _url, method: _method, reqHeaders: _reqHeaders, reqBody: _reqBody });
@@ -1486,14 +1569,40 @@
 	    runInPage('(function(){window.__bhGlobalInterceptNoise=' + (netGlobalInterceptNoise ? 'true' : 'false') + ';})();');
 	  }
 
+  function syncReplaceScope() {
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+      try { window.wrappedJSObject.__bhReplaceScope = netReplaceScope; return; } catch (e) {}
+    }
+    runInPage('(function(){window.__bhReplaceScope=' + JSON.stringify(netReplaceScope) + ';})();');
+  }
+
+  function syncFilterSuppressResp() {
+    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+      try { window.wrappedJSObject.__bhFilterSuppressResp = !!netScopeFilterSuppressResp; return; } catch (e) {}
+    }
+    runInPage('(function(){window.__bhFilterSuppressResp=' + (netScopeFilterSuppressResp ? 'true' : 'false') + ';})();');
+  }
+
 	  // 由主开关 + 作用域重新计算生效标志，并同步到拦截器（page/isolated 两世界）
+	  // 批量同步所有拦截相关旗标，避免多次 runInPage 造成拦截按钮卡顿
 	  function recomputeIntercept() {
 	    netGlobalInterceptEnabled = netInterceptMaster && netScopeReq;
 	    netGlobalRespInterceptEnabled = netInterceptMaster && netScopeResp;
 	    netGlobalInterceptNoise = netScopeNoise;
-	    syncGlobalInterceptEnabled();
-	    syncGlobalRespInterceptEnabled();
-	    syncGlobalInterceptNoise();
+	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+	      try {
+	        var pw = window.wrappedJSObject;
+	        pw.__bhGlobalInterceptEnabled = !!netGlobalInterceptEnabled;
+	        pw.__bhGlobalRespInterceptEnabled = !!netGlobalRespInterceptEnabled;
+	        pw.__bhGlobalInterceptNoise = !!netGlobalInterceptNoise;
+	        pw.__bhFilterSuppressResp = !!netScopeFilterSuppressResp;
+	        return;
+	      } catch (e) {}
+	    }
+	    runInPage('(function(){window.__bhGlobalInterceptEnabled=' + (netGlobalInterceptEnabled ? 'true' : 'false') +
+	      ';window.__bhGlobalRespInterceptEnabled=' + (netGlobalRespInterceptEnabled ? 'true' : 'false') +
+	      ';window.__bhGlobalInterceptNoise=' + (netGlobalInterceptNoise ? 'true' : 'false') +
+	      ';window.__bhFilterSuppressResp=' + (netScopeFilterSuppressResp ? 'true' : 'false') + ';})();');
 	  }
 
 	  function syncReplaceRules() {
@@ -1529,6 +1638,8 @@
 	    syncGlobalInterceptEnabled();
 	    syncGlobalRespInterceptEnabled();
 	    syncGlobalInterceptNoise();
+	    syncReplaceScope();
+	    syncFilterSuppressResp();
 	    syncInterceptRules();
 	    injectBreakpoints();
 	    injectMockRules();
@@ -1926,9 +2037,14 @@
     '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
 	    '#bh-detail-acts button:active{background:#e8eaed;}',
 	    // 编辑时不再移动详情区，避免 Android 软键盘/滚动联动造成上下弹跳。
-	    '#bh-rules-view{display:none;position:fixed;inset:0;z-index:2147483646;background:#fff;color:#111;',
+	    '#bh-rules-view,#bh-ext-view{display:none;position:fixed;inset:0;z-index:2147483646;background:#fff;color:#111;',
 	    '  flex-direction:column;pointer-events:auto;touch-action:auto;}',
-	    '#bh-rules-view.open{display:flex;}',
+	    '#bh-rules-view.open,#bh-ext-view.open{display:flex;}',
+	    '#bh-ext-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
+	    '#bh-ext-title{flex:1;font-size:15px;font-weight:700;}',
+	    '#bh-ext-close{flex:0 0 44px;min-width:44px;border:1px solid #d0d7de;border-radius:6px;background:#fff;color:#555;',
+	    '  font-size:24px;line-height:1;min-height:40px;}',
+	    '#bh-ext-body{flex:1;display:flex;align-items:center;justify-content:center;color:#888;font-size:14px;}',
 	    '#bh-rules-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
 	    '#bh-rules-title{flex:1;font-size:15px;font-weight:700;}',
 	    '#bh-rules-close{flex:0 0 44px;min-width:44px;border:1px solid #d0d7de;border-radius:6px;background:#fff;color:#555;',
@@ -2010,6 +2126,12 @@
   var netGlobalInterceptEnabled = false;
   var netGlobalRespInterceptEnabled = false;
   var netGlobalInterceptNoise = false;
+  // 字符替换作用域：'req' / 'resp' / 'both'
+  var netReplaceScope = 'both';
+  // 响应拦截过滤遥测ACK：true = 过滤掉 204/空体等压制响应，不拦截它们
+  var netScopeFilterSuppressResp = true;
+  // 控制台绕过：为 true 时拦截器放行所有请求（用于 eruda 控制台执行代码）
+  var netConsoleBypass = false;
   var netFilterMenuOpen = false;
   var netExtraMenuOpen = false;
   var netReplaceRules = [];
@@ -3561,6 +3683,7 @@
       row('拦截发出去的请求', netScopeReq, 'req') +
       row('拦截服务器响应', netScopeResp, 'resp') +
       row('拦截噪音包（心跳/遥测等）', netScopeNoise, 'noise') +
+      row('过滤遥测ACK（204/空体等压制响应）', netScopeFilterSuppressResp, 'suppress') +
       '<div style="color:#888;font-size:11px;margin-top:6px;">' + escHtml(hint) + '默认过滤心跳/遥测等噪音包，勾选"拦截噪音包"可一并拦截。命中后在面板里手动放行。</div>',
       function () { closeModal(); }
     );
@@ -3573,8 +3696,14 @@
             netScopeReq = !netScopeReq;
           } else if (act === 'resp') {
             netScopeResp = !netScopeResp;
-          } else {
+          } else if (act === 'noise') {
             netScopeNoise = !netScopeNoise;
+          } else if (act === 'suppress') {
+            netScopeFilterSuppressResp = !netScopeFilterSuppressResp;
+            syncFilterSuppressResp();
+            saveNetConfig();
+            openInterceptConfigModal();
+            return;
           }
           recomputeIntercept();
           // 主开关开启时，关掉某作用域要释放对应已入队的拦截
@@ -3717,7 +3846,17 @@
         '<button data-ri-del="' + i + '" style="font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid #fecaca;background:#fff5f5;color:#dc2626;">删</button>' +
       '</div>';
     }).join('') || '<div style="color:#888;font-size:12px;padding:8px 0;">暂无替换规则</div>';
+    var scopeHtml = '<div style="display:flex;gap:6px;margin-bottom:8px;margin-top:2px;">' +
+      ['req', 'both', 'resp'].map(function (s) {
+        var labels = { req: '仅发出', both: '双向', resp: '仅接收' };
+        var active = netReplaceScope === s;
+        return '<button data-rscope="' + s + '" style="flex:1;font-size:12px;padding:5px 4px;border-radius:4px;border:1px solid ' +
+          (active ? '#2563eb' : '#d0d7de') + ';background:' + (active ? '#dbeafe' : '#fff') + ';color:' + (active ? '#2563eb' : '#555') + ';font-weight:' + (active ? '700' : '400') + ';">' +
+          labels[s] + '</button>';
+      }).join('') + '</div>';
     openModal('字符替换',
+      '<div style="font-size:11px;color:#6b7280;margin-bottom:2px;">替换方向</div>' +
+      scopeHtml +
       listHtml +
       '<label style="margin-top:8px;">被替换字符串</label><input id="bh-repl-from" placeholder="要被替换的内容">' +
       '<label>替换为</label><input id="bh-repl-to" placeholder="替换进去的内容（空=删除）">',
@@ -3750,6 +3889,17 @@
           saveReplaceRules();
           updateReplaceBtn();
           openReplaceModal();
+        });
+      });
+      Array.prototype.forEach.call(netModal.querySelectorAll('[data-rscope]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var s = btn.getAttribute('data-rscope');
+          if (s === 'req' || s === 'resp' || s === 'both') {
+            netReplaceScope = s;
+            syncReplaceScope();
+            saveNetConfig();
+            openReplaceModal();
+          }
         });
       });
     }, 20);
@@ -3790,6 +3940,8 @@
         scopeReq: netScopeReq,
         scopeResp: netScopeResp,
         scopeNoise: netScopeNoise,
+        replaceScope: netReplaceScope,
+        filterSuppressResp: netScopeFilterSuppressResp,
         plainProbe: netPlainProbeEnabled,
         hideTunnelNoise: netHideTunnelNoise,
         payloadOnly: netPayloadOnly,
@@ -3818,6 +3970,9 @@
             netScopeNoise = !!cfg.globalInterceptNoise;
           }
           recomputeIntercept();
+          if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
+          else netReplaceScope = 'both';
+          if ('filterSuppressResp' in cfg) netScopeFilterSuppressResp = !!cfg.filterSuppressResp;
           netPlainProbeEnabled = !!cfg.plainProbe;
           netHideTunnelNoise = !!cfg.hideTunnelNoise;
           netPayloadOnly = !!cfg.payloadOnly;
@@ -3840,8 +3995,18 @@
     runInPage(INTERCEPT_JS);
   }
 
-  function applyReplaceRules(text) {
+  function isSuppressResp(status, body) {
+    if (status === 204 || status === 205) return true;
+    if (!body) return true;
+    var t = String(body).trim();
+    if (t.length > 64) return false;
+    return /^(\{\}|\[\]|0|1|ok|true|false|\s*)$/i.test(t);
+  }
+
+  function applyReplaceRules(text, dir) {
     if (!netReplaceEnabled || !netReplaceRules.length) return text;
+    if (netReplaceScope === 'req' && dir === 'resp') return text;
+    if (netReplaceScope === 'resp' && dir === 'req') return text;
     var result = text;
     netReplaceRules.forEach(function (rule) {
       if (!rule.enabled || !rule.from) return;
@@ -3925,6 +4090,7 @@
       '<button id="bh-clear">清空</button>' +
       '<button id="bh-intercept-btn">○ 拦截</button>' +
       '<button id="bh-replace-btn">○ 替换</button>' +
+      '<button id="bh-ext-btn">拓展</button>' +
       '<span id="bh-extra-wrap">' +
         '<button id="bh-extra-btn">额外 ▾</button>' +
         '<span id="bh-extra-menu">' +
@@ -4257,8 +4423,49 @@
 	    wrap.appendChild(netRulesViewEl);
 	    renderRulesView();
 
+    netExtViewEl = document.createElement('div');
+    netExtViewEl.id = 'bh-ext-view';
+    netExtViewEl.innerHTML =
+      '<div id="bh-ext-head">' +
+        '<div id="bh-ext-title">拓展</div>' +
+        '<button id="bh-ext-close" type="button">×</button>' +
+      '</div>' +
+      '<div id="bh-ext-body">无拓展</div>';
+    wrap.appendChild(netExtViewEl);
+    netExtViewEl.querySelector('#bh-ext-close').addEventListener('click', function () {
+      netExtViewEl.classList.remove('open');
+    });
+    bar.querySelector('#bh-ext-btn').addEventListener('click', function () {
+      netExtViewEl.classList.toggle('open');
+    });
+
 	    netPanel = wrap;
 	    return wrap;
+  }
+
+  // ── 控制台绕过拦截器：在 eruda console 执行代码时临时绕过拦截 ──
+  // 避免用户在 eruda 控制台执行 fetch/XHR 命令被拦截器拦住。
+  function hookErudaConsoleBypass(erudaObj) {
+    if (!erudaObj || !erudaObj.get) return;
+    try {
+      var c = erudaObj.get('console');
+      if (!c || typeof c.evaluate !== 'function') return;
+      var _origEval = c.evaluate.bind(c);
+      c.evaluate = function (code) {
+        netConsoleBypass = true;
+        // 同时对 page world 拦截器设旁路标志（以防 INTERCEPT_JS 路径也被触发）
+        if (typeof window.wrappedJSObject !== 'undefined') {
+          try { window.wrappedJSObject.__bhNoIntercept = true; } catch (e) {}
+        }
+        try { return _origEval(code); }
+        finally {
+          netConsoleBypass = false;
+          if (typeof window.wrappedJSObject !== 'undefined') {
+            try { window.wrappedJSObject.__bhNoIntercept = false; } catch (e) {}
+          }
+        }
+      };
+    } catch (e) {}
   }
 
   // ── 注册 eruda 自定义 Tool（isolated world）──
@@ -4303,6 +4510,8 @@
 	      syncGlobalInterceptEnabled();
 	      syncGlobalRespInterceptEnabled();
 	      syncGlobalInterceptNoise();
+	      syncReplaceScope();
+	      syncFilterSuppressResp();
 	      syncInterceptRules();
 	      syncReplaceRules();
 	      injectPlainProbe();
@@ -4319,6 +4528,7 @@
       injectNetToolPageWorld();
     } else {
       registerNetTool(erudaObj);
+      hookErudaConsoleBypass(erudaObj);
     }
   }
 
@@ -4397,6 +4607,8 @@
         syncGlobalInterceptEnabled();
         syncGlobalRespInterceptEnabled();
         syncGlobalInterceptNoise();
+        syncReplaceScope();
+        syncFilterSuppressResp();
         syncReplaceRules();
       });
     });
