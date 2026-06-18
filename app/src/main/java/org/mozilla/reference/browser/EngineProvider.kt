@@ -49,6 +49,14 @@ object EngineProvider {
             // prerequisite for the planned local TLS-terminating proxy. Harmless
             // to normal browsing; result is surfaced as a Toast for on-device check.
             verifyPrefMechanism(context.applicationContext)
+
+            // The proxy probe writes persistent USER proxy prefs, but its local
+            // server dies with the process. On a fresh launch those stale prefs
+            // would point at a dead port and break all browsing, so reset to
+            // direct here; the user re-arms the probe manually.
+            org.mozilla.reference.browser.devtools.ProxyProbe.resetProxyStateOnStartup(
+                context.applicationContext,
+            )
         }
 
         return runtime!!

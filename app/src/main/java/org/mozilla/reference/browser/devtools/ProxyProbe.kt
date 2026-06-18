@@ -46,6 +46,23 @@ object ProxyProbe {
         if (running) stop() else start()
     }
 
+    /**
+     * Called once when the GeckoRuntime is (re)created. The proxy prefs are
+     * written to PREF_BRANCH_USER, which persists to disk and is restored on the
+     * next process launch — but the ServerSocket lives only in this in-memory
+     * object and dies with the process. So after a background kill + relaunch,
+     * Gecko points at a dead local port and every request fails with
+     * NS_ERROR_PROXY_CONNECTION_REFUSED until the probe is re-armed. Reset to
+     * direct on startup so a cold launch is always clean; the user re-toggles to
+     * re-arm (a fresh socket + fresh port).
+     */
+    @Synchronized
+    fun resetProxyStateOnStartup(context: Context) {
+        appContext = context.applicationContext
+        running = false
+        setInt("network.proxy.type", 0)
+    }
+
     private fun toast(msg: String) {
         Log.i(TAG, msg)
         val ctx = appContext ?: return
