@@ -36,6 +36,8 @@ object ProxyProbe {
     @Volatile private var server: ServerSocket? = null
     @Volatile private var running = false
     @Volatile private var firstConnectReported = false
+    @Volatile private var firstHttpReported = false
+    @Volatile private var firstUpstreamErrReported = false
     private var appContext: Context? = null
 
     @Synchronized
@@ -56,6 +58,8 @@ object ProxyProbe {
             server = srv
             running = true
             firstConnectReported = false
+            firstHttpReported = false
+            firstUpstreamErrReported = false
             val port = srv.localPort
             Thread({ acceptLoop(srv) }, "bh-proxy-accept").apply { isDaemon = true }.start()
             applyProxyPrefs(port)
@@ -100,7 +104,16 @@ object ProxyProbe {
                     firstConnectReported = true
                     toast("PROXY-SPIKE: 收到 CONNECT $hostPort —— GeckoView 已走本地代理 ✅")
                 }
-                val upstream = Socket(host, pPort)
+                val upstream = try {
+                    Socket(host, pPort)
+                } catch (e: Throwable) {
+                    if (!firstUpstreamErrReported) {
+                        firstUpstreamErrReported = true
+                        toast("PROXY-SPIKE: 上游连接失败 $hostPort: ${e.message}")
+                    }
+                    try { cout.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray()); cout.flush() } catch (_: Throwable) {}
+                    client.close(); return
+                }
                 cout.write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray())
                 cout.flush()
                 pump(cin, upstream.getOutputStream())
@@ -111,8 +124,8 @@ object ProxyProbe {
                 if (host == null) { client.close(); return }
                 val h = host.substringBefore(":")
                 val p = host.substringAfter(":", "80").toIntOrNull() ?: 80
-                if (!firstConnectReported) {
-                    firstConnectReported = true
+                if (!firstHttpReported) {
+                    firstHttpReported = true
                     toast("PROXY-SPIKE: 收到 HTTP $h —— GeckoView 已走本地代理 ✅")
                 }
                 val upstream = Socket(h, p)
@@ -190,21 +203,21 @@ object ProxyProbe {
     private fun setInt(name: String, value: Int) {
         try {
             GeckoPreferenceController.setGeckoPref(name, value, GeckoPreferenceController.PREF_BRANCH_USER)
-                .accept({ _ -> }, { e -> Log.e(TAG, "set $name failed: ${e?.message}") })
-        } catch (t: Throwable) { Log.e(TAG, "set $name threw: ${t.message}") }
+                .accept({ _ -> }, { e -> toast("PROXY-SPIKE: pref FAIL $name: ${e?.message}") })
+        } catch (t: Throwable) { toast("PROXY-SPIKE: pref THREW $name: ${t.message}") }
     }
 
     private fun setStr(name: String, value: String) {
         try {
             GeckoPreferenceController.setGeckoPref(name, value, GeckoPreferenceController.PREF_BRANCH_USER)
-                .accept({ _ -> }, { e -> Log.e(TAG, "set $name failed: ${e?.message}") })
-        } catch (t: Throwable) { Log.e(TAG, "set $name threw: ${t.message}") }
+                .accept({ _ -> }, { e -> toast("PROXY-SPIKE: pref FAIL $name: ${e?.message}") })
+        } catch (t: Throwable) { toast("PROXY-SPIKE: pref THREW $name: ${t.message}") }
     }
 
     private fun setBool(name: String, value: Boolean) {
         try {
             GeckoPreferenceController.setGeckoPref(name, value, GeckoPreferenceController.PREF_BRANCH_USER)
-                .accept({ _ -> }, { e -> Log.e(TAG, "set $name failed: ${e?.message}") })
-        } catch (t: Throwable) { Log.e(TAG, "set $name threw: ${t.message}") }
+                .accept({ _ -> }, { e -> toast("PROXY-SPIKE: pref FAIL $name: ${e?.message}") })
+        } catch (t: Throwable) { toast("PROXY-SPIKE: pref THREW $name: ${t.message}") }
     }
 }
