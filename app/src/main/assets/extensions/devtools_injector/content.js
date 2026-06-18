@@ -1917,7 +1917,7 @@
     '  background:#f6f8fa;color:#555;font-size:24px;line-height:1;cursor:pointer;}',
     '#bh-detail-close:active{background:#e8eaed;color:#111;}',
     // textarea 代替 div：原生支持长按选中复制、单点光标编辑
-	    '#bh-detail-body{flex:1 1 auto;min-height:200px;overflow:auto;padding:10px;font-size:13px;color:#111;',
+	    '#bh-detail-body{flex:1 1 0;min-height:0;overflow:auto;padding:10px;font-size:13px;color:#111;',
 	    '  white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:monospace;background:#fff;',
     '  border:none;outline:none;resize:none;width:100%;line-height:1.5;}',
     '#bh-detail-acts{display:flex;gap:8px;padding:8px 10px;flex-wrap:wrap;flex:0 0 auto;',
