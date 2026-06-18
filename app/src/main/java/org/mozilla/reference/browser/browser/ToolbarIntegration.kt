@@ -6,7 +6,6 @@ package org.mozilla.reference.browser.browser
 
 import android.content.Context
 import android.content.Intent
-import android.security.KeyChain
 import android.widget.Toast
 import android.graphics.Color
 import android.graphics.Typeface
@@ -201,17 +200,16 @@ class ToolbarIntegration(
             TextMenuCandidate(text = "代理探针 开/关") {
                 ProxyProbe.toggle(context)
             },
-            TextMenuCandidate(text = "安装抓包根证书") {
+            TextMenuCandidate(text = "导出抓包根证书") {
                 try {
-                    val der = MitmCa.rootCertDer(context)
-                    val intent = KeyChain.createInstallIntent().apply {
-                        putExtra(KeyChain.EXTRA_CERTIFICATE, der)
-                        putExtra(KeyChain.EXTRA_NAME, "BrowserHelper MITM CA")
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    }
-                    context.startActivity(intent)
+                    val path = MitmCa.exportRootCert(context)
+                    Toast.makeText(
+                        context,
+                        "根证书已存到 $path\n请到 设置→安全→加密与凭据→安装证书→CA证书 选择它",
+                        Toast.LENGTH_LONG,
+                    ).show()
                 } catch (t: Throwable) {
-                    Toast.makeText(context, "生成/安装根证书失败: ${t.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "导出根证书失败: ${t.message}", Toast.LENGTH_LONG).show()
                 }
             },
             TextMenuCandidate(text = "设置") {

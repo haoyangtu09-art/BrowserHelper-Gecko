@@ -4,7 +4,11 @@
 
 package org.mozilla.reference.browser.devtools
 
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
+import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
@@ -44,7 +48,12 @@ object MitmCa {
     private const val KS_FILE = "bh-mitm-root.p12"
     private val KS_PASS = "bhmitm".toCharArray()
     private const val ROOT_ALIAS = "root"
-    private const val ROOT_DN = "CN=BrowserHelper MITM CA, O=BrowserHelper, OU=DevTools"
+    // The Android "Trusted credentials" list shows the cert's own subject name,
+    // and the manual CA install flow doesn't let the user rename it, so bake the
+    // friendly name straight into the subject.
+    private const val ROOT_CN = "抓包前置"
+    private const val ROOT_DN = "CN=$ROOT_CN, O=$ROOT_CN"
+    private const val CERT_FILE = "抓包前置.crt"
 
     private val rng = SecureRandom()
     private val leafCache = ConcurrentHashMap<String, SSLContext>()
@@ -69,14 +78,57 @@ object MitmCa {
             f.inputStream().use { ks.load(it, KS_PASS) }
             rootKey = ks.getKey(ROOT_ALIAS, KS_PASS) as PrivateKey
             rootCert = ks.getCertificate(ROOT_ALIAS) as X509Certificate
-            Log.i(TAG, "MitmCa: loaded existing root CA")
-        } else {
-            generateRoot()
-            ks.load(null, null)
-            ks.setKeyEntry(ROOT_ALIAS, rootKey, KS_PASS, arrayOf(rootCert))
-            f.outputStream().use { ks.store(it, KS_PASS) }
-            Log.i(TAG, "MitmCa: generated new root CA")
+            // A root persisted before the friendly-name change carries the old
+            // subject; regenerate so the installed cert shows the right name.
+            if (rootCert!!.subjectX500Principal.name.contains(ROOT_CN)) {
+                Log.i(TAG, "MitmCa: loaded existing root CA")
+                return
+            }
+            Log.i(TAG, "MitmCa: stale root CA name, regenerating")
         }
+        generateRoot()
+        leafCache.clear()
+        ks.load(null, null)
+        ks.setKeyEntry(ROOT_ALIAS, rootKey, KS_PASS, arrayOf(rootCert))
+        f.outputStream().use { ks.store(it, KS_PASS) }
+        Log.i(TAG, "MitmCa: generated new root CA")
+    }
+
+    /**
+     * Save the root cert (DER `.crt`) to the public Downloads folder so the user
+     * can install it manually via Settings → Security → Install a certificate →
+     * CA certificate (apps can no longer install CA certs directly on Android 11+).
+     * Returns a human-readable location for a Toast.
+     */
+    fun exportRootCert(context: Context): String {
+        val der = rootCertDer(context)
+        val ctx = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = ctx.contentResolver
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.DISPLAY_NAME}=?",
+                arrayOf(CERT_FILE),
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    resolver.delete(ContentUris.withAppendedId(collection, c.getLong(0)), null, null)
+                }
+            }
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, CERT_FILE)
+                put(MediaStore.Downloads.MIME_TYPE, "application/x-x509-ca-cert")
+            }
+            val uri = resolver.insert(collection, values) ?: error("无法写入下载目录")
+            resolver.openOutputStream(uri)?.use { it.write(der) } ?: error("无法打开输出流")
+            return "Download/$CERT_FILE"
+        }
+        val dir = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+        val out = File(dir, CERT_FILE)
+        out.outputStream().use { it.write(der) }
+        return out.absolutePath
     }
 
     /** DER bytes of the root cert, for KeyChain.createInstallIntent(). */
