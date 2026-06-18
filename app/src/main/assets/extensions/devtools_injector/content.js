@@ -672,10 +672,56 @@
 	      '  var _XHR=window.__bhRestoreXHR||window.XMLHttpRequest;',
       '  window.XMLHttpRequest=function(){',
       '    var xhr=new _XHR();',
-      '    var _method="GET",_url="",_reqHeaders={},_reqBody=null,_reqId=uid(),_t0=0;',
+      '    var _method="GET",_url="",_reqHeaders={},_reqBody=null,_reqId=uid(),_t0=0,_done=false,_pausing=false;',
       '    var origOpen=xhr.open.bind(xhr);',
       '    var origSend=xhr.send.bind(xhr);',
       '    var origSetHeader=xhr.setRequestHeader.bind(xhr);',
+      '    var origAdd=xhr.addEventListener.bind(xhr);',
+      '    var origRemove=xhr.removeEventListener.bind(xhr);',
+      '    var _on={},_reg={readystatechange:[],load:[],loadend:[],error:[],timeout:[],abort:[],progress:[],loadstart:[]};',
+      '    xhr.addEventListener=function(type,fn,opt){if(_reg[type]&&typeof fn==="function"){_reg[type].push(fn);return;}return origAdd(type,fn,opt);};',
+      '    xhr.removeEventListener=function(type,fn,opt){if(_reg[type]){var a=_reg[type],i=a.indexOf(fn);if(i>=0)a.splice(i,1);return;}return origRemove(type,fn,opt);};',
+      '    ["onreadystatechange","onload","onloadend","onerror","ontimeout","onabort","onprogress","onloadstart"].forEach(function(p){try{Object.defineProperty(xhr,p,{configurable:true,get:function(){return _on[p]||null;},set:function(v){_on[p]=v||null;}});}catch(e){}});',
+      '    function _emit(type){var ev;try{ev=new Event(type);}catch(e){ev={type:type};}var on=_on["on"+type];if(typeof on==="function"){try{on.call(xhr,ev);}catch(e2){}}var a=_reg[type]||[];for(var i=0;i<a.length;i++){try{a[i].call(xhr,ev);}catch(e3){}}}',
+      '    function _readRespHeaders(){var h={};try{(xhr.getAllResponseHeaders()||"").split("\\r\\n").forEach(function(l){var i=l.indexOf(":");if(i<0)return;h[l.slice(0,i).trim()]=l.slice(i+1).trim();});}catch(e){}return h;}',
+      '    origAdd("loadstart",function(){_emit("loadstart");});',
+      '    origAdd("progress",function(){_emit("progress");});',
+      '    origAdd("abort",function(){if(_done||_pausing)return;_done=true;_emit("readystatechange");_emit("abort");_emit("loadend");});',
+      '    origAdd("readystatechange",function(){',
+      '      var rs=xhr.readyState;',
+      '      if(rs<4){_emit("readystatechange");return;}',
+      '      if(_done||_pausing)return;',
+      '      var st=xhr.status;var respHeaders=_readRespHeaders();',
+      '      var rtype=xhr.responseType;var textual=(rtype===""||rtype==="text");',
+      '      var body=textual?(xhr.responseText||""):"";',
+      '      var _irRule=interceptRespMatch(_url,_method,_reqBody);',
+      '      var _ir=_irRule||(!!window.__bhGlobalRespInterceptEnabled&&(!!window.__bhGlobalInterceptNoise||!isNoiseReq(_url,_method,_reqBody,_reqHeaders)));',
+      '      var _bpr=bpMatch(_url);',
+      '      var respStop=st!==0&&textual&&((!!_bpr&&(_bpr.stage==="resp"||_bpr.stage==="both"))||_ir);',
+      '      var respVia=_ir?"intercept":"breakpoint";',
+      '      if(respStop){',
+      '        _pausing=true;',
+      '        send({type:"resp",reqId:_reqId,status:st,respHeaders:respHeaders,respBody:body.slice(0,102400),duration:Date.now()-_t0});',
+      '        waitRespBp(_reqId,st,respHeaders,body,respVia).then(function(r){',
+      '          _pausing=false;_done=true;',
+      '          if(r.action==="abort"){send({type:"resp",reqId:_reqId,status:0,error:"\\u54CD\\u5E94\\u5DF2\\u88AB\\u4E2D\\u6B62",duration:Date.now()-_t0});_emit("readystatechange");_emit("error");_emit("loadend");return;}',
+      '          var nb=(r.respBody!=null)?r.respBody:body;var ns=r.status||st;var nh=stripCL(Object.assign({},r.respHeaders||respHeaders));',
+      '          var rb=nullBodyStatus(ns)?"":nb;',
+      '          try{Object.defineProperty(xhr,"status",{configurable:true,get:function(){return ns;}});}catch(e){}',
+      '          try{Object.defineProperty(xhr,"responseText",{configurable:true,get:function(){return rb;}});}catch(e){}',
+      '          try{Object.defineProperty(xhr,"response",{configurable:true,get:function(){return rb;}});}catch(e){}',
+      '          try{Object.defineProperty(xhr,"getAllResponseHeaders",{configurable:true,value:function(){return Object.keys(nh).map(function(k){return k+": "+nh[k];}).join("\\r\\n");}});}catch(e){}',
+      '          try{Object.defineProperty(xhr,"getResponseHeader",{configurable:true,value:function(k){var t=String(k).toLowerCase(),f=null;Object.keys(nh).forEach(function(h){if(h.toLowerCase()===t)f=nh[h];});return f;}});}catch(e){}',
+      '          _emit("readystatechange");_emit("load");_emit("loadend");',
+      '        });',
+      '        return;',
+      '      }',
+      '      _done=true;',
+      '      send({type:"resp",reqId:_reqId,status:st,respHeaders:respHeaders,respBody:body.slice(0,102400),duration:Date.now()-_t0});',
+      '      _emit("readystatechange");',
+      '      if(st===0){_emit("error");}else{_emit("load");}',
+      '      _emit("loadend");',
+      '    });',
       '    xhr.open=function(method,url){_method=method.toUpperCase();_url=url;return origOpen.apply(xhr,arguments);};',
       '    xhr.setRequestHeader=function(k,v){_reqHeaders[k]=v;return origSetHeader(k,v);};',
       '    xhr.send=function(body){',
@@ -692,30 +738,11 @@
       '        try{Object.defineProperty(xhr,"status",{configurable:true,get:function(){return _ms;}});}catch(e){}',
       '        try{Object.defineProperty(xhr,"responseText",{configurable:true,get:function(){return _mb;}});}catch(e){}',
       '        try{Object.defineProperty(xhr,"response",{configurable:true,get:function(){return _mb;}});}catch(e){}',
-      '        setTimeout(function(){',
-      '          try{if(xhr.onreadystatechange)xhr.onreadystatechange();}catch(e){}',
-      '          try{xhr.dispatchEvent(new Event("readystatechange"));}catch(e){}',
-      '          try{xhr.dispatchEvent(new Event("load"));}catch(e){}',
-      '          try{if(xhr.onload)xhr.onload();}catch(e){}',
-      '          try{if(xhr.onloadend)xhr.onloadend();}catch(e){}',
-      '        },0);',
+      '        try{Object.defineProperty(xhr,"getAllResponseHeaders",{configurable:true,value:function(){return "x-mock: 1";}});}catch(e){}',
+      '        _done=true;setTimeout(function(){_emit("readystatechange");_emit("load");_emit("loadend");},0);',
       '        return;',
       '      }',
-      '      var doSend=function(){',
-      '      xhr.addEventListener("readystatechange",function(){',
-      '        if(xhr.readyState!==4)return;',
-      '        var respHeaders={};',
-      '        try{',
-      '          (xhr.getAllResponseHeaders()||"").split("\\r\\n").forEach(function(l){',
-      '            var i=l.indexOf(":");if(i<0)return;',
-      '            respHeaders[l.slice(0,i).trim()]=l.slice(i+1).trim();',
-      '          });',
-      '        }catch(e){}',
-      '        send({type:"resp",reqId:_reqId,status:xhr.status,',
-      '          respHeaders:respHeaders,respBody:(xhr.responseText||"").slice(0,102400),',
-      '          duration:Date.now()-_t0});',
-      '      });',
-      '      origSend.apply(xhr,arguments);};',
+      '      var doSend=function(){origSend.apply(xhr,arguments);};',
       '      var thr=window.__bhThrottle;var d=(thr&&thr.enabled&&thr.latencyMs>0)?thr.latencyMs:0;',
       '      var fireSend=function(){if(d>0){setTimeout(doSend,d);}else{doSend();}};',
       // 命中断点：暂停，等编辑结果。改了 url/method 需重新 open，改了头需重设
@@ -1303,7 +1330,83 @@
 	    var _OrigXHR = pw.__bhRestoreXHR || pw.XMLHttpRequest;
     exportFunction(function () {
       var xhr = new _OrigXHR();
-      var _method = 'GET', _url = '', _reqHeaders = {}, _reqBody = null, _reqId = uid(), _t0 = 0;
+      var w = xhr.wrappedJSObject || xhr;
+      var _method = 'GET', _url = '', _reqHeaders = {}, _reqBody = null, _reqId = uid(), _t0 = 0, _done = false, _pausing = false;
+      var origAdd = xhr.addEventListener.bind(xhr);
+      var _on = {}, _reg = { readystatechange: [], load: [], loadend: [], error: [], timeout: [], abort: [], progress: [], loadstart: [] };
+      function _emit(type) {
+        var ev; try { ev = new pw.Event(type); } catch (e) { ev = { type: type }; }
+        var on = _on['on' + type];
+        if (typeof on === 'function') { try { on.call(w, ev); } catch (e2) {} }
+        var a = _reg[type] || [];
+        for (var i = 0; i < a.length; i++) { try { a[i].call(w, ev); } catch (e3) {} }
+      }
+      function _readRespHeaders() {
+        var h = {};
+        try {
+          (xhr.getAllResponseHeaders() || '').split('\r\n').forEach(function (l) {
+            var i = l.indexOf(':'); if (i < 0) return;
+            h[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+          });
+        } catch (e) {}
+        return h;
+      }
+      try {
+        Object.defineProperty(w, 'addEventListener', { configurable: true, value: exportFunction(function (type, fn) {
+          if (_reg[type] && typeof fn === 'function') { _reg[type].push(fn); return; }
+          return xhr.addEventListener.apply(xhr, arguments);
+        }, pw) });
+        Object.defineProperty(w, 'removeEventListener', { configurable: true, value: exportFunction(function (type, fn) {
+          if (_reg[type]) { var a = _reg[type], i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); return; }
+          return xhr.removeEventListener.apply(xhr, arguments);
+        }, pw) });
+        ['onreadystatechange', 'onload', 'onloadend', 'onerror', 'ontimeout', 'onabort', 'onprogress', 'onloadstart'].forEach(function (p) {
+          Object.defineProperty(w, p, { configurable: true,
+            get: exportFunction(function () { return _on[p] || null; }, pw),
+            set: exportFunction(function (v) { _on[p] = v || null; }, pw) });
+        });
+      } catch (e) {}
+      origAdd('loadstart', function () { _emit('loadstart'); });
+      origAdd('progress', function () { _emit('progress'); });
+      origAdd('abort', function () { if (_done || _pausing) return; _done = true; _emit('readystatechange'); _emit('abort'); _emit('loadend'); });
+      origAdd('readystatechange', function () {
+        var rs = xhr.readyState;
+        if (rs < 4) { _emit('readystatechange'); return; }
+        if (_done || _pausing) return;
+        var st = xhr.status; var respHeaders = _readRespHeaders();
+        var rtype = xhr.responseType; var textual = (rtype === '' || rtype === 'text');
+        var body = textual ? (xhr.responseText || '') : '';
+        var _irRule = interceptRespMatch(_url, _method, _reqBody);
+        var _ir = _irRule || (!!netGlobalRespInterceptEnabled && (!!netGlobalInterceptNoise || !isNoiseBeforeSend(_url, _method, _reqBody, _reqHeaders)));
+        var _bpr = bpMatch(_url);
+        var respStop = st !== 0 && textual && ((!!_bpr && (_bpr.stage === 'resp' || _bpr.stage === 'both')) || _ir);
+        var respVia = _ir ? 'intercept' : 'breakpoint';
+        if (respStop) {
+          _pausing = true;
+          sendNet({ type: 'resp', reqId: _reqId, status: st, respHeaders: respHeaders, respBody: body.slice(0, 102400), duration: Date.now() - _t0 });
+          waitRespBp(_reqId, st, respHeaders, body, respVia).then(function (r) {
+            _pausing = false; _done = true;
+            if (r.action === 'abort') {
+              sendNet({ type: 'resp', reqId: _reqId, status: 0, error: '响应已被中止', duration: Date.now() - _t0 });
+              _emit('readystatechange'); _emit('error'); _emit('loadend'); return;
+            }
+            var nb = (r.respBody != null) ? r.respBody : body; var ns = r.status || st; var nh = stripCL(Object.assign({}, r.respHeaders || respHeaders));
+            var rb = nullBodyStatus(ns) ? '' : nb;
+            try { Object.defineProperty(w, 'status', { configurable: true, get: exportFunction(function () { return ns; }, pw) }); } catch (e) {}
+            try { Object.defineProperty(w, 'responseText', { configurable: true, get: exportFunction(function () { return rb; }, pw) }); } catch (e) {}
+            try { Object.defineProperty(w, 'response', { configurable: true, get: exportFunction(function () { return rb; }, pw) }); } catch (e) {}
+            try { Object.defineProperty(w, 'getAllResponseHeaders', { configurable: true, value: exportFunction(function () { return Object.keys(nh).map(function (k) { return k + ': ' + nh[k]; }).join('\r\n'); }, pw) }); } catch (e) {}
+            try { Object.defineProperty(w, 'getResponseHeader', { configurable: true, value: exportFunction(function (k) { var t = String(k).toLowerCase(), f = null; Object.keys(nh).forEach(function (h) { if (h.toLowerCase() === t) f = nh[h]; }); return f; }, pw) }); } catch (e) {}
+            _emit('readystatechange'); _emit('load'); _emit('loadend');
+          });
+          return;
+        }
+        _done = true;
+        sendNet({ type: 'resp', reqId: _reqId, status: st, respHeaders: respHeaders, respBody: body.slice(0, 102400), duration: Date.now() - _t0 });
+        _emit('readystatechange');
+        if (st === 0) { _emit('error'); } else { _emit('load'); }
+        _emit('loadend');
+      });
       exportFunction(function (method, url) { _method = method.toUpperCase(); _url = url; return xhr.open.apply(xhr, arguments); }, xhr, { defineAs: 'open' });
       exportFunction(function (k, v) { _reqHeaders[k] = v; return xhr.setRequestHeader(k, v); }, xhr, { defineAs: 'setRequestHeader' });
       exportFunction(function (body) {
@@ -1319,37 +1422,17 @@
             respHeaders: { 'x-mock': '1' }, respBody: _mb, duration: Date.now() - _t0 });
           // 用 wrappedJSObject 在 page world 上下文里伪造 readyState/status/responseText 并派发事件
           try {
-            var w = xhr.wrappedJSObject || xhr;
             Object.defineProperty(w, 'readyState', { configurable: true, get: exportFunction(function () { return 4; }, pw) });
             Object.defineProperty(w, 'status', { configurable: true, get: exportFunction(function () { return _ms; }, pw) });
             Object.defineProperty(w, 'responseText', { configurable: true, get: exportFunction(function () { return _mb; }, pw) });
             Object.defineProperty(w, 'response', { configurable: true, get: exportFunction(function () { return _mb; }, pw) });
+            Object.defineProperty(w, 'getAllResponseHeaders', { configurable: true, value: exportFunction(function () { return 'x-mock: 1'; }, pw) });
           } catch (e) {}
-          pw.setTimeout(exportFunction(function () {
-            try { if (xhr.onreadystatechange) xhr.onreadystatechange(); } catch (e) {}
-            try { xhr.dispatchEvent(new pw.Event('readystatechange')); } catch (e) {}
-            try { xhr.dispatchEvent(new pw.Event('load')); } catch (e) {}
-            try { if (xhr.onload) xhr.onload(); } catch (e) {}
-            try { if (xhr.onloadend) xhr.onloadend(); } catch (e) {}
-          }, pw), 0);
+          _done = true;
+          pw.setTimeout(exportFunction(function () { _emit('readystatechange'); _emit('load'); _emit('loadend'); }, pw), 0);
           return;
         }
-        var doSend = function () {
-          xhr.addEventListener('readystatechange', function () {
-            if (xhr.readyState !== 4) return;
-            var respHeaders = {};
-            try {
-              (xhr.getAllResponseHeaders() || '').split('\r\n').forEach(function (l) {
-                var i = l.indexOf(':'); if (i < 0) return;
-                respHeaders[l.slice(0, i).trim()] = l.slice(i + 1).trim();
-              });
-            } catch (e) {}
-            sendNet({ type: 'resp', reqId: _reqId, status: xhr.status,
-              respHeaders: respHeaders, respBody: (xhr.responseText || '').slice(0, 102400),
-              duration: Date.now() - _t0 });
-          });
-          xhr.send(body);
-        };
+        var doSend = function () { xhr.send(body); };
         var thr = pw.__bhThrottle;
         var d = (thr && thr.enabled && thr.latencyMs > 0) ? thr.latencyMs : 0;
         var fireSend = function () { if (d > 0) { setTimeout(doSend, d); } else { doSend(); } };
@@ -2662,6 +2745,13 @@
 	    return /json|graphql/.test(ct) || /^[\[{]/.test(text);
 	  }
 
+	  function decodeUnicodeEscapes(text) {
+	    if (text.indexOf('\\u') === -1) return text;
+	    return text.replace(/\\u([0-9a-fA-F]{4})/g, function (m, hex) {
+	      return String.fromCharCode(parseInt(hex, 16));
+	    });
+	  }
+
 	  function formatBodyForDisplay(body, headers) {
 	    if (body == null) return '(无)';
 	    var text = String(body);
@@ -2669,7 +2759,7 @@
 	    if (isJsonLikeBody(text, headers)) {
 	      try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) {}
 	    }
-	    return text;
+	    return decodeUnicodeEscapes(text);
 	  }
 
 	  function removeHeaderCI(headers, name) {
@@ -3559,8 +3649,9 @@
 	    if (!btn) return;
 	    var total = netInterceptQueue.length + netRespInterceptQueue.length;
 	    var suffix = total ? ' ' + total : '';
-	    btn.textContent = (netGlobalInterceptEnabled ? '● ' : '○ ') + '拦截' + suffix;
-	    btn.style.color = netGlobalInterceptEnabled ? '#dc2626' : '#888';
+	    var anyOn = netGlobalInterceptEnabled || netGlobalRespInterceptEnabled;
+	    btn.textContent = (anyOn ? '● ' : '○ ') + '拦截' + suffix;
+	    btn.style.color = anyOn ? '#dc2626' : '#888';
 	  }
 
 	  function updateRulesBtn() {
@@ -3839,10 +3930,18 @@
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
 	    var interceptBtn = bar.querySelector('#bh-intercept-btn');
 	    interceptBtn.addEventListener('click', function () {
-	      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
-	      syncGlobalInterceptEnabled();
-	      if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
-	      if (!netGlobalInterceptEnabled && netRespInterceptQueue.length) releaseAllRespIntercepts();
+	      var anyOn = netGlobalInterceptEnabled || netGlobalRespInterceptEnabled;
+	      if (anyOn) {
+	        netGlobalInterceptEnabled = false;
+	        netGlobalRespInterceptEnabled = false;
+	        syncGlobalInterceptEnabled();
+	        syncGlobalRespInterceptEnabled();
+	        if (netInterceptQueue.length) releaseAllIntercepts();
+	        if (netRespInterceptQueue.length) releaseAllRespIntercepts();
+	      } else {
+	        netGlobalInterceptEnabled = true;
+	        syncGlobalInterceptEnabled();
+	      }
 	      saveNetConfig();
 	      updateInterceptBtn();
 	      renderNetList();
