@@ -18,8 +18,31 @@
   ],
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "core/utils.js",
+        "core/config.js",
+        "replace/apply.js",
+        "interceptor/fetch_page.js",
+        "interceptor/xhr_page.js",
+        "interceptor/xhr_isolated.js",
+        "interceptor/fetch_isolated.js",
+        "interceptor/index.js",
+        "breakpoint/index.js",
+        "breakpoint/request.js",
+        "breakpoint/response.js",
+        "replace/rules.js",
+        "panel/index.js",
+        "panel/render.js",
+        "panel/detail.js",
+        "panel/toolbar.js",
+        "extensions/presets/index.js",
+        "extensions/index.js",
+        "content.js"
+      ],
       "run_at": "document_start",
       "all_frames": false
     }

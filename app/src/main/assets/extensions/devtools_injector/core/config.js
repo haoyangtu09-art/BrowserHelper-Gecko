@@ -1,0 +1,104 @@
+// Network state and bhNetConfig persistence.
+// ── 网络拦截层 ───────────────────────────────────────────────────────────────
+var netRequests = [];   // 最近 200 条
+var netEnabled = true;
+var netPanelVisible = false;
+var netBreakpoints = []; // [{pattern, id}]
+var netMockRules = [];   // [{pattern, status, headers, body}]
+var netThrottle = { enabled: false, latencyMs: 0, kbps: 0 };
+var netPendingBreaks = {}; // reqId -> {resolve, reject, req}
+
+var NET_CONFIG_KEY = 'bhNetConfig';
+
+function saveNetConfig() {
+  var st = storageLocal();
+  if (!st || !st.set) return;
+  try {
+    st.set({ bhNetConfig: {
+      interceptMaster: netInterceptMaster,
+      scopeReq: netScopeReq,
+      scopeResp: netScopeResp,
+      scopeNoise: netScopeNoise,
+      replaceScope: netReplaceScope,
+      filterSuppressResp: netScopeFilterSuppressResp,
+      plainProbe: netPlainProbeEnabled,
+      hideTunnelNoise: netHideTunnelNoise,
+      payloadOnly: netPayloadOnly,
+      replaceEnabled: netReplaceEnabled,
+    }}).catch(function () {});
+  } catch (e) {}
+  // 同步写入 sessionStorage 快照，供导航后 document_start 阶段即时恢复（不等 storage.local 异步）
+  try {
+    sessionStorage.setItem('__bhNetConfigCache', JSON.stringify({
+      interceptMaster: netInterceptMaster,
+      scopeReq: netScopeReq,
+      scopeResp: netScopeResp,
+      scopeNoise: netScopeNoise,
+      filterSuppressResp: netScopeFilterSuppressResp,
+      replaceScope: netReplaceScope,
+    }));
+  } catch (e) {}
+}
+
+function loadNetConfig(cb) {
+  var st = storageLocal();
+  if (!st || !st.get) { if (cb) cb(); return; }
+  try {
+    st.get(NET_CONFIG_KEY).then(function (res) {
+      var cfg = res && res[NET_CONFIG_KEY];
+      if (cfg) {
+        if ('interceptMaster' in cfg || 'scopeReq' in cfg) {
+          netInterceptMaster = !!cfg.interceptMaster;
+          netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
+          netScopeResp = !!cfg.scopeResp;
+          netScopeNoise = !!cfg.scopeNoise;
+        } else {
+          // 兼容旧配置：旧版无主开关，req/resp 各自即开即拦
+          netInterceptMaster = !!cfg.globalIntercept || !!cfg.globalRespIntercept;
+          netScopeReq = !!cfg.globalIntercept;
+          netScopeResp = !!cfg.globalRespIntercept;
+          netScopeNoise = !!cfg.globalInterceptNoise;
+        }
+        recomputeIntercept();
+        if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
+        else netReplaceScope = 'both';
+        if ('filterSuppressResp' in cfg) netScopeFilterSuppressResp = !!cfg.filterSuppressResp;
+        netPlainProbeEnabled = !!cfg.plainProbe;
+        netHideTunnelNoise = !!cfg.hideTunnelNoise;
+        netPayloadOnly = !!cfg.payloadOnly;
+        netReplaceEnabled = !!cfg.replaceEnabled;
+      }
+      if (cb) cb();
+    }).catch(function () { if (cb) cb(); });
+  } catch (e) { if (cb) cb(); }
+}
+
+// document_start 时提前注入拦截器（不依赖 DOM），让页面第一个请求就能被捕获
+function earlyInjectInterceptor() {
+  // isolated world：exportFunction 直接操作 page world，完全不需要 DOM
+  if (typeof exportFunction !== 'undefined' && typeof window.wrappedJSObject !== 'undefined') {
+    injectInterceptorViaExportFunction();
+    return;
+  }
+  // page world：需要往 DOM 插 <script>。document_start 时 documentElement 存在但 head 可能没有，
+  // runInPage 内部已用 document.head || document.documentElement 兜底，可以直接调用。
+  runInPage(INTERCEPT_JS);
+}
+
+// 从 sessionStorage 快照同步恢复拦截配置，用于 document_start 阶段即时注入（无需等 storage.local）
+function loadNetConfigFromCache() {
+  try {
+    var cfg = JSON.parse(sessionStorage.getItem('__bhNetConfigCache') || 'null');
+    if (!cfg) return;
+    if ('interceptMaster' in cfg) {
+      netInterceptMaster = !!cfg.interceptMaster;
+      netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
+      netScopeResp = !!cfg.scopeResp;
+      netScopeNoise = !!cfg.scopeNoise;
+    }
+    recomputeIntercept();
+    if ('filterSuppressResp' in cfg) netScopeFilterSuppressResp = !!cfg.filterSuppressResp;
+    if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
+    else netReplaceScope = 'both';
+  } catch (e) {}
+}
