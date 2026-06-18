@@ -923,10 +923,10 @@
     } else if (d.type === 'bpResolve') {
       // isolated 模式：断点等待在 content world，直接 resolve（page 模式拦截器自己监听）
       var fn = _bpIsoPending[d.reqId];
-      if (fn) { delete _bpIsoPending[d.reqId]; fn(d); }
+      if (fn) { delete _bpIsoPending[d.reqId]; (fn.resolve || fn)(d); }
     } else if (d.type === 'respResolve') {
       var rf = _respBpIsoPending[d.reqId];
-      if (rf) { delete _respBpIsoPending[d.reqId]; rf(d); }
+      if (rf) { delete _respBpIsoPending[d.reqId]; (rf.resolve || rf)(d); }
     } else if (d.type === 'plain') {
       recordPlainCandidate(d);
     }
@@ -1235,14 +1235,14 @@
 	    }
     function waitBp(reqId, url, method, reqHeaders, reqBody, mode) {
       return new Promise(function (resolve) {
-        _bpIsoPending[reqId] = resolve;
+        _bpIsoPending[reqId] = { resolve: resolve, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody };
         sendNet({ type: 'breakpoint', reqId: reqId, url: url, method: method, reqHeaders: reqHeaders, reqBody: reqBody, mode: mode || 'breakpoint' });
       });
     }
     // 响应断点（isolated）：content-world Promise 等待编辑结果
     function waitRespBp(reqId, status, respHeaders, respBody, via) {
       return new Promise(function (resolve) {
-        _respBpIsoPending[reqId] = resolve;
+        _respBpIsoPending[reqId] = { resolve: resolve, status: status, respHeaders: respHeaders, respBody: respBody };
         sendNet({ type: 'respBreakpoint', reqId: reqId, status: status, respHeaders: respHeaders, respBody: respBody, via: via || 'breakpoint' });
       });
     }
@@ -2673,6 +2673,34 @@
 	        respHeaders: d.respHeaders || {},
 	        respBody: d.respBody == null ? '' : d.respBody,
 	      });
+	    });
+	  }
+
+	  function releaseAllPendingIso() {
+	    Object.keys(_bpIsoPending).forEach(function (reqId) {
+	      var p = _bpIsoPending[reqId];
+	      delete _bpIsoPending[reqId];
+	      try {
+	        (p.resolve || p)({
+	          action: 'continue',
+	          url: p && p.url,
+	          method: String((p && p.method) || 'GET').toUpperCase(),
+	          reqHeaders: (p && p.reqHeaders) || {},
+	          reqBody: (p && p.reqBody) == null ? '' : p.reqBody,
+	        });
+	      } catch (e) {}
+	    });
+	    Object.keys(_respBpIsoPending).forEach(function (reqId) {
+	      var p = _respBpIsoPending[reqId];
+	      delete _respBpIsoPending[reqId];
+	      try {
+	        (p.resolve || p)({
+	          action: 'continue',
+	          status: (p && p.status) == null ? 200 : p.status,
+	          respHeaders: (p && p.respHeaders) || {},
+	          respBody: (p && p.respBody) == null ? '' : p.respBody,
+	        });
+	      } catch (e) {}
 	    });
 	  }
 
@@ -4642,9 +4670,12 @@
       syncGlobalInterceptNoise();
       syncReplaceScope();
       syncFilterSuppressResp();
-      // 释放早期阶段拦截到的所有请求（UI 尚未就绪，无法手动放行；直接透传原始请求）
+      // 释放早期阶段拦截到的所有请求（UI 尚未就绪，无法手动放行；直接透传原始请求）。
+      // releaseAllIntercepts 只清可见队列；releaseAllPendingIso 兜底清 isolated 世界里
+      // 已挂起但消息尚未入队的 Promise，否则 disableInterceptor 后页面 fetch 永远 pending → reload 循环。
       releaseAllIntercepts();
       releaseAllRespIntercepts();
+      releaseAllPendingIso();
       // 卸载早期拦截器，还原原生 XHR/fetch，使 eruda bundle 可安全 patch 原型
       disableInterceptor();
       loadPageEruda(function () {
@@ -4654,30 +4685,25 @@
           var _pw = window.wrappedJSObject;
           if (_pw) { _pw.__bhRestoreFetch = _pw.fetch; _pw.__bhRestoreXHR = _pw.XMLHttpRequest; }
         } catch (e) {}
-        earlyInjectInterceptor();
-        syncGlobalInterceptEnabled();
-        syncGlobalRespInterceptEnabled();
-        syncGlobalInterceptNoise();
-        syncReplaceScope();
-        syncFilterSuppressResp();
-        syncReplaceRules();
+        // 不在这里重装阻塞型拦截器：UI 尚未初始化，重新拦截会卡住触发 load 的请求，造成 reload 死锁。
+        // 让 toggle()->installI18n() 在 UI 可用后统一 injectInterceptor()+sync*。
+        restoreUiSoon();
       });
     });
 
-    // ─ 阶段 3：eruda UI 初始化必须等页面渲染足够完成，否则 entry button 没尺寸导致 verifyEntry 超时
-    function doRestore() {
-      if (document.readyState === 'complete') {
+    // ─ 阶段 3：不要等 load；load 可能正被拦截请求阻塞。DOMContentLoaded 后尽快初始化 UI。
+    function restoreUiSoon() {
+      function run() {
+        if (erudaActive) return;
         toggle();
-      } else {
-        window.addEventListener('load', function () { toggle(); }, { once: true });
       }
-    }
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () {
-        setTimeout(doRestore, 300);
-      }, { once: true });
-    } else {
-      setTimeout(doRestore, 300);
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+          setTimeout(run, 50);
+        }, { once: true });
+      } else {
+        setTimeout(run, 50);
+      }
     }
   }
 })();
