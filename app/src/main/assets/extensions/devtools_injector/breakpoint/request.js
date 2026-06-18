@@ -12,7 +12,16 @@ function bpResolve(reqId, payload) {
   payload.__bhNet = true;
   payload.type = 'bpResolve';
   payload.reqId = reqId;
-  // 回复 page world（拦截器在那里 await）。content/page 共享 window 的 message 通道
+
+  // 检查是否来自原生代理（_proxyFlowId 标记）
+  var entry = netReqMap[reqId];
+  if (entry && entry._proxyFlowId) {
+    // 来自代理：通过 proxyResolveReq 返回给代理
+    proxyResolveReq(reqId, payload.action, payload.url, payload.method, payload.reqHeaders, payload.reqBody);
+    return;
+  }
+
+  // 来自页内拦截器：回复 page world（拦截器在那里 await）
   try { window.postMessage(payload, '*'); } catch (e) {}
 }
 

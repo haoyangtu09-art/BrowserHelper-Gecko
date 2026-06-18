@@ -38,6 +38,8 @@ function saveNetConfig() {
       replaceScope: netReplaceScope,
     }));
   } catch (e) {}
+  // 同步配置到原生代理
+  if (typeof proxySendConfig === 'function') proxySendConfig();
 }
 
 function loadNetConfig(cb) {
@@ -73,16 +75,24 @@ function loadNetConfig(cb) {
   } catch (e) { if (cb) cb(); }
 }
 
-// document_start 时提前注入拦截器（不依赖 DOM），让页面第一个请求就能被捕获
-function earlyInjectInterceptor() {
-  // isolated world：exportFunction 直接操作 page world，完全不需要 DOM
-  if (typeof exportFunction !== 'undefined' && typeof window.wrappedJSObject !== 'undefined') {
-    injectInterceptorViaExportFunction();
-    return;
+// Phase 1+：页内拦截已废弃，由原生 MITM 代理处理
+function recomputeIntercept() {
+  // 重新计算拦截标志，同步到代理
+  // （旧逻辑是同步到 page world，现在改为同步到代理）
+  if (typeof proxySendConfig === 'function') {
+    proxySendConfig();
   }
-  // page world：需要往 DOM 插 <script>。document_start 时 documentElement 存在但 head 可能没有，
-  // runInPage 内部已用 document.head || document.documentElement 兜底，可以直接调用。
-  runInPage(INTERCEPT_JS);
+}
+
+function syncReplaceRules() {
+  // Phase 1+：替换规则由代理处理，同步到代理
+  if (typeof proxyOnConfigChanged === 'function') {
+    proxyOnConfigChanged();
+  }
+}
+
+function earlyInjectInterceptor() {
+  // NOOP - 拦截由代理在网络层处理
 }
 
 // 从 sessionStorage 快照同步恢复拦截配置，用于 document_start 阶段即时注入（无需等 storage.local）

@@ -7,10 +7,8 @@ package org.mozilla.reference.browser.devtools
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.util.Log
 import android.widget.Toast
-import org.json.JSONArray
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoPreferenceController
 import java.io.ByteArrayOutputStream
@@ -19,6 +17,7 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.KeyStore
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -130,6 +129,63 @@ object ProxyProbe {
         setInt("network.proxy.type", 0)
     }
 
+    /**
+     * Re-import the Android user CA store into Gecko's NSS trust set at runtime.
+     *
+     * `enterpriseRootsEnabled(true)` on the runtime builder gathers the store only
+     * ONCE, when the GeckoRuntime is created — so a CA the user installs AFTER cold
+     * launch (the normal flow) is never picked up, the proxy's leaf is untrusted,
+     * and the browser aborts the MITM handshake ("Failure in SSL library, usually a
+     * protocol error"). nsNSSComponent observes `security.enterprise_roots.enabled`
+     * at runtime, so toggling it false→true forces a re-gather without an app
+     * restart. Done on every proxy arm so a just-installed CA takes effect.
+     */
+    private fun reimportEnterpriseRoots() {
+        try {
+            GeckoPreferenceController.setGeckoPref(
+                "security.enterprise_roots.enabled",
+                false,
+                GeckoPreferenceController.PREF_BRANCH_USER,
+            ).accept(
+                { _ ->
+                    GeckoPreferenceController.setGeckoPref(
+                        "security.enterprise_roots.enabled",
+                        true,
+                        GeckoPreferenceController.PREF_BRANCH_USER,
+                    ).accept({ _ -> }, { e -> toast("重新导入证书失败(on): ${e?.message}") })
+                },
+                { e -> toast("重新导入证书失败(off): ${e?.message}") },
+            )
+        } catch (t: Throwable) {
+            toast("重新导入证书异常: ${t.message}")
+        }
+    }
+
+    /**
+     * True if our root CA appears trustable by NSS — i.e. its exact DER is present
+     * in the Android user CA store (alias "user:*"). Returns true (benefit of the
+     * doubt) if the store can't be read, so a diagnostic read error never blocks a
+     * possibly-working setup; only a successful read with no match returns false.
+     */
+    private fun rootCaTrustable(): Boolean {
+        val ctx = appContext ?: return true
+        return try {
+            val ourDer = MitmCa.rootCertDer(ctx)
+            val ks = KeyStore.getInstance("AndroidCAStore")
+            ks.load(null)
+            val aliases = ks.aliases()
+            while (aliases.hasMoreElements()) {
+                val alias = aliases.nextElement()
+                if (!alias.startsWith("user:")) continue
+                val cert = ks.getCertificate(alias) ?: continue
+                if (cert.encoded.contentEquals(ourDer)) return true
+            }
+            false
+        } catch (_: Throwable) {
+            true
+        }
+    }
+
     private fun toast(msg: String) {
         Log.i(TAG, msg)
         val ctx = appContext ?: return
@@ -139,13 +195,25 @@ object ProxyProbe {
     private fun start() {
         try {
             appContext?.let { MitmCa.ensureRootCa(it) }
+            // Refuse to arm an untrusted MITM: it would TLS-terminate every HTTPS
+            // request with a leaf the browser doesn't trust, aborting every
+            // handshake ("Failure in SSL library, usually a protocol error") and
+            // breaking all secure browsing. If our root CA isn't even in the OS
+            // store yet, re-importing can't help — tell the user to install it.
+            if (!rootCaTrustable()) {
+                toast("根证书未安装/不匹配：请用菜单导出「抓包前置」并在 设置→安全→安装证书→CA 证书 安装后再开启抓包")
+                return
+            }
+            // Pull the (possibly just-installed) user CA into NSS now, so trust
+            // works without an app restart. See reimportEnterpriseRoots().
+            reimportEnterpriseRoots()
             val srv = ServerSocket(0, 50, InetAddress.getByName(LOCALHOST))
             server = srv
             running = true
             val port = srv.localPort
             Thread({ acceptLoop(srv) }, "bh-proxy-accept").apply { isDaemon = true }.start()
             applyProxyPrefs(port)
-            toast("抓包代理已开启 (port=$port)。若证书刚安装，请重启 App 后再用")
+            toast("抓包代理已开启 (port=$port)。若证书刚安装，请刷新网页")
         } catch (t: Throwable) {
             running = false
             toast("抓包代理启动失败: ${t.message}")
@@ -453,29 +521,40 @@ object ProxyProbe {
         return pf
     }
 
+    // The panel sends edits in its native record shape: method/url + header
+    // object map + plain-string body (the same shape it receives in flow events).
     private fun applyEditedRequest(req: HttpMessage, edited: JSONObject) {
-        edited.optString("startLine").takeIf { it.isNotEmpty() }?.let { req.startLine = it }
-        applyEditedHeadersBody(req, edited, "req")
+        val method = edited.optString("method").ifEmpty { req.startLine.split(" ").getOrElse(0) { "GET" } }
+        val path = edited.optString("url").takeIf { it.isNotEmpty() }?.let { urlToPath(it) }
+            ?: req.startLine.split(" ").getOrElse(1) { "/" }
+        req.startLine = "$method $path HTTP/1.1"
+        edited.optJSONObject("reqHeaders")?.let { applyHeaderMap(req, it) }
+        if (edited.has("reqBody")) req.body = edited.optString("reqBody").toByteArray(Charsets.UTF_8)
+        req.fixContentLength()
     }
 
     private fun applyEditedResponse(resp: HttpMessage, edited: JSONObject) {
-        edited.optString("startLine").takeIf { it.isNotEmpty() }?.let { resp.startLine = it }
-        applyEditedHeadersBody(resp, edited, "resp")
+        val curStatus = resp.startLine.split(" ").getOrElse(1) { "200" }.toIntOrNull() ?: 200
+        val status = edited.optInt("status", curStatus)
+        resp.startLine = "HTTP/1.1 $status".trim()
+        edited.optJSONObject("respHeaders")?.let { applyHeaderMap(resp, it) }
+        if (edited.has("respBody")) resp.body = edited.optString("respBody").toByteArray(Charsets.UTF_8)
+        resp.fixContentLength()
     }
 
-    private fun applyEditedHeadersBody(m: HttpMessage, edited: JSONObject, kind: String) {
-        edited.optJSONArray("${kind}Headers")?.let { arr ->
-            m.headers.clear()
-            for (i in 0 until arr.length()) {
-                val line = arr.optString(i)
-                val idx = line.indexOf(':')
-                if (idx > 0) m.headers.add(line.substring(0, idx).trim() to line.substring(idx + 1).trim())
-            }
+    private fun applyHeaderMap(m: HttpMessage, obj: JSONObject) {
+        m.headers.clear()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            m.headers.add(k to obj.optString(k))
         }
-        if (edited.has("${kind}Body")) {
-            m.body = decodeBody(edited.optString("${kind}Body"), edited.optString("${kind}BodyEnc", "utf8"))
-            m.fixContentLength()
-        }
+    }
+
+    private fun urlToPath(url: String): String {
+        val noScheme = url.substringAfter("://", url)
+        val slash = noScheme.indexOf('/')
+        return if (slash >= 0) noScheme.substring(slash) else "/"
     }
 
     // ---- emit helpers ------------------------------------------------------
@@ -502,22 +581,15 @@ object ProxyProbe {
         emit(ev)
     }
 
+    // Emit in the panel's record shape: headers as an object map, body as a
+    // (possibly lossy for binary) UTF-8 string — matches the legacy in-page feed
+    // so the existing render/detail UI needs no body-decoding changes.
     private fun putBodyAndHeaders(obj: JSONObject, kind: String, m: HttpMessage) {
-        val arr = JSONArray()
-        m.headers.forEach { arr.put("${it.first}: ${it.second}") }
-        obj.put("${kind}Headers", arr)
-        val asUtf8 = runCatching { String(m.body, Charsets.UTF_8) }.getOrNull()
-        if (asUtf8 != null && asUtf8.toByteArray(Charsets.UTF_8).contentEquals(m.body)) {
-            obj.put("${kind}Body", asUtf8)
-            obj.put("${kind}BodyEnc", "utf8")
-        } else {
-            obj.put("${kind}Body", Base64.encodeToString(m.body, Base64.NO_WRAP))
-            obj.put("${kind}BodyEnc", "b64")
-        }
+        val h = JSONObject()
+        m.headers.forEach { h.put(it.first, it.second) }
+        obj.put("${kind}Headers", h)
+        obj.put("${kind}Body", String(m.body, Charsets.UTF_8))
     }
-
-    private fun decodeBody(s: String, enc: String): ByteArray =
-        if (enc == "b64") Base64.decode(s, Base64.NO_WRAP) else s.toByteArray(Charsets.UTF_8)
 
     // ---- string-replace rules ----------------------------------------------
 

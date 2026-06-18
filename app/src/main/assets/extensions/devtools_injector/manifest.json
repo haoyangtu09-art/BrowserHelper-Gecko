@@ -25,12 +25,7 @@
       "js": [
         "core/utils.js",
         "core/config.js",
-        "replace/apply.js",
-        "interceptor/fetch_page.js",
-        "interceptor/xhr_page.js",
-        "interceptor/xhr_isolated.js",
-        "interceptor/fetch_isolated.js",
-        "interceptor/index.js",
+        "core/proxy-feed.js",
         "breakpoint/index.js",
         "breakpoint/request.js",
         "breakpoint/response.js",

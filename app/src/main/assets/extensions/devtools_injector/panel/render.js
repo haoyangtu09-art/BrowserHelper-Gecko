@@ -61,6 +61,8 @@
 	    syncInterceptRules();
 	    updateRulesBtn();
 	    renderRulesView();
+	    // 同步规则到原生代理
+	    if (typeof proxyOnConfigChanged === 'function') proxyOnConfigChanged();
 	  }
 
 	  function loadInterceptRules() {

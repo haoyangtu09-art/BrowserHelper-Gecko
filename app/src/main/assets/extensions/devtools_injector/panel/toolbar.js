@@ -84,21 +84,15 @@ function openInterceptConfigModal() {
   }, 50);
 }
 
+// Phase 1+：Mock 和 Breakpoint 由原生代理处理，页内注入已废弃
 function injectMockRules() {
-  var rulesJson = JSON.stringify(netMockRules);
-  // isolated 模式（强 CSP）：runInPage 的 blob <script> 可能被 CSP 拦截，
-  // 直接通过 wrappedJSObject + cloneInto 写到 page world，确保拦截器能读到。
-  if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
-    try { window.wrappedJSObject.__bhMockRules = cloneInto(netMockRules, window); return; } catch (e) {}
-  }
-  runInPage('(function(){window.__bhMockRules=' + rulesJson + ';})();');
+  // NOOP - Mock 规则由代理在网络层处理
+  // 如需实现，应通过代理 API 下发规则
 }
 
 function injectBreakpoints() {
-  if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
-    try { window.wrappedJSObject.__bhBreakpoints = cloneInto(netBreakpoints, window); return; } catch (e) {}
-  }
-  runInPage('(function(){window.__bhBreakpoints=' + JSON.stringify(netBreakpoints) + ';})();');
+  // NOOP - 断点由代理在网络层处理
+  // 如需实现，应通过代理 API 下发规则
 }
 
 function bpStageLabel(s) { return s === 'resp' ? '响应' : (s === 'both' ? '请求+响应' : '请求'); }
@@ -354,7 +348,16 @@ function buildNetPanel() {
   netEnableBtn = bar.querySelector('#bh-toggle');
 
 	    netEnableBtn.addEventListener('click', function () {
-	      setNetworkCaptureEnabled(!netEnabled);
+	      // Phase 1+：拦截由代理处理，此按钮启用/禁用代理数据接收
+	      netEnabled = !netEnabled;
+	      netEnableBtn.textContent = netEnabled ? '● 监听中' : '○ 已停止';
+	      if (!netEnabled) {
+	        netRequests = [];
+	        renderNetList();
+	        renderDetail();
+	      }
+	      // 同步状态到代理
+	      if (typeof proxySendConfig === 'function') proxySendConfig();
 	    });
   bar.querySelector('#bh-clear').addEventListener('click', function () {
     netRequests = []; netPlainCandidates = []; netSelReq = null; renderNetList(); renderDetail();

@@ -11,6 +11,16 @@ function respResolve(reqId, payload) {
   payload.__bhNet = true;
   payload.type = 'respResolve';
   payload.reqId = reqId;
+
+  // 检查是否来自原生代理（_proxyFlowId 标记）
+  var entry = netReqMap[reqId];
+  if (entry && entry._proxyFlowId) {
+    // 来自代理：通过 proxyResolveResp 返回给代理
+    proxyResolveResp(reqId, payload.action, payload.status, payload.respHeaders, payload.respBody);
+    return;
+  }
+
+  // 来自页内拦截器：回复 page world
   try { window.postMessage(payload, '*'); } catch (e) {}
 }
 
