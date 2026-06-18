@@ -76,6 +76,7 @@ object ProxyProbe {
     private fun start() {
         try {
             appContext?.let { MitmCa.ensureRootCa(it) }
+            reimportEnterpriseRoots()
             val srv = ServerSocket(0, 50, InetAddress.getByName(LOCALHOST))
             server = srv
             running = true
@@ -91,6 +92,37 @@ object ProxyProbe {
         } catch (t: Throwable) {
             running = false
             toast("PROXY-SPIKE: start FAILED: ${t.message}")
+        }
+    }
+
+    /**
+     * Gecko only imports Android user-store CAs when security.enterprise_roots
+     * transitions false→true (the pref observer fires on *change*). Since the
+     * pref is persisted true after the first launch, a CA installed later is
+     * never picked up. Force a false→true cycle here so the CA the user just
+     * installed gets imported into NSS without reinstalling the app.
+     */
+    private fun reimportEnterpriseRoots() {
+        try {
+            GeckoPreferenceController.setGeckoPref(
+                "security.enterprise_roots.enabled",
+                false,
+                GeckoPreferenceController.PREF_BRANCH_USER,
+            ).accept(
+                { _ ->
+                    GeckoPreferenceController.setGeckoPref(
+                        "security.enterprise_roots.enabled",
+                        true,
+                        GeckoPreferenceController.PREF_BRANCH_USER,
+                    ).accept(
+                        { _ -> toast("PROXY-SPIKE: 已重新导入用户证书，请刷新网页再试") },
+                        { e -> toast("PROXY-SPIKE: 重新导入证书失败(on): ${e?.message}") },
+                    )
+                },
+                { e -> toast("PROXY-SPIKE: 重新导入证书失败(off): ${e?.message}") },
+            )
+        } catch (t: Throwable) {
+            toast("PROXY-SPIKE: 重新导入证书异常: ${t.message}")
         }
     }
 
