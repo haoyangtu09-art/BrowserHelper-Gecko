@@ -222,6 +222,12 @@ dependencies {
     implementation libs.jspecify
     implementation libs.kotlinx.coroutines.core
 
+    // Runtime X.509 cert minting for the local MITM debug proxy (own-device
+    // network inspector). Android's bundled BouncyCastle is the hidden
+    // com.android.org.bouncycastle package, so pull the real org.bouncycastle.
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+    implementation 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
+
     implementation libs.mozilla.browser.domains
     implementation libs.mozilla.browser.engine.gecko
     implementation libs.mozilla.browser.errorpages

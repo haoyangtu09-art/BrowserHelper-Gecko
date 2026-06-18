@@ -65,3 +65,6 @@ test_artifacts/
 google-cloud-sdk/
 *.jar
 *.gz
+
+# Downloaded CI build APKs
+artifacts/

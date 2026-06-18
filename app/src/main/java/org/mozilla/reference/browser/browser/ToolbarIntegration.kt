@@ -6,6 +6,8 @@ package org.mozilla.reference.browser.browser
 
 import android.content.Context
 import android.content.Intent
+import android.security.KeyChain
+import android.widget.Toast
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -53,6 +55,7 @@ import org.mozilla.reference.browser.addons.AddonsActivity
 import org.mozilla.reference.browser.cookie.CookieAction
 import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.devtools.DevToolsHelper
+import org.mozilla.reference.browser.devtools.MitmCa
 import org.mozilla.reference.browser.devtools.ProxyProbe
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
@@ -197,6 +200,19 @@ class ToolbarIntegration(
             },
             TextMenuCandidate(text = "代理探针 开/关") {
                 ProxyProbe.toggle(context)
+            },
+            TextMenuCandidate(text = "安装抓包根证书") {
+                try {
+                    val der = MitmCa.rootCertDer(context)
+                    val intent = KeyChain.createInstallIntent().apply {
+                        putExtra(KeyChain.EXTRA_CERTIFICATE, der)
+                        putExtra(KeyChain.EXTRA_NAME, "BrowserHelper MITM CA")
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                } catch (t: Throwable) {
+                    Toast.makeText(context, "生成/安装根证书失败: ${t.message}", Toast.LENGTH_LONG).show()
+                }
             },
             TextMenuCandidate(text = "设置") {
                 val intent = Intent(context, SettingsActivity::class.java)

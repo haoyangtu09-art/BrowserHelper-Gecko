@@ -16,6 +16,8 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * Phase 0 spike (MITM-proxy plan): a toggleable, transparent local proxy that
@@ -38,6 +40,8 @@ object ProxyProbe {
     @Volatile private var firstConnectReported = false
     @Volatile private var firstHttpReported = false
     @Volatile private var firstUpstreamErrReported = false
+    @Volatile private var firstMitmReported = false
+    @Volatile private var firstMitmErrReported = false
     private var appContext: Context? = null
 
     @Synchronized
@@ -71,12 +75,15 @@ object ProxyProbe {
 
     private fun start() {
         try {
+            appContext?.let { MitmCa.ensureRootCa(it) }
             val srv = ServerSocket(0, 50, InetAddress.getByName(LOCALHOST))
             server = srv
             running = true
             firstConnectReported = false
             firstHttpReported = false
             firstUpstreamErrReported = false
+            firstMitmReported = false
+            firstMitmErrReported = false
             val port = srv.localPort
             Thread({ acceptLoop(srv) }, "bh-proxy-accept").apply { isDaemon = true }.start()
             applyProxyPrefs(port)
@@ -121,20 +128,10 @@ object ProxyProbe {
                     firstConnectReported = true
                     toast("PROXY-SPIKE: 收到 CONNECT $hostPort —— GeckoView 已走本地代理 ✅")
                 }
-                val upstream = try {
-                    Socket(host, pPort)
-                } catch (e: Throwable) {
-                    if (!firstUpstreamErrReported) {
-                        firstUpstreamErrReported = true
-                        toast("PROXY-SPIKE: 上游连接失败 $hostPort: ${e.message}")
-                    }
-                    try { cout.write("HTTP/1.1 502 Bad Gateway\r\n\r\n".toByteArray()); cout.flush() } catch (_: Throwable) {}
-                    client.close(); return
-                }
+                // Tell the browser the tunnel is up, then MITM the TLS inside it.
                 cout.write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray())
                 cout.flush()
-                pump(cin, upstream.getOutputStream())
-                pump(upstream.getInputStream(), cout)
+                mitm(client, host, pPort)
             } else {
                 // Plain HTTP: best-effort blind forward to Host:80.
                 val host = headerValue(head, "Host")
@@ -153,6 +150,71 @@ object ProxyProbe {
             }
         } catch (_: Throwable) {
             try { client.close() } catch (_: Throwable) {}
+        }
+    }
+
+    // Phase 0b: terminate TLS inside the CONNECT tunnel. We present a leaf cert
+    // for [host] (signed by our installed root CA) to the browser, open a real
+    // TLS connection upstream, then relay the now-plaintext HTTP both ways —
+    // sniffing the first request line to prove decryption works. Forces HTTP/1.1
+    // (no ALPN h2 advertised). This only inspects the user's own traffic on the
+    // user's own device; nothing is exfiltrated.
+    private fun mitm(client: Socket, host: String, port: Int) {
+        val tlsClient = try {
+            val ctx = MitmCa.serverContextFor(host)
+            (ctx.socketFactory.createSocket(client, host, port, true) as SSLSocket).apply {
+                useClientMode = false
+                startHandshake()
+            }
+        } catch (e: Throwable) {
+            if (!firstMitmErrReported) {
+                firstMitmErrReported = true
+                toast("PROXY-SPIKE: 与浏览器 TLS 握手失败 $host: ${e.message}（是否已安装并信任根证书？）")
+            }
+            try { client.close() } catch (_: Throwable) {}
+            return
+        }
+        val upstream = try {
+            (SSLSocketFactory.getDefault().createSocket(host, port) as SSLSocket).apply { startHandshake() }
+        } catch (e: Throwable) {
+            if (!firstUpstreamErrReported) {
+                firstUpstreamErrReported = true
+                toast("PROXY-SPIKE: 上游 TLS 失败 $host: ${e.message}")
+            }
+            try { tlsClient.close() } catch (_: Throwable) {}
+            return
+        }
+        try {
+            val cIn = tlsClient.inputStream
+            val cOut = tlsClient.outputStream
+            val uIn = upstream.inputStream
+            val uOut = upstream.outputStream
+            val line = readReqLine(cIn)
+            if (line != null) {
+                if (!firstMitmReported) {
+                    firstMitmReported = true
+                    toast("PROXY-SPIKE: 已解密 HTTPS ✅ $host ▶ ${line.toString(Charsets.ISO_8859_1).trim()}")
+                }
+                uOut.write(line)
+                uOut.flush()
+            }
+            pump(cIn, uOut)
+            pump(uIn, cOut)
+        } catch (_: Throwable) {
+            try { tlsClient.close() } catch (_: Throwable) {}
+            try { upstream.close() } catch (_: Throwable) {}
+        }
+    }
+
+    // Read one line (up to and including \n) from a now-plaintext stream.
+    private fun readReqLine(input: InputStream): ByteArray? {
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (out.size() > 0) out.toByteArray() else null
+            out.write(b)
+            if (b == '\n'.code) return out.toByteArray()
+            if (out.size() > 16 * 1024) return out.toByteArray()
         }
     }
 
