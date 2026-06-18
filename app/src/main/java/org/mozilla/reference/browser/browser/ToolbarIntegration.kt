@@ -53,6 +53,7 @@ import org.mozilla.reference.browser.addons.AddonsActivity
 import org.mozilla.reference.browser.cookie.CookieAction
 import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.devtools.DevToolsHelper
+import org.mozilla.reference.browser.devtools.ProxyProbe
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
 import org.mozilla.reference.browser.settings.SettingsActivity
@@ -193,6 +194,9 @@ class ToolbarIntegration(
             },
             TextMenuCandidate(text = "开发者工具") {
                 DevToolsHelper.toggle(context)
+            },
+            TextMenuCandidate(text = "代理探针 开/关") {
+                ProxyProbe.toggle(context)
             },
             TextMenuCandidate(text = "设置") {
                 val intent = Intent(context, SettingsActivity::class.java)
