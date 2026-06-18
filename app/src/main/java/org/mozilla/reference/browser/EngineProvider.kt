@@ -5,6 +5,10 @@
 package org.mozilla.reference.browser
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
 import mozilla.components.browser.engine.gecko.GeckoEngine
 import mozilla.components.browser.engine.gecko.fetch.GeckoViewFetchClient
 import mozilla.components.concept.engine.DefaultSettings
@@ -12,10 +16,12 @@ import mozilla.components.concept.engine.Engine
 import mozilla.components.concept.fetch.Client
 import mozilla.components.feature.webcompat.WebCompatFeature
 import mozilla.components.lib.crash.handler.CrashHandlerService
+import org.mozilla.geckoview.GeckoPreferenceController
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoRuntimeSettings
 
 object EngineProvider {
+    private const val SPIKE_TAG = "BHProxySpike"
     private var runtime: GeckoRuntime? = null
 
     @Synchronized
@@ -36,9 +42,36 @@ object EngineProvider {
             builder.displayDensityOverride(deviceDensity * 0.85f)
 
             runtime = GeckoRuntime.create(context, builder.build())
+
+            // Phase 0 spike (MITM-proxy plan): confirm we can set arbitrary Gecko
+            // prefs programmatically on this GeckoView version. enterprise_roots
+            // makes Gecko's NSS also trust the Android system CA store — a
+            // prerequisite for the planned local TLS-terminating proxy. Harmless
+            // to normal browsing; result is surfaced as a Toast for on-device check.
+            verifyPrefMechanism(context.applicationContext)
         }
 
         return runtime!!
+    }
+
+    private fun verifyPrefMechanism(appContext: Context) {
+        val main = Handler(Looper.getMainLooper())
+        fun report(msg: String) {
+            Log.i(SPIKE_TAG, msg)
+            main.post { Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show() }
+        }
+        try {
+            GeckoPreferenceController.setGeckoPref(
+                "security.enterprise_roots.enabled",
+                true,
+                GeckoPreferenceController.PREF_BRANCH_USER,
+            ).accept(
+                { _ -> report("PROXY-SPIKE: enterprise_roots set OK") },
+                { e -> report("PROXY-SPIKE: set FAILED: ${e?.message}") },
+            )
+        } catch (t: Throwable) {
+            report("PROXY-SPIKE: API threw: ${t.message}")
+        }
     }
 
     fun createEngine(
