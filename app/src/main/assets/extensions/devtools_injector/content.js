@@ -474,6 +474,7 @@
 	      '  window.__bhRestoreFetch=window.__bhRestoreFetch||window.fetch;',
 	      '  window.__bhRestoreXHR=window.__bhRestoreXHR||window.XMLHttpRequest;',
 	      '  window.__bhGlobalInterceptEnabled=!!window.__bhGlobalInterceptEnabled;',
+	      '  window.__bhGlobalRespInterceptEnabled=!!window.__bhGlobalRespInterceptEnabled;',
 	      '  window.__bhInterceptRules=window.__bhInterceptRules||[];',
 
       // ── 工具 ──
@@ -647,7 +648,8 @@
       '    var runDelay=function(){return delay>0?new Promise(function(res){setTimeout(function(){res(doFetch());},delay);}):doFetch();};',
       // 命中断点：暂停，等编辑结果。修改后的 URL/头/体替换原参数后再发
 	      '    var _bp=bpMatch(url);',
-	      '    var _ir=interceptRespMatch(url,method,reqBody);',
+	      '    var _irRule=interceptRespMatch(url,method,reqBody);',
+	      '    var _ir=_irRule||(!!window.__bhGlobalRespInterceptEnabled&&!isNoiseReq(url,method,reqBody,reqHeaders));',
 	      '    var respStop=(!!_bp&&(_bp.stage==="resp"||_bp.stage==="both"))||_ir;',
 	      '    var respVia=_ir?"intercept":"breakpoint";',
 	      '    var bpMode=(_bp&&_bp.stage!=="resp")?"breakpoint":(checkGlobalIntercept(url,method,reqBody,reqHeaders)?"intercept":"");',
@@ -1214,7 +1216,8 @@
         }, pw));
       }
       var _bp = bpMatch(url);
-      var _ir = interceptRespMatch(url, method, reqBody);
+      var _irRule = interceptRespMatch(url, method, reqBody);
+      var _ir = _irRule || (!!netGlobalRespInterceptEnabled && !isNoiseBeforeSend(url, method, reqBody, reqHeaders));
       var respStop = (!!_bp && (_bp.stage === 'resp' || _bp.stage === 'both')) || _ir;
       var respVia = _ir ? 'intercept' : 'breakpoint';
       // 响应断点（isolated）：读完整 body（流式被攒成整段），暂停编辑后构造 pw.Response 放行。
@@ -1376,6 +1379,13 @@
 	    runInPage('(function(){window.__bhGlobalInterceptEnabled=' + (netGlobalInterceptEnabled ? 'true' : 'false') + ';})();');
 	  }
 
+	  function syncGlobalRespInterceptEnabled() {
+	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
+	      try { window.wrappedJSObject.__bhGlobalRespInterceptEnabled = !!netGlobalRespInterceptEnabled; return; } catch (e) {}
+	    }
+	    runInPage('(function(){window.__bhGlobalRespInterceptEnabled=' + (netGlobalRespInterceptEnabled ? 'true' : 'false') + ';})();');
+	  }
+
 	  function syncReplaceRules() {
 	    var active = netReplaceEnabled ? netReplaceRules.filter(function (r) { return r.enabled; }) : [];
 	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
@@ -1407,6 +1417,7 @@
 	    }
 	    injectInterceptor();
 	    syncGlobalInterceptEnabled();
+	    syncGlobalRespInterceptEnabled();
 	    syncInterceptRules();
 	    injectBreakpoints();
 	    injectMockRules();
@@ -1879,6 +1890,7 @@
   var netPayloadOnly = false;
   var netPlainProbeEnabled = false;
   var netGlobalInterceptEnabled = false;
+  var netGlobalRespInterceptEnabled = false;
   var netFilterMenuOpen = false;
   var netExtraMenuOpen = false;
   var netReplaceRules = [];
@@ -3382,6 +3394,42 @@
     }, 50);
   }
 
+  // 拦截配置弹窗（长按"拦截"按钮打开）：全局勾选拦截发出去的请求 / 拦截服务器响应。
+  function openInterceptConfigModal() {
+    function row(label, on, act) {
+      return '<button data-icfg="' + act + '" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;font-size:13px;padding:8px 6px;margin-bottom:4px;background:none;border:1px solid #444;border-radius:4px;color:inherit;">' +
+        '<span style="font-size:15px;">' + (on ? '☑' : '☐') + '</span>' +
+        '<span>' + escHtml(label) + '</span></button>';
+    }
+    openModal('拦截配置',
+      row('拦截发出去的请求', netGlobalInterceptEnabled, 'req') +
+      row('拦截服务器响应', netGlobalRespInterceptEnabled, 'resp') +
+      '<div style="color:#888;font-size:11px;margin-top:6px;">开启后所有请求/响应将被暂停，需在面板里手动放行。</div>',
+      function () { closeModal(); }
+    );
+    setTimeout(function () {
+      if (!netModal) return;
+      Array.prototype.forEach.call(netModal.querySelectorAll('[data-icfg]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var act = btn.getAttribute('data-icfg');
+          if (act === 'req') {
+            netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
+            syncGlobalInterceptEnabled();
+            if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
+          } else {
+            netGlobalRespInterceptEnabled = !netGlobalRespInterceptEnabled;
+            syncGlobalRespInterceptEnabled();
+            if (!netGlobalRespInterceptEnabled && netRespInterceptQueue.length) releaseAllRespIntercepts();
+          }
+          saveNetConfig();
+          updateInterceptBtn();
+          renderNetList();
+          openInterceptConfigModal();
+        });
+      });
+    }, 50);
+  }
+
   function injectMockRules() {
     var rulesJson = JSON.stringify(netMockRules);
     // isolated 模式（强 CSP）：runInPage 的 blob <script> 可能被 CSP 拦截，
@@ -3580,6 +3628,7 @@
     try {
       st.set({ bhNetConfig: {
         globalIntercept: netGlobalInterceptEnabled,
+        globalRespIntercept: netGlobalRespInterceptEnabled,
         plainProbe: netPlainProbeEnabled,
         hideTunnelNoise: netHideTunnelNoise,
         payloadOnly: netPayloadOnly,
@@ -3596,6 +3645,7 @@
         var cfg = res && res[NET_CONFIG_KEY];
         if (cfg) {
           netGlobalInterceptEnabled = !!cfg.globalIntercept;
+          netGlobalRespInterceptEnabled = !!cfg.globalRespIntercept;
           netPlainProbeEnabled = !!cfg.plainProbe;
           netHideTunnelNoise = !!cfg.hideTunnelNoise;
           netPayloadOnly = !!cfg.payloadOnly;
@@ -3735,7 +3785,8 @@
     bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
     bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
     bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
-	    bar.querySelector('#bh-intercept-btn').addEventListener('click', function () {
+	    var interceptBtn = bar.querySelector('#bh-intercept-btn');
+	    interceptBtn.addEventListener('click', function () {
 	      netGlobalInterceptEnabled = !netGlobalInterceptEnabled;
 	      syncGlobalInterceptEnabled();
 	      if (!netGlobalInterceptEnabled && netInterceptQueue.length) releaseAllIntercepts();
@@ -3744,6 +3795,7 @@
 	      updateInterceptBtn();
 	      renderNetList();
 	    });
+	    bindLongPress(interceptBtn, openInterceptConfigModal);
 	    bar.querySelector('#bh-rules-btn').addEventListener('click', openRulesView);
     bar.querySelector('#bh-extra-btn').addEventListener('click', function (e) {
       try { e.stopPropagation(); } catch (err) {}
@@ -4072,6 +4124,7 @@
 	      loadReplaceRules();
 	      injectInterceptor();
 	      syncGlobalInterceptEnabled();
+	      syncGlobalRespInterceptEnabled();
 	      syncInterceptRules();
 	      syncReplaceRules();
 	      injectPlainProbe();
@@ -4164,6 +4217,7 @@
         // 2. 求值后再注入拦截器，保证顺序与首次打开一致
         earlyInjectInterceptor();
         syncGlobalInterceptEnabled();
+        syncGlobalRespInterceptEnabled();
         syncReplaceRules();
       });
     });
