@@ -17,6 +17,7 @@ import org.bouncycastle.asn1.x509.GeneralName
 import org.bouncycastle.asn1.x509.GeneralNames
 import org.bouncycastle.asn1.x509.KeyUsage
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509CertificateHolder
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
@@ -168,7 +169,13 @@ object MitmCa {
         val now = System.currentTimeMillis()
         val notBefore = Date(now - 24L * 3600 * 1000)
         val notAfter = Date(now + 825L * 24 * 3600 * 1000)
-        val issuer = X500Name(root.subjectX500Principal.name)
+        // Use the root's exact subject DER as the leaf's issuer. Going through
+        // subjectX500Principal.name (an RFC2253 string) and re-parsing reverses
+        // RDN order and can change the ASN.1 string type, so the leaf's issuer
+        // bytes no longer byte-match the root's subject bytes — mozilla::pkix
+        // chains issuer↔subject by exact DER, so the leaf would fail to link to
+        // the (even trusted) root and the browser reports SEC_ERROR_UNKNOWN_ISSUER.
+        val issuer = JcaX509CertificateHolder(root).subject
         val serial = BigInteger(64, rng).abs().add(BigInteger.ONE)
         val builder = JcaX509v3CertificateBuilder(
             issuer,
