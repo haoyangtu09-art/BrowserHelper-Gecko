@@ -270,7 +270,7 @@ function updateReplaceBtn() {
   var suffix = count ? ' ' + count : (netReplaceRules.length ? ' ' + netReplaceRules.length : '');
   btn.textContent = (netReplaceEnabled ? '● ' : '○ ') + '替换' + suffix;
   btn.style.color = netReplaceEnabled ? '#7c3aed' : '#888';
-  syncReplaceRules();
+  pushReplaceRulesToNative();
 }
 
 function openThrottleCustom() {

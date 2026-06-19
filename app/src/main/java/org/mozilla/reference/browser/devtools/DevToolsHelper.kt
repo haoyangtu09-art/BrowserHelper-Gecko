@@ -123,6 +123,23 @@ object DevToolsHelper {
         override fun onPortMessage(message: Any, port: Port) {
                 val data = message as? JSONObject ?: return
                 val action = data.optString("action", "")
+                if (action == "setReplaceRules") {
+                    val arr = data.optJSONArray("rules")
+                    val rules = ArrayList<Pair<String, String>>()
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val o = arr.optJSONObject(i) ?: continue
+                            val from = o.optString("from", "")
+                            if (from.isNotEmpty()) rules.add(from to o.optString("to", ""))
+                        }
+                    }
+                    ProxyProbe.setReplaceRules(
+                        data.optBoolean("enabled", false),
+                        data.optString("scope", "both"),
+                        rules,
+                    )
+                    return
+                }
                 if (action.isNotEmpty()) {
                     handlePanelAction(action, engineSession)
                     return

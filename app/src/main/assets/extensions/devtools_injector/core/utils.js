@@ -21,6 +21,22 @@ function postProxyCmd(action) {
   } catch (e) {}
 }
 
+// 面板 → 原生：下发字符替换规则。原生代理在请求方向按规则改写后再转发。
+// 只送启用且 from 非空的规则；关闭/无规则时下发空集合 → 原生退回纯转发。
+function pushReplaceRulesToNative() {
+  try {
+    if (!port) return;
+    var enabled = (typeof netReplaceEnabled !== 'undefined') && !!netReplaceEnabled;
+    var scope = (typeof netReplaceScope !== 'undefined') ? netReplaceScope : 'both';
+    var rules = (enabled && typeof netReplaceRules !== 'undefined' && Array.isArray(netReplaceRules))
+      ? netReplaceRules
+          .filter(function (r) { return r && r.enabled && r.from; })
+          .map(function (r) { return { from: String(r.from), to: String(r.to || '') }; })
+      : [];
+    port.postMessage({ action: 'setReplaceRules', enabled: enabled, scope: scope, rules: rules });
+  } catch (e) {}
+}
+
 function describeError(e) {
   return String(e && e.message ? e.message : e);
 }

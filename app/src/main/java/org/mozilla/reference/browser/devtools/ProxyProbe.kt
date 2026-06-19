@@ -52,6 +52,17 @@ object ProxyProbe {
     @Volatile private var channel: ((JSONObject) -> Unit)? = null
     private val flowSeq = AtomicLong(0)
 
+    // ── Request-direction character replacement (panel 「替换」 feature) ──
+    // Rewrites only the user's own outgoing requests on the user's own device.
+    // SAFETY (CLAUDE.md 坑#4): this NEVER touches the response pump, never buffers
+    // unbounded, and is a no-op unless the user explicitly enables it. When OFF the
+    // request path is byte-identical to the working forward-as-read model.
+    private class ReplaceRule(val from: ByteArray, val to: ByteArray, val fromStr: String, val toStr: String)
+    @Volatile private var replaceEnabled = false
+    @Volatile private var replaceReqScope = false
+    @Volatile private var replaceRulesList: List<ReplaceRule> = emptyList()
+    private const val REPLACE_CAP = 1 * 1024 * 1024 // only buffer/replace request bodies ≤1MB
+
     fun setChannel(emit: ((JSONObject) -> Unit)?) {
         channel = emit
     }
@@ -59,6 +70,86 @@ object ProxyProbe {
     private fun emit(obj: JSONObject) {
         obj.put("ch", "proxy")
         try { channel?.invoke(obj) } catch (_: Throwable) {}
+    }
+
+    /** Panel → native: install request-rewrite rules. Empty/disabled = no-op pump. */
+    @Synchronized
+    fun setReplaceRules(enabled: Boolean, scope: String, rules: List<Pair<String, String>>) {
+        replaceEnabled = enabled
+        replaceReqScope = scope == "req" || scope == "both"
+        replaceRulesList = rules.filter { it.first.isNotEmpty() }.map {
+            ReplaceRule(it.first.toByteArray(Charsets.UTF_8), it.second.toByteArray(Charsets.UTF_8), it.first, it.second)
+        }
+    }
+
+    private fun replaceActiveForReq(): Boolean =
+        replaceEnabled && replaceReqScope && replaceRulesList.isNotEmpty()
+
+    // Byte-level replace-all of every rule's from→to over [data]. Operates on raw
+    // bytes so UTF-8 text matches and binary is left untouched (won't match).
+    private fun applyReplaceBytes(data: ByteArray): ByteArray {
+        var cur = data
+        for (rule in replaceRulesList) cur = replaceBytes(cur, rule.from, rule.to)
+        return cur
+    }
+
+    private fun replaceBytes(src: ByteArray, from: ByteArray, to: ByteArray): ByteArray {
+        if (from.isEmpty() || src.size < from.size) return src
+        val out = ByteArrayOutputStream(src.size)
+        var i = 0
+        while (i < src.size) {
+            if (i + from.size <= src.size && regionEquals(src, i, from)) {
+                out.write(to)
+                i += from.size
+            } else {
+                out.write(src[i].toInt())
+                i++
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun regionEquals(src: ByteArray, off: Int, pat: ByteArray): Boolean {
+        for (j in pat.indices) if (src[off + j] != pat[j]) return false
+        return true
+    }
+
+    // Replace in the request line + headers (already buffered text).
+    private fun applyReplaceStr(head: String): String {
+        var cur = head
+        for (rule in replaceRulesList) if (rule.fromStr.isNotEmpty()) cur = cur.replace(rule.fromStr, rule.toStr)
+        return cur
+    }
+
+    // Force the Content-Length header value to [size] so framing stays correct even
+    // if a rule altered the body length (or matched inside the header text).
+    private fun forceContentLength(head: String, size: Int): String {
+        val lines = head.split("\r\n")
+        val sb = StringBuilder()
+        var done = false
+        for ((idx, line) in lines.withIndex()) {
+            val c = line.indexOf(':')
+            if (!done && c > 0 && line.substring(0, c).trim().equals("Content-Length", ignoreCase = true)) {
+                sb.append("Content-Length: ").append(size)
+                done = true
+            } else {
+                sb.append(line)
+            }
+            if (idx < lines.size - 1) sb.append("\r\n")
+        }
+        return sb.toString()
+    }
+
+    // Read exactly [n] bytes (or until EOF) into a fresh array.
+    private fun readExact(input: InputStream, n: Int): ByteArray {
+        val buf = ByteArray(n)
+        var off = 0
+        while (off < n) {
+            val r = input.read(buf, off, n - off)
+            if (r < 0) break
+            off += r
+        }
+        return if (off == n) buf else buf.copyOf(off)
     }
 
     @Synchronized
@@ -334,8 +425,6 @@ object ProxyProbe {
         try {
             while (true) {
                 val reqHead = readHead(cIn) ?: break
-                uOut.write(reqHead.toByteArray(Charsets.ISO_8859_1))
-                uOut.flush()
                 val flowId = flowSeq.incrementAndGet().toString()
                 if (first) {
                     first = false
@@ -345,19 +434,53 @@ object ProxyProbe {
                     }
                 }
                 val method = reqHead.trimStart().substringBefore(' ').trim()
+                val te = headerValue(reqHead, "Transfer-Encoding")
+                val upgrade = headerValue(reqHead, "Upgrade")
+                val expect = headerValue(reqHead, "Expect")
+                val clStr = headerValue(reqHead, "Content-Length")
+                val cl = clStr?.toLongOrNull()
+                // A request is safely rewritable only when its length is fully known and
+                // bounded: not chunked, not an Upgrade, no 100-continue handshake (which
+                // would deadlock if we read the body before forwarding the head), valid
+                // Content-Length, and body ≤ cap. Anything else → untouched verbatim pump.
+                val rewritable = replaceActiveForReq() &&
+                    upgrade == null &&
+                    (te == null || !te.contains("chunked", ignoreCase = true)) &&
+                    (expect == null || !expect.contains("100-continue", ignoreCase = true)) &&
+                    !(clStr != null && cl == null) &&
+                    (cl == null || cl <= REPLACE_CAP)
+
+                if (rewritable) {
+                    // Buffer the bounded body, replace head+body, fix Content-Length, then
+                    // forward. The body is a complete known-size upload, so reading it in
+                    // full does NOT stall like a streaming response would (CLAUDE.md 坑#4).
+                    val body = if (cl != null && cl > 0) readExact(cIn, cl.toInt()) else ByteArray(0)
+                    val newBody = applyReplaceBytes(body)
+                    var newHead = applyReplaceStr(reqHead)
+                    if (clStr != null) newHead = forceContentLength(newHead, newBody.size)
+                    uOut.write(newHead.toByteArray(Charsets.ISO_8859_1))
+                    if (newBody.isNotEmpty()) uOut.write(newBody)
+                    uOut.flush()
+                    emitFlowReq(flowId, host, newHead)
+                    flowQueue.add(FlowInfo(flowId, method))
+                    if (newBody.isNotEmpty()) {
+                        val teeLen = minOf(newBody.size, 256 * 1024)
+                        emitFlowReqBody(flowId, newBody.copyOf(teeLen), newBody.size > teeLen)
+                    }
+                    continue
+                }
+
+                // ── verbatim forward-as-read (unchanged working model) ──
+                uOut.write(reqHead.toByteArray(Charsets.ISO_8859_1))
+                uOut.flush()
                 emitFlowReq(flowId, host, reqHead)
                 // Hand the flowId+method to the response loop (FIFO, in request order).
                 flowQueue.add(FlowInfo(flowId, method))
-
-                val te = headerValue(reqHead, "Transfer-Encoding")
-                val upgrade = headerValue(reqHead, "Upgrade")
-                val clStr = headerValue(reqHead, "Content-Length")
                 if (upgrade != null || (te != null && te.contains("chunked", ignoreCase = true))) {
                     // WebSocket upgrade or chunked body: framing is unsafe → raw copy rest.
                     pumpInline(cIn, uOut)
                     return
                 }
-                val cl = clStr?.toLongOrNull()
                 if (clStr != null && cl == null) {
                     // Malformed Content-Length → don't guess, bail to raw copy.
                     pumpInline(cIn, uOut)

@@ -17,7 +17,6 @@ if (wasActive()) {
   syncGlobalInterceptEnabled();
   syncGlobalRespInterceptEnabled();
   syncGlobalInterceptNoise();
-  syncReplaceScope();
   syncFilterSuppressResp();
   earlyInjectInterceptor(); // ← 立即注入，页面首个 fetch/XHR 即被拦截
 
@@ -28,8 +27,8 @@ if (wasActive()) {
     syncGlobalInterceptEnabled();
     syncGlobalRespInterceptEnabled();
     syncGlobalInterceptNoise();
-    syncReplaceScope();
     syncFilterSuppressResp();
+    pushReplaceRulesToNative();
     // 释放早期阶段拦截到的所有请求（UI 尚未就绪，无法手动放行；直接透传原始请求）。
     // releaseAllIntercepts 只清可见队列；releaseAllPendingIso 兜底清 isolated 世界里
     // 已挂起但消息尚未入队的 Promise，否则 disableInterceptor 后页面 fetch 永远 pending → reload 循环。

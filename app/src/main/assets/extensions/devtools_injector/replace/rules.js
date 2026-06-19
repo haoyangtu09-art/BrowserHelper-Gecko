@@ -61,8 +61,8 @@ function openReplaceModal() {
         var s = btn.getAttribute('data-rscope');
         if (s === 'req' || s === 'resp' || s === 'both') {
           netReplaceScope = s;
-          syncReplaceScope();
           saveNetConfig();
+          pushReplaceRulesToNative();
           openReplaceModal();
         }
       });

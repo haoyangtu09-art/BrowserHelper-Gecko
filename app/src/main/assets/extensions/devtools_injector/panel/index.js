@@ -545,10 +545,9 @@ function registerNetTool(erudaObj) {
 	      syncGlobalInterceptEnabled();
 	      syncGlobalRespInterceptEnabled();
 	      syncGlobalInterceptNoise();
-	      syncReplaceScope();
 	      syncFilterSuppressResp();
 	      syncInterceptRules();
-	      syncReplaceRules();
+	      pushReplaceRulesToNative();
 	      injectPlainProbe();
 	      // 同步持久化状态到面板 UI（按钮颜色/文字）
 	      updateInterceptBtn();

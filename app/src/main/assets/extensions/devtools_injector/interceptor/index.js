@@ -95,13 +95,6 @@ function syncPlainProbeEnabled() {
 	    runInPage('(function(){window.__bhGlobalInterceptNoise=' + (netGlobalInterceptNoise ? 'true' : 'false') + ';})();');
 	  }
 
-function syncReplaceScope() {
-  if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
-    try { window.wrappedJSObject.__bhReplaceScope = netReplaceScope; return; } catch (e) {}
-  }
-  runInPage('(function(){window.__bhReplaceScope=' + JSON.stringify(netReplaceScope) + ';})();');
-}
-
 function syncFilterSuppressResp() {
   if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
     try { window.wrappedJSObject.__bhFilterSuppressResp = !!netScopeFilterSuppressResp; return; } catch (e) {}
@@ -131,14 +124,6 @@ function syncFilterSuppressResp() {
 	      ';window.__bhFilterSuppressResp=' + (netScopeFilterSuppressResp ? 'true' : 'false') + ';})();');
 	  }
 
-	  function syncReplaceRules() {
-	    var active = netReplaceEnabled ? netReplaceRules.filter(function (r) { return r.enabled; }) : [];
-	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
-	      try { window.wrappedJSObject.__bhReplaceRules = cloneInto(active, window); return; } catch (e) {}
-	    }
-	    runInPage('(function(){window.__bhReplaceRules=' + JSON.stringify(active) + ';})();');
-	  }
-
 	  function disableInterceptor() {
 	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
 	      try {
@@ -164,7 +149,7 @@ function syncFilterSuppressResp() {
 	    syncGlobalInterceptEnabled();
 	    syncGlobalRespInterceptEnabled();
 	    syncGlobalInterceptNoise();
-	    syncReplaceScope();
+	    pushReplaceRulesToNative();
 	    syncFilterSuppressResp();
 	    syncInterceptRules();
 	    injectBreakpoints();
