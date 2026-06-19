@@ -199,10 +199,11 @@ function updateThrottleBtn() {
 function updateFilterButtons() {
   var filterBtn = netPanel && netPanel.querySelector('#bh-filter-menu-btn');
   var filterMenu = netPanel && netPanel.querySelector('#bh-filter-menu');
-  var noiseBtn = netPanel && netPanel.querySelector('#bh-noise-btn');
   var payloadBtn = netPanel && netPanel.querySelector('#bh-payload-btn');
-  var plainBtn = netPanel && netPanel.querySelector('#bh-plain-btn');
-  var active = netHideTunnelNoise || netPayloadOnly || netPlainProbeEnabled;
+  var telemetryBtn = netPanel && netPanel.querySelector('#bh-telemetry-btn');
+  var noiseBtn = netPanel && netPanel.querySelector('#bh-noise-btn');
+  var cookieBtn = netPanel && netPanel.querySelector('#bh-cookie-btn');
+  var active = netPayloadOnly || netHideTelemetry || netHideNoise || netHideCookie;
   if (filterBtn) {
     filterBtn.textContent = '过滤 ▾';
     filterBtn.style.color = active ? '#2563eb' : '#111';
@@ -212,17 +213,21 @@ function updateFilterButtons() {
     if (netFilterMenuOpen) filterMenu.classList.add('open');
     else filterMenu.classList.remove('open');
   }
-  if (noiseBtn) {
-    noiseBtn.textContent = (netHideTunnelNoise ? '● ' : '○ ') + '净化';
-    noiseBtn.style.color = netHideTunnelNoise ? '#2563eb' : '#888';
-  }
   if (payloadBtn) {
     payloadBtn.textContent = (netPayloadOnly ? '● ' : '○ ') + '正文';
     payloadBtn.style.color = netPayloadOnly ? '#16a34a' : '#888';
   }
-  if (plainBtn) {
-    plainBtn.textContent = (netPlainProbeEnabled ? '● ' : '○ ') + '明文';
-    plainBtn.style.color = netPlainProbeEnabled ? '#dc2626' : '#888';
+  if (telemetryBtn) {
+    telemetryBtn.textContent = (netHideTelemetry ? '● ' : '○ ') + '过滤遥测包';
+    telemetryBtn.style.color = netHideTelemetry ? '#2563eb' : '#888';
+  }
+  if (noiseBtn) {
+    noiseBtn.textContent = (netHideNoise ? '● ' : '○ ') + '过滤噪音包';
+    noiseBtn.style.color = netHideNoise ? '#2563eb' : '#888';
+  }
+  if (cookieBtn) {
+    cookieBtn.textContent = (netHideCookie ? '● ' : '○ ') + '过滤cookie包';
+    cookieBtn.style.color = netHideCookie ? '#2563eb' : '#888';
   }
 }
 
@@ -342,9 +347,10 @@ function buildNetPanel() {
     '<span id="bh-filter-wrap">' +
       '<button id="bh-filter-menu-btn">过滤 ▾</button>' +
       '<span id="bh-filter-menu">' +
-        '<button id="bh-noise-btn">○ 净化</button>' +
         '<button id="bh-payload-btn">○ 正文</button>' +
-        '<button id="bh-plain-btn">○ 明文</button>' +
+        '<button id="bh-telemetry-btn">○ 过滤遥测包</button>' +
+        '<button id="bh-noise-btn">○ 过滤噪音包</button>' +
+        '<button id="bh-cookie-btn">○ 过滤cookie包</button>' +
       '</span>' +
     '</span>' +
     '<input id="bh-filter" placeholder="搜索 URL…">';
@@ -430,13 +436,6 @@ function buildNetPanel() {
     if (netExtraMenuOpen) { netExtraMenuOpen = false; updateExtraMenu(); }
     if (changed) updateFilterButtons();
   });
-  bar.querySelector('#bh-noise-btn').addEventListener('click', function () {
-    netHideTunnelNoise = !netHideTunnelNoise;
-    saveNetConfig();
-    updateFilterButtons();
-    renderNetList();
-    if (netSelReq && getVisibleRequests().indexOf(netSelReq) === -1) selectFirstVisibleRequest(false);
-  });
   bar.querySelector('#bh-payload-btn').addEventListener('click', function () {
     netPayloadOnly = !netPayloadOnly;
     saveNetConfig();
@@ -444,19 +443,24 @@ function buildNetPanel() {
     if (netPayloadOnly) selectFirstVisibleRequest(true);
     else { renderNetList(); renderDetail(true); }
   });
-  bar.querySelector('#bh-plain-btn').addEventListener('click', function () {
-    netPlainProbeEnabled = !netPlainProbeEnabled;
-    saveNetConfig();
-    updateFilterButtons();
-    injectPlainProbe();
-    if (netSelReq) {
-      if (netPlainProbeEnabled && (!netSelReq.plain || !netSelReq.plain.length)) {
-        netSelReq.plain = collectPlainCandidates(netSelReq);
-      }
-      netDetailTab = 4;
-      renderDetail(true);
-    }
-  });
+  function bindHideFilter(sel, get, set) {
+    bar.querySelector(sel).addEventListener('click', function () {
+      set(!get());
+      saveNetConfig();
+      updateFilterButtons();
+      renderNetList();
+      if (netSelReq && getVisibleRequests().indexOf(netSelReq) === -1) selectFirstVisibleRequest(false);
+    });
+  }
+  bindHideFilter('#bh-telemetry-btn',
+    function () { return netHideTelemetry; },
+    function (v) { netHideTelemetry = v; });
+  bindHideFilter('#bh-noise-btn',
+    function () { return netHideNoise; },
+    function (v) { netHideNoise = v; });
+  bindHideFilter('#bh-cookie-btn',
+    function () { return netHideCookie; },
+    function (v) { netHideCookie = v; });
   // 弱网按钮：单点切换开/关，长按弹菜单选预设
   // 不依赖合成 click（Gecko/Android 上 pointer 事件后 click 可能不触发），
   // 直接用 pointerdown/pointerup 自洽处理，并加 touch 兜底。

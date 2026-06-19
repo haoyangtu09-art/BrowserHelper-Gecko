@@ -157,17 +157,51 @@ function isPayloadReq(r) {
   return false;
 }
 
-function isTunnelNoiseReq(r) {
-  var url = String(r.url || '').toLowerCase();
+// 低价值上报/噪音的共同体积护栏：小请求体、GET 才算、整体小或无响应体。
+function lowValueGuard(r) {
   var method = String(r.method || 'GET').toUpperCase();
   var rb = byteLen(r.reqBody);
   var sb = byteLen(r.respBody);
   var total = reqSize(r) + respSize(r);
-  var noiseRe = /\/(cdn-cgi|collect|telemetry|analytics|metrics|beacon|heartbeat|ping|events?|log|logs|sentry|trace|traces|socket\.io|sockjs|realtime|tunnel|connect|presence|typing|status|health|alive|poll)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
-  if (!noiseRe.test(url)) return false;
   if (rb > 512) return false;
   if (method !== 'GET' && rb > 0) return false;
   return total < 8 * 1024 || sb === 0;
+}
+
+// 遥测/上报类：collect/analytics/metrics/beacon/sentry/trace/pixel 等。
+function isTelemetryReq(r) {
+  var url = String(r.url || '').toLowerCase();
+  var telRe = /(collect|telemetry|analytics|metrics|beacon|sentry|trace|traces|stats|gtm|gtag|google-analytics|doubleclick|amplitude|mixpanel|segment|datadog|bugsnag|track|pixel|rum)([/?#_.-]|$)/;
+  if (!telRe.test(url)) return false;
+  return lowValueGuard(r);
+}
+
+// 长连接/心跳噪音类：heartbeat/ping/poll/socket.io/realtime/presence 等。
+function isNoiseReq(r) {
+  var url = String(r.url || '').toLowerCase();
+  var noiseRe = /(heartbeat|ping|keepalive|poll|socket\.io|sockjs|realtime|tunnel|presence|typing|status|health|alive|connect|events?)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=/;
+  if (!noiseRe.test(url)) return false;
+  return lowValueGuard(r);
+}
+
+// 纯 cookie 同步包：无请求体、GET、非 payload、响应体很小，且带 Cookie/Set-Cookie 或命中已知 sync 端点。
+function isCookieReq(r) {
+  var method = String(r.method || 'GET').toUpperCase();
+  var rb = byteLen(r.reqBody);
+  var sb = byteLen(r.respBody);
+  if (rb !== 0 || method !== 'GET') return false;
+  if (isPayloadReq(r)) return false;
+  if (sb > 512) return false;
+  var url = String(r.url || '').toLowerCase();
+  var hasCookie = !!headerValue(r.reqHeaders, 'cookie');
+  var hasSetCookie = !!headerValue(r.respHeaders, 'set-cookie');
+  var syncRe = /(gen_204|\/sync|\/cookie|getuid|\/id\b|\/pixel|__cf|usersync|cksync|setuid)/;
+  return hasCookie || hasSetCookie || syncRe.test(url);
+}
+
+// 兼容旧引用：遥测或噪音。
+function isTunnelNoiseReq(r) {
+  return isTelemetryReq(r) || isNoiseReq(r);
 }
 
 function fmtInterceptHead(d) {
@@ -406,8 +440,10 @@ function interceptAsReq(d) {
   var filter = netFilterEl ? netFilterEl.value.trim().toLowerCase() : '';
   return netRequests.filter(function (r) {
     if (filter && String(r.url || '').toLowerCase().indexOf(filter) === -1) return false;
-    if (netHideTunnelNoise && isTunnelNoiseReq(r)) return false;
     if (netPayloadOnly && !isPayloadReq(r)) return false;
+    if (netHideTelemetry && isTelemetryReq(r)) return false;
+    if (netHideNoise && isNoiseReq(r)) return false;
+    if (netHideCookie && isCookieReq(r)) return false;
     return true;
   });
 }
@@ -438,7 +474,9 @@ function selectFirstVisibleRequest(preferPayload) {
 
 function maybeFocusPayload(entry) {
   if (!netPayloadOnly || netEditing || netSelIntercept || !isPayloadReq(entry)) return;
-  if (netHideTunnelNoise && isTunnelNoiseReq(entry)) return;
+  if (netHideTelemetry && isTelemetryReq(entry)) return;
+  if (netHideNoise && isNoiseReq(entry)) return;
+  if (netHideCookie && isCookieReq(entry)) return;
   netSelReq = entry;
   netDetailTab = byteLen(entry.reqBody) > 0 ? 1 : 3;
 }

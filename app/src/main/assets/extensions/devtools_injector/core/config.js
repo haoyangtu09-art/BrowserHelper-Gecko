@@ -21,8 +21,9 @@ function saveNetConfig() {
       scopeNoise: netScopeNoise,
       replaceScope: netReplaceScope,
       filterSuppressResp: netScopeFilterSuppressResp,
-      plainProbe: netPlainProbeEnabled,
-      hideTunnelNoise: netHideTunnelNoise,
+      hideTelemetry: netHideTelemetry,
+      hideNoise: netHideNoise,
+      hideCookie: netHideCookie,
       payloadOnly: netPayloadOnly,
       replaceEnabled: netReplaceEnabled,
     }}).catch(function () {});
@@ -63,8 +64,15 @@ function loadNetConfig(cb) {
         if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
         else netReplaceScope = 'both';
         if ('filterSuppressResp' in cfg) netScopeFilterSuppressResp = !!cfg.filterSuppressResp;
-        netPlainProbeEnabled = !!cfg.plainProbe;
-        netHideTunnelNoise = !!cfg.hideTunnelNoise;
+        // 迁移：旧 hideTunnelNoise 拆成遥测+噪音两个开关。
+        if (cfg.hideTunnelNoise === true) {
+          netHideTelemetry = true;
+          netHideNoise = true;
+        } else {
+          netHideTelemetry = !!cfg.hideTelemetry;
+          netHideNoise = !!cfg.hideNoise;
+        }
+        netHideCookie = !!cfg.hideCookie;
         netPayloadOnly = !!cfg.payloadOnly;
         netReplaceEnabled = !!cfg.replaceEnabled;
       }

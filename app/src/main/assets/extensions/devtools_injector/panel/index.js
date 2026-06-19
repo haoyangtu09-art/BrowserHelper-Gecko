@@ -449,7 +449,9 @@ var netEnableBtn = null;
 	  var netModal = null;   // 当前弹窗 element
 	  var netEditing = false; // 详情 textarea 是否正在被编辑（编辑时不覆盖内容）
 	  var netDetailDirty = false;
-	  var netHideTunnelNoise = false;
+	  var netHideTelemetry = false;
+var netHideNoise = false;
+var netHideCookie = false;
 var netPayloadOnly = false;
 var netPlainProbeEnabled = false;
 // 主开关（拦截按钮）：决定拦截功能是否生效
