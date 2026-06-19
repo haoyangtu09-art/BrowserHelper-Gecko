@@ -329,7 +329,6 @@ function buildNetPanel() {
     '<button id="bh-clear">清空</button>' +
     '<button id="bh-intercept-btn">○ 拦截</button>' +
     '<button id="bh-replace-btn">○ 替换</button>' +
-    '<button id="bh-ext-btn">拓展</button>' +
     '<span id="bh-extra-wrap">' +
       '<button id="bh-extra-btn">额外 ▾</button>' +
       '<span id="bh-extra-menu">' +
@@ -661,8 +660,6 @@ function buildNetPanel() {
 	    netRulesViewEl.id = 'bh-rules-view';
 	    wrap.appendChild(netRulesViewEl);
 	    renderRulesView();
-
-  initExtensionsPanel(wrap, bar);
 
 	    netPanel = wrap;
 	    return wrap;

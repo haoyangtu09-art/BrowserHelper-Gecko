@@ -11,7 +11,6 @@ var netReqMap = {}; // reqId -> 请求条目（等待响应）
 	  var netSelRespIntercept = null;
 	  var netInterceptRules = [];
 	  var netRulesViewEl = null;
-var netExtViewEl = null;
 	  var netPlainCandidates = [];
 	  var netPlainSeq = 0;
 

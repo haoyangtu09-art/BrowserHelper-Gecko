@@ -378,14 +378,9 @@ var NET_STYLE = [
   '  border:1px solid #d0d7de;background:#fff;color:#111;cursor:pointer;}',
 	    '#bh-detail-acts button:active{background:#e8eaed;}',
 	    // 编辑时不再移动详情区，避免 Android 软键盘/滚动联动造成上下弹跳。
-	    '#bh-rules-view,#bh-ext-view{display:none;position:fixed;inset:0;z-index:2147483646;background:#fff;color:#111;',
+	    '#bh-rules-view{display:none;position:fixed;inset:0;z-index:2147483646;background:#fff;color:#111;',
 	    '  flex-direction:column;pointer-events:auto;touch-action:auto;}',
-	    '#bh-rules-view.open,#bh-ext-view.open{display:flex;}',
-	    '#bh-ext-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
-	    '#bh-ext-title{flex:1;font-size:15px;font-weight:700;}',
-	    '#bh-ext-close{flex:0 0 44px;min-width:44px;border:1px solid #d0d7de;border-radius:6px;background:#fff;color:#555;',
-	    '  font-size:24px;line-height:1;min-height:40px;}',
-	    '#bh-ext-body{flex:1;display:flex;align-items:center;justify-content:center;color:#888;font-size:14px;}',
+	    '#bh-rules-view.open{display:flex;}',
 	    '#bh-rules-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
 	    '#bh-rules-title{flex:1;font-size:15px;font-weight:700;}',
 	    '#bh-rules-close{flex:0 0 44px;min-width:44px;border:1px solid #d0d7de;border-radius:6px;background:#fff;color:#555;',
@@ -568,6 +563,8 @@ function registerNetTool(erudaObj) {
     registerNetTool(erudaObj);
     hookErudaConsoleBypass(erudaObj);
   }
+  // 「拓展」是与「网络」同级的独立 Tool（不再挂在网络面板里）
+  installExtTool();
 }
 
 // page-world 模式下注册 eruda 自定义 Tool。
