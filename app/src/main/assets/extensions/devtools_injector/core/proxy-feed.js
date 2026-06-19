@@ -119,6 +119,26 @@ function proxyOnMsg(msg) {
         reqHeaders: msg.reqHeaders || {}, reqBody: msg.reqBody || '',
       }, '*');
     } catch (e) {}
+  } else if (msg.type === 'respIntercept') {
+    // 原生代理已暂停这条响应，等面板放行/中止。请求条目通常已由 flowReq 建好（响应方向
+    // 拦截不暂停请求），复用其 reqId；丢失则新建。再复用响应拦截队列 UI（respBreakpoint,
+    // via:'intercept'）。
+    var rriRec = proxyFlowIdMap[msg.flowId];
+    var rriReqId;
+    if (rriRec && rriRec.reqId) {
+      rriReqId = rriRec.reqId;
+    } else {
+      rriReqId = 'proxy_' + (++proxyReqIdSeq);
+      proxyMapSet(msg.flowId, { reqId: rriReqId, t0: Date.now() });
+    }
+    try {
+      window.postMessage({
+        __bhNet: true, type: 'respBreakpoint', via: 'intercept', reqId: rriReqId,
+        status: msg.status || 200,
+        respHeaders: msg.respHeaders || {},
+        respBody: msg.respBody == null ? '' : msg.respBody,
+      }, '*');
+    } catch (e) {}
   } else if (msg.type === 'flowRespBody') {
     // 响应体（在 flowResp 之后到），补给面板对应条目。
     var respRec = proxyFlowIdMap[msg.flowId];

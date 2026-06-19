@@ -8,6 +8,19 @@ function respResolve(reqId, payload) {
       if (payload.respBody != null) entry.respBody = payload.respBody;
     }
   }
+  // 原生代理拦截：暂停在 ProxyProbe 的响应线程，回复走 control port（按 flowId 关联）。
+  var flowId = (typeof proxyFlowIdForReqId === 'function') ? proxyFlowIdForReqId(reqId) : null;
+  if (flowId && typeof port !== 'undefined' && port) {
+    var msg = { action: 'resolveRespIntercept', flowId: flowId, decision: payload.action };
+    if (payload.action === 'continue') {
+      msg.status = payload.status;
+      msg.respHeaders = payload.respHeaders;
+      msg.respBody = payload.respBody;
+    }
+    try { port.postMessage(msg); } catch (e) {}
+    return;
+  }
+  // 回退：page world 拦截器（旧路径）。
   payload.__bhNet = true;
   payload.type = 'respResolve';
   payload.reqId = reqId;

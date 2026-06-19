@@ -141,14 +141,15 @@ object DevToolsHelper {
                     return
                 }
                 if (action == "setInterceptRules") {
-                    ProxyProbe.setInterceptRules(
-                        data.optBoolean("enabled", false),
-                        data.optJSONArray("rules"),
-                    )
+                    ProxyProbe.setInterceptRules(data)
                     return
                 }
                 if (action == "resolveIntercept") {
                     ProxyProbe.resolveIntercept(data.optString("flowId", ""), data)
+                    return
+                }
+                if (action == "resolveRespIntercept") {
+                    ProxyProbe.resolveRespIntercept(data.optString("flowId", ""), data)
                     return
                 }
                 if (action.isNotEmpty()) {

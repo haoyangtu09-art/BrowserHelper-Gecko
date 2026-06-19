@@ -86,12 +86,24 @@ object ProxyProbe {
         val method: String,
         val hasBody: Boolean,
         val action: String,
+        val interceptResp: Boolean,
     )
-    @Volatile private var interceptEnabled = false
+    // "Intercept all" gates: when on, every BOUNDED request/response is paused for
+    // the panel EXCEPT low-value telemetry/noise/cookie traffic (mirrors the panel's
+    // display filters). Explicit rules override: action=pass whitelists, action=
+    // intercept forces, interceptResp pauses that flow's response.
+    @Volatile private var reqInterceptAll = false
+    @Volatile private var respInterceptAll = false
     @Volatile private var interceptRulesList: List<InterceptRule> = emptyList()
     private val pendingIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
+    private val pendingRespIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
     private const val INTERCEPT_PREFS_KEY = "intercept_config"
     private const val INTERCEPT_TIMEOUT_MS = 60000L
+    // Low-value request classes "intercept all" lets through (ports panel/render.js
+    // isTelemetryReq / isNoiseReq / isCookieReq regexes; tested against the lowercased URL).
+    private val telemetryRe = Regex("(collect|telemetry|analytics|metrics|beacon|sentry|trace|traces|stats|gtm|gtag|google-analytics|doubleclick|amplitude|mixpanel|segment|datadog|bugsnag|track|pixel|rum)([/?#_.-]|$)")
+    private val noiseRe = Regex("(heartbeat|ping|keepalive|poll|socket\\.io|sockjs|realtime|tunnel|presence|typing|status|health|alive|connect|events?)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=")
+    private val cookieRe = Regex("(/|[?&._-])(cookie|cookiesync|setuid|usersync|user-sync|idsync|id-sync|cksync|syncuser|getuid|gen_204|__cf)([/?#._-]|$)")
 
     fun setChannel(emit: ((JSONObject) -> Unit)?) {
         channel = emit
@@ -167,12 +179,14 @@ object ProxyProbe {
     private fun replaceActiveForResp(): Boolean =
         replaceEnabled && replaceRespScope && replaceRulesList.isNotEmpty()
 
-    /** Panel → native: install intercept rules. Empty/disabled = nothing is ever paused. */
+    /** Panel → native: install intercept config (intercept-all gates + override rules). */
     @Synchronized
-    fun setInterceptRules(enabled: Boolean, rulesJson: org.json.JSONArray?) {
-        interceptEnabled = enabled
+    fun setInterceptRules(data: JSONObject) {
+        reqInterceptAll = data.optBoolean("reqAll", false)
+        respInterceptAll = data.optBoolean("respAll", false)
+        val rulesJson = data.optJSONArray("rules")
         interceptRulesList = parseInterceptRules(rulesJson)
-        saveInterceptConfig(enabled, rulesJson)
+        saveInterceptConfig(reqInterceptAll, respInterceptAll, rulesJson)
     }
 
     private fun parseInterceptRules(rulesJson: org.json.JSONArray?): List<InterceptRule> {
@@ -187,6 +201,7 @@ object ProxyProbe {
                         o.optString("method", "GET").uppercase(),
                         o.optBoolean("hasBody", false),
                         o.optString("action", "pass"),
+                        o.optBoolean("interceptResp", false),
                     ),
                 )
             }
@@ -194,10 +209,11 @@ object ProxyProbe {
         return list
     }
 
-    private fun saveInterceptConfig(enabled: Boolean, rulesJson: org.json.JSONArray?) {
+    private fun saveInterceptConfig(reqAll: Boolean, respAll: Boolean, rulesJson: org.json.JSONArray?) {
         val ctx = appContext ?: return
         try {
-            val obj = JSONObject().put("enabled", enabled).put("rules", rulesJson ?: org.json.JSONArray())
+            val obj = JSONObject().put("reqAll", reqAll).put("respAll", respAll)
+                .put("rules", rulesJson ?: org.json.JSONArray())
             ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .edit().putString(INTERCEPT_PREFS_KEY, obj.toString()).apply()
         } catch (_: Throwable) {}
@@ -210,7 +226,8 @@ object ProxyProbe {
             val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .getString(INTERCEPT_PREFS_KEY, null) ?: return
             val obj = JSONObject(s)
-            interceptEnabled = obj.optBoolean("enabled", false)
+            reqInterceptAll = obj.optBoolean("reqAll", false)
+            respInterceptAll = obj.optBoolean("respAll", false)
             interceptRulesList = parseInterceptRules(obj.optJSONArray("rules"))
         } catch (_: Throwable) {}
     }
@@ -219,17 +236,56 @@ object ProxyProbe {
         r.host.equals(host, ignoreCase = true) && r.path == path &&
             r.method.equals(method, ignoreCase = true) && r.hasBody == hasBody
 
-    // A request is paused iff intercept is on and a matching rule has action=intercept.
-    private fun matchInterceptReq(host: String, path: String, method: String, hasBody: Boolean): InterceptRule? {
-        if (!interceptEnabled) return null
-        return interceptRulesList.firstOrNull {
-            it.action == "intercept" && ruleMatches(it, host, path, method, hasBody)
-        }
+    // Telemetry/noise/cookie body guard at request time: small request body, GET-only.
+    // (Panel lowValueGuard's resp-size clause is always satisfied here since the response
+    // hasn't arrived → sb==0.)
+    private fun lowValueGuard(method: String, reqBodyLen: Long): Boolean {
+        if (reqBodyLen > 512) return false
+        if (!method.equals("GET", ignoreCase = true) && reqBodyLen > 0) return false
+        return true
     }
 
-    /** Panel → native: the user's decision for a paused flow (completes the waiting future). */
+    // True for low-value telemetry/noise/cookie traffic that "intercept all" lets pass.
+    private fun isLowValueUrl(host: String, target: String, method: String, reqBodyLen: Long): Boolean {
+        if (!lowValueGuard(method, reqBodyLen)) return false
+        val url = "https://$host$target".lowercase()
+        return telemetryRe.containsMatchIn(url) || noiseRe.containsMatchIn(url) || cookieRe.containsMatchIn(url)
+    }
+
+    // Request paused iff: explicit pass rule → never; explicit intercept rule → always;
+    // else (intercept-all on) everything bounded except low-value telemetry/noise/cookie.
+    private fun shouldInterceptReq(host: String, target: String, pathOnly: String, method: String, hasBody: Boolean, reqBodyLen: Long): Boolean {
+        val rule = interceptRulesList.firstOrNull { ruleMatches(it, host, pathOnly, method, hasBody) }
+        if (rule != null) {
+            if (rule.action == "pass") return false
+            if (rule.action == "intercept") return true
+        }
+        if (!reqInterceptAll) return false
+        return !isLowValueUrl(host, target, method, reqBodyLen)
+    }
+
+    // Response paused iff: a matching rule asks for it (interceptResp); else any present
+    // rule governs fully (explicit → no blanket); else (intercept-all-resp on) every
+    // bounded response except low-value telemetry/noise/cookie.
+    private fun shouldInterceptResp(info: FlowInfo): Boolean {
+        val pathOnly = info.target.substringBefore('?').substringBefore('#')
+        val rule = interceptRulesList.firstOrNull { ruleMatches(it, info.host, pathOnly, info.method, info.hasBody) }
+        if (rule != null) {
+            if (rule.interceptResp) return true
+            return false
+        }
+        if (!respInterceptAll) return false
+        return !isLowValueUrl(info.host, info.target, info.method, if (info.hasBody) 1L else 0L)
+    }
+
+    /** Panel → native: the user's decision for a paused request flow. */
     fun resolveIntercept(flowId: String, decision: JSONObject) {
         pendingIntercepts.remove(flowId)?.complete(decision)
+    }
+
+    /** Panel → native: the user's decision for a paused response flow. */
+    fun resolveRespIntercept(flowId: String, decision: JSONObject) {
+        pendingRespIntercepts.remove(flowId)?.complete(decision)
     }
 
     // Parse a raw HTTP head's header lines into a JSONObject (last value wins).
@@ -303,6 +359,56 @@ object ProxyProbe {
         val afterScheme = url.substring(schemeIdx + 3)
         val slash = afterScheme.indexOf('/')
         return if (slash < 0) "/" else afterScheme.substring(slash)
+    }
+
+    // Block the response thread until the panel resolves this flow (or timeout).
+    // Body is the already-decoded (identity) response body so the panel can edit text.
+    private fun awaitRespIntercept(flowId: String, respHead: String, decodedBody: ByteArray): JSONObject? {
+        val fut = CompletableFuture<JSONObject>()
+        pendingRespIntercepts[flowId] = fut
+        val status = respHead.substringBefore("\r\n").split(" ").getOrElse(1) { "" }.toIntOrNull() ?: 0
+        val bodyText = if (isLikelyText(decodedBody)) String(decodedBody, Charsets.UTF_8) else ""
+        emit(
+            JSONObject()
+                .put("type", "respIntercept")
+                .put("flowId", flowId)
+                .put("status", status)
+                .put("respHeaders", headersJson(respHead))
+                .put("respBody", bodyText),
+        )
+        return try {
+            fut.get(INTERCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: Throwable) {
+            pendingRespIntercepts.remove(flowId)
+            null
+        }
+    }
+
+    // Rebuild a response head from the panel's edited decision (status line reason kept
+    // from the original; edited headers; identity body so old CE/CL/TE are dropped).
+    private fun buildRespHead(decision: JSONObject, origHead: String, bodyLen: Int): String {
+        val origLine = origHead.substringBefore("\r\n").split(" ", limit = 3)
+        val status = decision.optInt("status", origLine.getOrElse(1) { "200" }.toIntOrNull() ?: 200)
+        val reason = origLine.getOrElse(2) { "" }
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 ").append(status).append(' ').append(reason).append("\r\n")
+        val headers = decision.optJSONObject("respHeaders")
+        if (headers != null) {
+            val keys = headers.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                if (k.equals("content-length", ignoreCase = true) ||
+                    k.equals("transfer-encoding", ignoreCase = true) ||
+                    k.equals("content-encoding", ignoreCase = true)
+                ) {
+                    continue
+                }
+                sb.append(k).append(": ").append(headers.optString(k)).append("\r\n")
+            }
+        }
+        sb.append("Content-Length: ").append(bodyLen).append("\r\n")
+        sb.append("\r\n")
+        return sb.toString()
     }
 
     // Byte-level replace-all of every rule's from→to over [data]. Operates on raw
@@ -819,8 +925,8 @@ object ProxyProbe {
                 val bodyPresent = cl != null && cl > 0
                 val target = reqHead.substringBefore("\r\n").split(" ").getOrElse(1) { "/" }
                 val pathOnly = target.substringBefore('?').substringBefore('#')
-                val ir = if (bounded) matchInterceptReq(host, pathOnly, method, bodyPresent) else null
-                if (ir != null) {
+                val doIntercept = bounded && shouldInterceptReq(host, target, pathOnly, method, bodyPresent, cl ?: 0L)
+                if (doIntercept) {
                     // Buffer the bounded body (a complete known-size upload — safe to read
                     // in full), pause for the panel, then forward the decision. On timeout
                     // (decision == null) or "continue" we forward; on "abort" we reset.
@@ -867,7 +973,7 @@ object ProxyProbe {
                     // event (and reflects the user's edits locally), so we DON'T re-emit
                     // flowReq here — that would duplicate the row. We still enqueue the
                     // flowId internally so the response loop stays FIFO-aligned.
-                    flowQueue.add(FlowInfo(flowId, method))
+                    flowQueue.add(FlowInfo(flowId, method, host, target, bodyPresent))
                     continue
                 }
                 // A request is safely rewritable only when its length is fully known and
@@ -893,7 +999,7 @@ object ProxyProbe {
                     if (newBody.isNotEmpty()) uOut.write(newBody)
                     uOut.flush()
                     emitFlowReq(flowId, host, newHead)
-                    flowQueue.add(FlowInfo(flowId, method))
+                    flowQueue.add(FlowInfo(flowId, method, host, target, bodyPresent))
                     if (newBody.isNotEmpty()) {
                         val teeLen = minOf(newBody.size, 256 * 1024)
                         emitFlowReqBody(flowId, newBody.copyOf(teeLen), newBody.size > teeLen)
@@ -906,7 +1012,7 @@ object ProxyProbe {
                 uOut.flush()
                 emitFlowReq(flowId, host, reqHead)
                 // Hand the flowId+method to the response loop (FIFO, in request order).
-                flowQueue.add(FlowInfo(flowId, method))
+                flowQueue.add(FlowInfo(flowId, method, host, target, bodyPresent))
                 if (upgrade != null || (te != null && te.contains("chunked", ignoreCase = true))) {
                     // WebSocket upgrade or chunked body: framing is unsafe → raw copy rest.
                     pumpInline(cIn, uOut)
@@ -931,7 +1037,13 @@ object ProxyProbe {
     }
 
     // Correlates a request with its response across the two relay threads (FIFO).
-    private class FlowInfo(val flowId: String, val method: String)
+    private class FlowInfo(
+        val flowId: String,
+        val method: String,
+        val host: String,
+        val target: String,
+        val hasBody: Boolean,
+    )
 
     // Response direction framing loop (increment 2b-safe; runs on the mitm thread).
     // Reads each response head, forwards it verbatim, emits flowResp (so every
@@ -969,6 +1081,62 @@ object ProxyProbe {
                 val ce = headerValue(respHead, "Content-Encoding")
                 val te = headerValue(respHead, "Transfer-Encoding")
                 val cl = headerValue(respHead, "Content-Length")?.toLongOrNull()
+
+                // Response interception (Phase 2) — pause the BOUNDED response for the
+                // panel to edit status/headers/body, then forward the decision. Same
+                // boundedness gate as rewrite: known Content-Length, not chunked, has a
+                // body, ≤cap. Streaming / SSE / chunked / no-CL are NEVER paused (they
+                // fall through to the verbatim model below, CLAUDE.md 坑#4). Timeout /
+                // panel-disconnect → fail-open (forward decoded body), never hangs.
+                val respIntercept = info != null && !noBody &&
+                    (te == null || !te.contains("chunked", ignoreCase = true)) &&
+                    cl != null && cl >= 1L && cl <= REPLACE_CAP.toLong() &&
+                    shouldInterceptResp(info)
+                if (respIntercept) {
+                    val raw = readExact(uIn, cl.toInt())
+                    val decoded = decodeForReplace(raw, ce)
+                    if (decoded == null) {
+                        // Can't decode → no editable text; forward original untouched.
+                        cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
+                        cOut.write(raw); cOut.flush()
+                        emitFlowResp(flowId, respHead)
+                        val teeLen = minOf(raw.size, 256 * 1024)
+                        emitFlowRespBody(flowId, raw.copyOf(teeLen), raw.size > teeLen, ce)
+                        continue
+                    }
+                    val decision = awaitRespIntercept(flowId, respHead, decoded)
+                    val verdict = decision?.optString("decision") ?: "continue"
+                    if (verdict == "abort") {
+                        try {
+                            cOut.write(
+                                "HTTP/1.1 502 Intercepted by BrowserHelper\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                    .toByteArray(Charsets.ISO_8859_1),
+                            )
+                            cOut.flush()
+                        } catch (_: Throwable) {}
+                        return
+                    }
+                    val fBody = if (decision != null && verdict == "continue") {
+                        decision.optString("respBody", "").toByteArray(Charsets.UTF_8)
+                    } else {
+                        decoded
+                    }
+                    val fHead = if (decision != null && verdict == "continue") {
+                        buildRespHead(decision, respHead, fBody.size)
+                    } else {
+                        // Fail-open: forward the decoded body as identity (drop CE, fix CL).
+                        var h = respHead
+                        if (ce != null) h = stripHeader(h, "Content-Encoding")
+                        forceContentLength(h, fBody.size)
+                    }
+                    cOut.write(fHead.toByteArray(Charsets.ISO_8859_1))
+                    if (fBody.isNotEmpty()) cOut.write(fBody)
+                    cOut.flush()
+                    emitFlowResp(flowId, fHead)
+                    val teeLen = minOf(fBody.size, 256 * 1024)
+                    emitFlowRespBody(flowId, fBody.copyOf(teeLen), fBody.size > teeLen, null)
+                    continue
+                }
 
                 // Response rewrite — ONLY the safe bounded subset: known Content-Length,
                 // not chunked, has a body, ≤cap. Streaming / SSE / chunked / no-CL are

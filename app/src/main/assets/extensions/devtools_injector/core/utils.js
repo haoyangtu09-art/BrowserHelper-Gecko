@@ -39,9 +39,10 @@ function pushReplaceRulesToNative() {
   } catch (e) {}
 }
 
-// 面板 → 原生：下发拦截规则。原生代理在转发前对命中且有界的请求暂停，等面板回复
-// resolveIntercept。把作用域（netScopeReq/netScopeResp）折进规则里：scopeReq 关时
-// 不让请求暂停，scopeResp 关时清掉 interceptResp。主开关关 / 未加载完 → 下发空集合。
+// 面板 → 原生：下发拦截配置。语义＝「拦截全部，除遥测/噪音/cookie 包」：主开关开 +
+// 作用域含请求/响应时，原生暂停所有有界请求/响应（低价值上报包除外）。显式规则做覆盖：
+// action=pass 白名单放行、action=intercept 强制拦截、interceptResp 拦该流响应。规则全量
+// 下发（pass 也要发，做白名单）。主开关关 → reqAll/respAll 均 false，仅显式 intercept 规则生效。
 function pushInterceptRulesToNative() {
   try {
     if (!port) return;
@@ -51,19 +52,24 @@ function pushInterceptRulesToNative() {
     var scopeReq = (typeof netScopeReq === 'undefined') || !!netScopeReq;
     var scopeResp = (typeof netScopeResp === 'undefined') || !!netScopeResp;
     var rules = [];
-    if (master && typeof netInterceptRules !== 'undefined' && Array.isArray(netInterceptRules)) {
+    if (typeof netInterceptRules !== 'undefined' && Array.isArray(netInterceptRules)) {
       rules = netInterceptRules.map(function (r) {
         return {
           host: String(r.host || ''),
           path: String(r.path || ''),
           method: String(r.method || 'GET').toUpperCase(),
           hasBody: !!r.hasBody,
-          action: (scopeReq && r.action === 'intercept') ? 'intercept' : 'pass',
-          interceptResp: scopeResp && !!r.interceptResp,
+          action: r.action === 'intercept' ? 'intercept' : 'pass',
+          interceptResp: !!r.interceptResp,
         };
-      }).filter(function (r) { return r.action === 'intercept' || r.interceptResp; });
+      });
     }
-    port.postMessage({ action: 'setInterceptRules', enabled: master, rules: rules });
+    port.postMessage({
+      action: 'setInterceptRules',
+      reqAll: master && scopeReq,
+      respAll: master && scopeResp,
+      rules: rules,
+    });
   } catch (e) {}
 }
 
