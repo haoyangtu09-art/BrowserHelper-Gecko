@@ -597,7 +597,7 @@ object ProxyProbe {
                     cl != null && cl >= 1L && cl <= REPLACE_CAP.toLong()
 
                 if (respRewritable) {
-                    val raw = readExact(uIn, cl!!.toInt())
+                    val raw = readExact(uIn, cl.toInt())
                     val decoded = decodeForReplace(raw, ce)
                     if (decoded == null) {
                         // Unknown/oversized/corrupt encoding → forward the original bytes
