@@ -1,5 +1,6 @@
 // Interceptor entry points and page-world flag synchronization.
-var INTERCEPT_JS = PAGE_FETCH_INTERCEPT_JS + '\n' + PAGE_XHR_INTERCEPT_JS;
+// 页面内 fetch/XHR 拦截器已删除（改用原生 MITM 代理只读抓包）。本文件仅保留
+// 仍被工具栏/配置引用的标志同步函数；INTERCEPT_JS / 页面 hook 注入已不存在。
 
 var PLAIN_PROBE_JS = (function () {
   return [
