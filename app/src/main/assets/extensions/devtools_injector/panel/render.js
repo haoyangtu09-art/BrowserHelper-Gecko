@@ -59,6 +59,7 @@
 	      try { st.set({ bhNetInterceptRules: netInterceptRules }).catch(function () {}); } catch (e) {}
 	    }
 	    syncInterceptRules();
+	    pushInterceptRulesToNative();
 	    updateRulesBtn();
 	    renderRulesView();
 	  }
@@ -66,21 +67,29 @@
 	  function loadInterceptRules() {
 	    var st = storageLocal();
 	    if (!st || !st.get) {
+	      netInterceptRulesLoaded = true;
 	      syncInterceptRules();
+	      pushInterceptRulesToNative();
 	      return;
 	    }
 	    try {
 	      st.get('bhNetInterceptRules').then(function (res) {
 	        netInterceptRules = sanitizeInterceptRules(res && res.bhNetInterceptRules);
+	        netInterceptRulesLoaded = true;
 	        syncInterceptRules();
+	        pushInterceptRulesToNative();
 	        updateRulesBtn();
 	        renderRulesView();
 	      }).catch(function () {
+	        netInterceptRulesLoaded = true;
 	        syncInterceptRules();
+	        pushInterceptRulesToNative();
 	        updateRulesBtn();
 	      });
 	    } catch (e) {
+	      netInterceptRulesLoaded = true;
 	      syncInterceptRules();
+	      pushInterceptRulesToNative();
 	      updateRulesBtn();
 	    }
 	  }

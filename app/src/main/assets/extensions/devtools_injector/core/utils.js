@@ -39,6 +39,34 @@ function pushReplaceRulesToNative() {
   } catch (e) {}
 }
 
+// 面板 → 原生：下发拦截规则。原生代理在转发前对命中且有界的请求暂停，等面板回复
+// resolveIntercept。把作用域（netScopeReq/netScopeResp）折进规则里：scopeReq 关时
+// 不让请求暂停，scopeResp 关时清掉 interceptResp。主开关关 / 未加载完 → 下发空集合。
+function pushInterceptRulesToNative() {
+  try {
+    if (!port) return;
+    // 规则尚未从 storage.local 加载完时不要下发：避免重载早期用空集合覆盖原生（含持久化）。
+    if (typeof netInterceptRulesLoaded !== 'undefined' && !netInterceptRulesLoaded) return;
+    var master = (typeof netInterceptMaster !== 'undefined') && !!netInterceptMaster;
+    var scopeReq = (typeof netScopeReq === 'undefined') || !!netScopeReq;
+    var scopeResp = (typeof netScopeResp === 'undefined') || !!netScopeResp;
+    var rules = [];
+    if (master && typeof netInterceptRules !== 'undefined' && Array.isArray(netInterceptRules)) {
+      rules = netInterceptRules.map(function (r) {
+        return {
+          host: String(r.host || ''),
+          path: String(r.path || ''),
+          method: String(r.method || 'GET').toUpperCase(),
+          hasBody: !!r.hasBody,
+          action: (scopeReq && r.action === 'intercept') ? 'intercept' : 'pass',
+          interceptResp: scopeResp && !!r.interceptResp,
+        };
+      }).filter(function (r) { return r.action === 'intercept' || r.interceptResp; });
+    }
+    port.postMessage({ action: 'setInterceptRules', enabled: master, rules: rules });
+  } catch (e) {}
+}
+
 function describeError(e) {
   return String(e && e.message ? e.message : e);
 }

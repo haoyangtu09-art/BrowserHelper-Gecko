@@ -108,6 +108,8 @@ function syncFilterSuppressResp() {
 	    netGlobalInterceptEnabled = netInterceptMaster && netScopeReq;
 	    netGlobalRespInterceptEnabled = netInterceptMaster && netScopeResp;
 	    netGlobalInterceptNoise = netScopeNoise;
+	    // 主开关/作用域变化也要同步到原生代理（拦截在原生侧执行）。
+	    pushInterceptRulesToNative();
 	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
 	      try {
 	        var pw = window.wrappedJSObject;
@@ -150,6 +152,7 @@ function syncFilterSuppressResp() {
 	    syncGlobalRespInterceptEnabled();
 	    syncGlobalInterceptNoise();
 	    pushReplaceRulesToNative();
+	    pushInterceptRulesToNative();
 	    syncFilterSuppressResp();
 	    syncInterceptRules();
 	    injectBreakpoints();

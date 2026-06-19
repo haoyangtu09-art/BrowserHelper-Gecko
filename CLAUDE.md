@@ -140,6 +140,20 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 
 > 判据：凡是**只对小/有界/文档型响应缓冲、对流式一律放行**的改动，是受控例外；凡是把转发**整体换成**阻塞解析、或对流式也缓冲的，才是坑#4。
 
+#### 请求拦截暂停的「第二个受控例外」（Phase 1：请求方向）
+
+拦截=转发前停住等用户，天生与盲转发冲突。`pumpRequests` 里只对**命中规则且有界**的请求开「暂停 await」分支，其余一切仍走原模型：
+
+- **只暂停有界请求**：复用 rewrite 的 `bounded` 闸门（非 chunked / 非 Upgrade / 非 100-continue / `Content-Length` 合法且 `≤REPLACE_CAP(1MB)`）。流式 / WebSocket / 无法定长的请求**永不暂停**。
+- **命中判定**：`matchInterceptReq(host,path,method,hasBody)`，规则 `action=='intercept'`。`path` 取请求行去掉 query。规则四元组与面板 `ruleKey` 对齐。
+- **暂停机制**：`pendingIntercepts[flowId] = CompletableFuture`，请求线程 `fut.get(INTERCEPT_TIMEOUT_MS=60s)` 阻塞。面板 `port.postMessage({action:'resolveIntercept',flowId,decision,...})` → `DevToolsHelper` → `ProxyProbe.resolveIntercept()` 完成 future。
+- **超时/面板断开 = 自动放行原件**（fail-open，`decision==null` → 转发原 head+body）。**绝不让 socket 挂死**——这是不碰坑#4 的关键。
+- **continue**：用编辑后的 url/method/headers/body 经 `buildReqHead` 重建请求行 + identity body 转发上游；**不再 `emitFlowReq`**（面板已从 `reqIntercept` 事件建好该行并本地反映编辑），只 `flowQueue.add` 保持响应 FIFO 对齐。
+- **abort**：给浏览器写合成 `403 + Connection: close` 后 `return`（断连，等价 Charles abort）。
+- 暂停的请求体先缓冲（`readExact`，有界）才上报面板;二进制体上报为空（仅文本 API 可编辑）。
+- 面板侧复用既有「请求拦截」队列 UI：`proxy-feed.js` 收 `reqIntercept`→postMessage `{type:'req'}`+`{type:'breakpoint',mode:'intercept'}`;`bpResolve` 按 `proxyFlowIdForReqId(reqId)` 反查 flowId 回 native。规则下发 `pushInterceptRulesToNative()`（含 `netInterceptRulesLoaded` 守卫，仿 replace），原生 `loadInterceptConfig()` 冷启动恢复。
+- **响应方向拦截（Phase 2）尚未实现**：将在 `pumpResponses` 复用 replace 的解码/identity 重组加同款暂停（`respIntercept`/`resolveRespIntercept`）。
+
 ## 持久化
 
 - `browser.storage.local`

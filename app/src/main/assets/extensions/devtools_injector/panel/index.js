@@ -481,6 +481,9 @@ var netReplaceEnabled = false;
 // 替换规则是否已从 storage.local 异步加载完成。未加载完时禁止 pushReplaceRulesToNative，
 // 否则导航重载早期会把空规则推给原生（并持久化），抹掉正在生效的替换。
 var netReplaceRulesLoaded = false;
+// 拦截规则是否已从 storage.local 异步加载完成。未加载完时禁止 pushInterceptRulesToNative，
+// 否则导航重载早期会把空规则推给原生（并持久化），抹掉正在生效的拦截。
+var netInterceptRulesLoaded = false;
 var netDetailSearchText = '';
 var netDetailSearchMatches = [];
 var netDetailSearchIdx = 0;

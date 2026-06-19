@@ -4,6 +4,7 @@
 // 只做展示，不参与任何请求转发/拦截。
 
 var proxyFlowIdMap = {}; // 原生 flowId -> { reqId, t0 }
+var proxyReqIdToFlow = {}; // 面板 reqId -> 原生 flowId（拦截回复时反查）
 var proxyFlowOrder = []; // flowId 到达顺序，用于限长清理
 var proxyReqIdSeq = 0;
 
@@ -11,11 +12,19 @@ var proxyReqIdSeq = 0;
 // 改用「到达顺序 + 上限」清理，避免无 body 响应的映射无限堆积。
 function proxyMapSet(flowId, val) {
   proxyFlowIdMap[flowId] = val;
+  if (val && val.reqId) proxyReqIdToFlow[val.reqId] = flowId;
   proxyFlowOrder.push(flowId);
   if (proxyFlowOrder.length > 400) {
     var old = proxyFlowOrder.shift();
+    var gone = proxyFlowIdMap[old];
+    if (gone && gone.reqId) delete proxyReqIdToFlow[gone.reqId];
     delete proxyFlowIdMap[old];
   }
+}
+
+// 拦截回复用：面板 reqId → 原生 flowId（bpResolve/respResolve 调用）。
+function proxyFlowIdForReqId(reqId) {
+  return proxyReqIdToFlow[reqId] || null;
 }
 
 function proxyGetPort() {
@@ -85,6 +94,29 @@ function proxyOnMsg(msg) {
         respHeaders: msg.respHeaders || {},
         respBody: null,
         duration: Date.now() - rec.t0,
+      }, '*');
+    } catch (e) {}
+  } else if (msg.type === 'reqIntercept') {
+    // 原生代理已暂停这条请求，等面板放行/中止。建立 reqId↔flowId 映射，先建列表条目，
+    // 再复用已有「请求拦截」队列 UI（type:'breakpoint', mode:'intercept'）。
+    var irRec = proxyFlowIdMap[msg.flowId];
+    var irReqId;
+    if (irRec && irRec.reqId) {
+      irReqId = irRec.reqId;
+    } else {
+      irReqId = 'proxy_' + (++proxyReqIdSeq);
+      proxyMapSet(msg.flowId, { reqId: irReqId, t0: Date.now() });
+    }
+    try {
+      window.postMessage({
+        __bhNet: true, type: 'req', reqId: irReqId,
+        url: msg.url || '', method: msg.method || 'GET',
+        reqHeaders: msg.reqHeaders || {}, reqBody: msg.reqBody || null,
+      }, '*');
+      window.postMessage({
+        __bhNet: true, type: 'breakpoint', mode: 'intercept', reqId: irReqId,
+        url: msg.url || '', method: msg.method || 'GET',
+        reqHeaders: msg.reqHeaders || {}, reqBody: msg.reqBody || '',
       }, '*');
     } catch (e) {}
   } else if (msg.type === 'flowRespBody') {

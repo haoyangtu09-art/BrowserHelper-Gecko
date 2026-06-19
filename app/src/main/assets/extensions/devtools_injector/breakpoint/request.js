@@ -9,10 +9,23 @@ function bpResolve(reqId, payload) {
       if (payload.reqBody != null) entry.reqBody = payload.reqBody;
     }
   }
+  // 原生代理拦截：暂停在 ProxyProbe 的请求线程，回复走 control port（按 flowId 关联）。
+  var flowId = (typeof proxyFlowIdForReqId === 'function') ? proxyFlowIdForReqId(reqId) : null;
+  if (flowId && typeof port !== 'undefined' && port) {
+    var msg = { action: 'resolveIntercept', flowId: flowId, decision: payload.action };
+    if (payload.action === 'continue') {
+      msg.url = payload.url;
+      msg.method = payload.method;
+      msg.reqHeaders = payload.reqHeaders;
+      msg.reqBody = payload.reqBody;
+    }
+    try { port.postMessage(msg); } catch (e) {}
+    return;
+  }
+  // 回退：page world 拦截器（旧路径）。content/page 共享 window 的 message 通道
   payload.__bhNet = true;
   payload.type = 'bpResolve';
   payload.reqId = reqId;
-  // 回复 page world（拦截器在那里 await）。content/page 共享 window 的 message 通道
   try { window.postMessage(payload, '*'); } catch (e) {}
 }
 

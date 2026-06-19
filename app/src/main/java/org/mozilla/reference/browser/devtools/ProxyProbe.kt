@@ -17,7 +17,10 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
@@ -68,6 +71,27 @@ object ProxyProbe {
     private const val REPLACE_DECODED_CAP = 8 * 1024 * 1024 // bail if a compressed resp decodes larger
     private const val REPLACE_CHUNK_RAW_CAP = 4 * 1024 * 1024 // de-chunked doc buffer cap (still-encoded)
     private const val CHUNK_REPLACE_TIMEOUT_MS = 30000 // read timeout while buffering a chunked doc
+
+    // ── Request/response intercept ("拦截/断点" feature) ──
+    // The native proxy PAUSES a matched flow before forwarding and round-trips with
+    // the panel (emit intercept event → panel edits → resolveIntercept completes the
+    // future). SAFETY (CLAUDE.md 坑#4): only BOUNDED flows are ever paused (not
+    // chunked/upgrade/100-continue, valid Content-Length ≤ REPLACE_CAP); streaming /
+    // SSE / WebSocket always forward verbatim. Every pause has a hard timeout so a
+    // disconnected panel can never hang the socket — on timeout we forward the
+    // original unmodified (fail-open).
+    private class InterceptRule(
+        val host: String,
+        val path: String,
+        val method: String,
+        val hasBody: Boolean,
+        val action: String,
+    )
+    @Volatile private var interceptEnabled = false
+    @Volatile private var interceptRulesList: List<InterceptRule> = emptyList()
+    private val pendingIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
+    private const val INTERCEPT_PREFS_KEY = "intercept_config"
+    private const val INTERCEPT_TIMEOUT_MS = 60000L
 
     fun setChannel(emit: ((JSONObject) -> Unit)?) {
         channel = emit
@@ -142,6 +166,144 @@ object ProxyProbe {
 
     private fun replaceActiveForResp(): Boolean =
         replaceEnabled && replaceRespScope && replaceRulesList.isNotEmpty()
+
+    /** Panel → native: install intercept rules. Empty/disabled = nothing is ever paused. */
+    @Synchronized
+    fun setInterceptRules(enabled: Boolean, rulesJson: org.json.JSONArray?) {
+        interceptEnabled = enabled
+        interceptRulesList = parseInterceptRules(rulesJson)
+        saveInterceptConfig(enabled, rulesJson)
+    }
+
+    private fun parseInterceptRules(rulesJson: org.json.JSONArray?): List<InterceptRule> {
+        val list = ArrayList<InterceptRule>()
+        if (rulesJson != null) {
+            for (i in 0 until rulesJson.length()) {
+                val o = rulesJson.optJSONObject(i) ?: continue
+                list.add(
+                    InterceptRule(
+                        o.optString("host", ""),
+                        o.optString("path", ""),
+                        o.optString("method", "GET").uppercase(),
+                        o.optBoolean("hasBody", false),
+                        o.optString("action", "pass"),
+                    ),
+                )
+            }
+        }
+        return list
+    }
+
+    private fun saveInterceptConfig(enabled: Boolean, rulesJson: org.json.JSONArray?) {
+        val ctx = appContext ?: return
+        try {
+            val obj = JSONObject().put("enabled", enabled).put("rules", rulesJson ?: org.json.JSONArray())
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(INTERCEPT_PREFS_KEY, obj.toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    @Synchronized
+    private fun loadInterceptConfig() {
+        val ctx = appContext ?: return
+        try {
+            val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .getString(INTERCEPT_PREFS_KEY, null) ?: return
+            val obj = JSONObject(s)
+            interceptEnabled = obj.optBoolean("enabled", false)
+            interceptRulesList = parseInterceptRules(obj.optJSONArray("rules"))
+        } catch (_: Throwable) {}
+    }
+
+    private fun ruleMatches(r: InterceptRule, host: String, path: String, method: String, hasBody: Boolean): Boolean =
+        r.host.equals(host, ignoreCase = true) && r.path == path &&
+            r.method.equals(method, ignoreCase = true) && r.hasBody == hasBody
+
+    // A request is paused iff intercept is on and a matching rule has action=intercept.
+    private fun matchInterceptReq(host: String, path: String, method: String, hasBody: Boolean): InterceptRule? {
+        if (!interceptEnabled) return null
+        return interceptRulesList.firstOrNull {
+            it.action == "intercept" && ruleMatches(it, host, path, method, hasBody)
+        }
+    }
+
+    /** Panel → native: the user's decision for a paused flow (completes the waiting future). */
+    fun resolveIntercept(flowId: String, decision: JSONObject) {
+        pendingIntercepts.remove(flowId)?.complete(decision)
+    }
+
+    // Parse a raw HTTP head's header lines into a JSONObject (last value wins).
+    private fun headersJson(head: String): JSONObject {
+        val headers = JSONObject()
+        val lines = head.split("\r\n")
+        for (i in 1 until lines.size) {
+            val line = lines[i]
+            if (line.isEmpty()) break
+            val idx = line.indexOf(':')
+            if (idx > 0) headers.put(line.substring(0, idx).trim(), line.substring(idx + 1).trim())
+        }
+        return headers
+    }
+
+    // Block the request thread until the panel resolves this flow (or timeout).
+    // Returns the decision JSON, or null on timeout/error (caller forwards original).
+    private fun awaitReqIntercept(flowId: String, host: String, target: String, reqHead: String, body: ByteArray): JSONObject? {
+        val fut = CompletableFuture<JSONObject>()
+        pendingIntercepts[flowId] = fut
+        val method = reqHead.substringBefore("\r\n").trimStart().substringBefore(' ').trim()
+        val bodyText = if (isLikelyText(body)) String(body, Charsets.UTF_8) else ""
+        emit(
+            JSONObject()
+                .put("type", "reqIntercept")
+                .put("flowId", flowId)
+                .put("url", "https://$host$target")
+                .put("method", method)
+                .put("reqHeaders", headersJson(reqHead))
+                .put("reqBody", bodyText),
+        )
+        return try {
+            fut.get(INTERCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: Throwable) {
+            pendingIntercepts.remove(flowId)
+            null
+        }
+    }
+
+    // Rebuild a request head from the panel's edited decision (origin-form target,
+    // edited headers, fresh Content-Length; Transfer-Encoding/old CL dropped).
+    private fun buildReqHead(decision: JSONObject, host: String, origHead: String, bodyLen: Int): String {
+        val method = decision.optString("method", "GET").uppercase()
+        val target = requestTargetFromUrl(decision.optString("url", ""), origHead)
+        val sb = StringBuilder()
+        sb.append(method).append(' ').append(target).append(" HTTP/1.1\r\n")
+        val headers = decision.optJSONObject("reqHeaders")
+        var hasHost = false
+        if (headers != null) {
+            val keys = headers.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                if (k.equals("content-length", ignoreCase = true) || k.equals("transfer-encoding", ignoreCase = true)) continue
+                if (k.equals("host", ignoreCase = true)) hasHost = true
+                sb.append(k).append(": ").append(headers.optString(k)).append("\r\n")
+            }
+        }
+        if (!hasHost) sb.append("Host: ").append(host).append("\r\n")
+        sb.append("Content-Length: ").append(bodyLen).append("\r\n")
+        sb.append("\r\n")
+        return sb.toString()
+    }
+
+    // Derive the origin-form request target (path+query) from the panel's URL field,
+    // falling back to the original request line's target if the URL is empty/relative.
+    private fun requestTargetFromUrl(url: String, origHead: String): String {
+        val orig = origHead.substringBefore("\r\n").split(" ").getOrElse(1) { "/" }
+        if (url.isEmpty()) return orig
+        val schemeIdx = url.indexOf("://")
+        if (schemeIdx < 0) return if (url.startsWith("/")) url else orig
+        val afterScheme = url.substring(schemeIdx + 3)
+        val slash = afterScheme.indexOf('/')
+        return if (slash < 0) "/" else afterScheme.substring(slash)
+    }
 
     // Byte-level replace-all of every rule's from→to over [data]. Operates on raw
     // bytes so UTF-8 text matches and binary is left untouched (won't match).
@@ -385,6 +547,7 @@ object ProxyProbe {
         // Restore the persisted replace config so a cold launch resumes replacement
         // (once the proxy is re-armed) without depending on the panel re-pushing.
         loadReplaceConfig()
+        loadInterceptConfig()
     }
 
     private fun toast(msg: String) {
@@ -553,7 +716,7 @@ object ProxyProbe {
             // (chunked / Upgrade / malformed) bails to a raw blocking copy so we
             // never stall the page. Forwarding stays byte-for-byte (the working
             // pump model from a7b65e87 is preserved; the panel only OBSERVES).
-            Thread({ pumpRequests(cIn, uOut, host, flowQueue) }, "bh-proxy-req")
+            Thread({ pumpRequests(cIn, uOut, host, flowQueue, tlsClient) }, "bh-proxy-req")
                 .apply { isDaemon = true }.start()
 
             // Response direction (increment 2b): loop reading each response head (so
@@ -622,7 +785,7 @@ object ProxyProbe {
     //     so fall back to a raw blocking copy of the rest and stop framing.
     //   - no body (GET/HEAD/…): loop straight to the next request.
     // Never buffers-then-forwards, never edits headers, never blocks the page.
-    private fun pumpRequests(cIn: InputStream, uOut: OutputStream, host: String, flowQueue: ConcurrentLinkedQueue<FlowInfo>) {
+    private fun pumpRequests(cIn: InputStream, uOut: OutputStream, host: String, flowQueue: ConcurrentLinkedQueue<FlowInfo>, clientSock: Socket) {
         var first = true
         try {
             while (true) {
@@ -646,6 +809,59 @@ object ProxyProbe {
                 val expect = headerValue(reqHead, "Expect")
                 val clStr = headerValue(reqHead, "Content-Length")
                 val cl = clStr?.toLongOrNull()
+                // The same boundedness gate used for rewrite also gates intercept: we
+                // only ever PAUSE a flow we can fully buffer and re-emit (CLAUDE.md 坑#4).
+                val bounded = upgrade == null &&
+                    (te == null || !te.contains("chunked", ignoreCase = true)) &&
+                    (expect == null || !expect.contains("100-continue", ignoreCase = true)) &&
+                    !(clStr != null && cl == null) &&
+                    (cl == null || cl <= REPLACE_CAP)
+                val bodyPresent = cl != null && cl > 0
+                val target = reqHead.substringBefore("\r\n").split(" ").getOrElse(1) { "/" }
+                val pathOnly = target.substringBefore('?').substringBefore('#')
+                val ir = if (bounded) matchInterceptReq(host, pathOnly, method, bodyPresent) else null
+                if (ir != null) {
+                    // Buffer the bounded body (a complete known-size upload — safe to read
+                    // in full), pause for the panel, then forward the decision. On timeout
+                    // (decision == null) or "continue" we forward; on "abort" we reset.
+                    val body = if (cl != null && cl > 0) readExact(cIn, cl.toInt()) else ByteArray(0)
+                    val decision = awaitReqIntercept(flowId, host, target, reqHead, body)
+                    val verdict = decision?.optString("decision") ?: "continue"
+                    if (verdict == "abort") {
+                        try {
+                            synchronized(clientSock) {
+                                clientSock.outputStream.write(
+                                    "HTTP/1.1 403 Intercepted by BrowserHelper\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                        .toByteArray(Charsets.ISO_8859_1),
+                                )
+                                clientSock.outputStream.flush()
+                            }
+                        } catch (_: Throwable) {}
+                        return
+                    }
+                    // Forward the edited request on "continue" (decision present), else the
+                    // original on timeout/fail-open. The inline decision != null check lets
+                    // Kotlin smart-cast it non-null for optString/buildReqHead.
+                    val fBody = if (decision != null && verdict == "continue") {
+                        decision.optString("reqBody", "").toByteArray(Charsets.UTF_8)
+                    } else {
+                        body
+                    }
+                    val fHead = if (decision != null && verdict == "continue") {
+                        buildReqHead(decision, host, reqHead, fBody.size)
+                    } else {
+                        reqHead
+                    }
+                    uOut.write(fHead.toByteArray(Charsets.ISO_8859_1))
+                    if (fBody.isNotEmpty()) uOut.write(fBody)
+                    uOut.flush()
+                    // The panel already created this flow's list entry from the reqIntercept
+                    // event (and reflects the user's edits locally), so we DON'T re-emit
+                    // flowReq here — that would duplicate the row. We still enqueue the
+                    // flowId internally so the response loop stays FIFO-aligned.
+                    flowQueue.add(FlowInfo(flowId, method))
+                    continue
+                }
                 // A request is safely rewritable only when its length is fully known and
                 // bounded: not chunked, not an Upgrade, no 100-continue handshake (which
                 // would deadlock if we read the body before forwarding the head), valid
