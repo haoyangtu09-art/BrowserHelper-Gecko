@@ -221,6 +221,30 @@ object ProxyProbe {
             c.contains("text/css") || c.contains("xml") || c.contains("text/plain")
     }
 
+    // Rewrite Accept-Encoding to encodings we can decode (gzip/deflate/br), but only when
+    // it advertises zstd (which we have no decoder for). Leaves all other requests as-is.
+    private fun downgradeAcceptEncoding(head: String): String {
+        val cur = headerValue(head, "Accept-Encoding") ?: return head
+        if (!cur.lowercase().contains("zstd")) return head
+        val lines = head.split("\r\n").toMutableList()
+        for (i in lines.indices) {
+            val c = lines[i].indexOf(':')
+            if (c > 0 && lines[i].substring(0, c).trim().equals("Accept-Encoding", ignoreCase = true)) {
+                lines[i] = "Accept-Encoding: gzip, deflate, br"
+            }
+        }
+        return lines.joinToString("\r\n")
+    }
+
+    // Whether we have a decoder for this Content-Encoding (so buffering to replace is
+    // worthwhile). Unknown encodings (e.g. zstd) can't be decoded → don't buffer them;
+    // stream verbatim instead (the browser still decodes them natively).
+    private fun canDecodeCe(ce: String?): Boolean {
+        val c = ce?.lowercase()?.trim() ?: return true
+        if (c.isEmpty() || c == "identity") return true
+        return c.contains("gzip") || c.contains("br") || c.contains("deflate")
+    }
+
     // Re-frame a (de-chunked) body as identity: drop Transfer-Encoding and any existing
     // Content-Length, optionally drop Content-Encoding (when stripCe — i.e. we decoded the
     // body), then add an accurate Content-Length. Preserves the status line and CRLF tail.
@@ -602,7 +626,12 @@ object ProxyProbe {
         var first = true
         try {
             while (true) {
-                val reqHead = readHead(cIn) ?: break
+                var reqHead = readHead(cIn) ?: break
+                // When response-replace is armed, drop zstd from Accept-Encoding so the
+                // server answers with gzip/deflate/br — encodings we can actually decode
+                // and rewrite (otherwise zstd bodies pass through unreplaced). Header-only
+                // edit on the buffered head; the body pump is untouched.
+                if (replaceActiveForResp()) reqHead = downgradeAcceptEncoding(reqHead)
                 val flowId = flowSeq.incrementAndGet().toString()
                 if (first) {
                     first = false
@@ -766,14 +795,16 @@ object ProxyProbe {
                     // (bounded + read-timeout), decode, replace, re-emit as identity.
                     // This is the one deliberate exception to forward-as-read; it never
                     // touches streaming/SSE responses, which stay on the pump path below.
-                    if (replaceActiveForResp() && isReplaceableDoc(headerValue(respHead, "Content-Type"))) {
+                    if (replaceActiveForResp() && isReplaceableDoc(headerValue(respHead, "Content-Type")) &&
+                        canDecodeCe(ce)) {
                         val raw = readChunkedToBuffer(upstream, uIn, REPLACE_CHUNK_RAW_CAP)
                         if (raw == null) return // partial/timeout/overflow → tear down
                         val decoded = decodeForReplace(raw, ce)
                         if (decoded == null) {
-                            // Can't decode (unknown enc / bomb): forward the de-chunked
-                            // bytes as identity, KEEPING Content-Encoding so the browser
-                            // still decodes them. No replacement (page stays correct).
+                            // Decodable encoding but the stream was corrupt/oversized:
+                            // forward the de-chunked bytes as identity, KEEPING
+                            // Content-Encoding so the browser still decodes them. No
+                            // replacement (page stays correct).
                             val h = toIdentityHead(respHead, false, raw.size)
                             cOut.write(h.toByteArray(Charsets.ISO_8859_1))
                             if (raw.isNotEmpty()) cOut.write(raw)
@@ -908,24 +939,49 @@ object ProxyProbe {
     // trailing error). Decoded as UTF-8.
     private fun emitFlowRespBody(flowId: String, body: ByteArray, truncated: Boolean, contentEncoding: String?) {
         val ce = contentEncoding?.lowercase() ?: ""
+        var undecodable = false
         val decoded = try {
             when {
                 ce.contains("gzip") -> decodeBestEffort(java.util.zip.GZIPInputStream(body.inputStream()))
                 ce.contains("br") -> decodeBestEffort(org.brotli.dec.BrotliInputStream(body.inputStream()))
                 ce.contains("deflate") -> decodeBestEffort(java.util.zip.InflaterInputStream(body.inputStream()))
+                ce.isNotEmpty() && ce != "identity" -> { undecodable = true; body } // unknown enc (zstd…)
                 else -> body
             }
         } catch (_: Throwable) {
-            body // fall back to raw bytes if decompression fails outright
+            undecodable = true // claimed gzip/br/deflate but stream isn't → still compressed
+            body
+        }
+        // Never dump still-compressed / binary bytes into the panel as mojibake: show a
+        // clean placeholder instead (display-only; the forwarded stream is untouched).
+        val text = if (undecodable || !isLikelyText(decoded)) {
+            "（二进制或无法解码内容" + (if (ce.isNotEmpty()) "：$ce" else "") + "，${decoded.size} 字节）"
+        } else {
+            String(decoded, Charsets.UTF_8)
         }
         emit(
             JSONObject()
                 .put("type", "flowRespBody")
                 .put("flowId", flowId)
-                .put("respBody", String(decoded, Charsets.UTF_8))
+                .put("respBody", text)
                 .put("truncated", truncated)
                 .put("encoding", contentEncoding ?: ""),
         )
+    }
+
+    // Cheap binary sniff for the panel: NUL byte or a high fraction of C0 control bytes
+    // (excluding tab/CR/LF) means it isn't displayable text (e.g. still-compressed bytes,
+    // images). High bytes (UTF-8 multibyte, incl. CJK) are treated as text.
+    private fun isLikelyText(data: ByteArray): Boolean {
+        if (data.isEmpty()) return true
+        val n = minOf(data.size, 4096)
+        var bad = 0
+        for (i in 0 until n) {
+            val b = data[i].toInt() and 0xFF
+            if (b == 0) return false
+            if (b < 0x09 || (b in 0x0B..0x0C) || (b in 0x0E..0x1F)) bad++
+        }
+        return bad * 100 / n < 5
     }
 
     // Decode a (possibly truncated) compressed stream best-effort: return whatever
