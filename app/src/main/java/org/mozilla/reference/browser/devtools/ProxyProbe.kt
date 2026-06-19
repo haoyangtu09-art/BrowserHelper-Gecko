@@ -253,11 +253,12 @@ object ProxyProbe {
             Thread({ pumpRequests(cIn, uOut, host, flowQueue) }, "bh-proxy-req")
                 .apply { isDaemon = true }.start()
 
-            // Response direction (increment 2b-safe): loop reading each response head
-            // (so EVERY keep-alive request gets its own flowResp → duration fills in,
-            // no more pending "…"), tee only non-streaming Content-Length bodies
-            // (<256K). chunked / 101 / Upgrade / no-Content-Length bail to a raw
-            // blocking copy — keeps the page stable; chunked body + brotli come later.
+            // Response direction (increment 2b): loop reading each response head (so
+            // EVERY keep-alive request gets its own flowResp → duration fills in, no
+            // more pending "…"), tee bounded (<256K) Content-Length AND chunked bodies
+            // (de-chunked on the copy; gzip/deflate/brotli decoded for the panel only).
+            // 101 / Upgrade / no-Content-Length non-chunked bail to a raw blocking copy
+            // — keeps the page stable. Forwarding is always byte-for-byte.
             pumpResponses(uIn, cOut, flowQueue)
         } catch (_: Throwable) {
             try { tlsClient.close() } catch (_: Throwable) {}
@@ -378,8 +379,9 @@ object ProxyProbe {
     //   - HEAD response / 204 / 304: no body → loop.
     //   - Content-Length: forward the N bytes; tee them (decoded) only when the
     //     body is small/non-streaming (<256K); loop for the next keep-alive resp.
-    //   - chunked / no-Content-Length: can't frame safely here → raw copy rest,
-    //     stop (chunked body capture is a later increment).
+    //   - chunked: relayChunked frames it (forward-as-read), tees a bounded
+    //     de-chunked snapshot, then loops — unless a malformed size bails to raw copy.
+    //   - no-Content-Length, non-chunked: can't frame safely here → raw copy rest, stop.
     private fun pumpResponses(uIn: InputStream, cOut: OutputStream, flowQueue: ConcurrentLinkedQueue<FlowInfo>) {
         try {
             while (true) {
@@ -406,9 +408,14 @@ object ProxyProbe {
                 val ce = headerValue(respHead, "Content-Encoding")
                 val te = headerValue(respHead, "Transfer-Encoding")
                 if (te != null && te.contains("chunked", ignoreCase = true)) {
-                    // chunked body framing not implemented yet → keep page stable.
-                    pumpInline(uIn, cOut)
-                    return
+                    // chunked body: frame chunk-by-chunk (forward-as-read), teeing a
+                    // bounded snapshot. SSE tokens are forwarded the instant they
+                    // arrive (tee never delays the stream). A malformed chunk size
+                    // bails to raw copy of the rest (page stays correct).
+                    val r = relayChunked(uIn, cOut, 256 * 1024)
+                    emitFlowRespBody(flowId, r.bytes, r.truncated, ce)
+                    if (r.bailed) return
+                    continue
                 }
                 val cl = headerValue(respHead, "Content-Length")?.toLongOrNull()
                 if (cl == null) {
@@ -432,19 +439,100 @@ object ProxyProbe {
         }
     }
 
-    // Tee a (bounded) response body snapshot to the panel. Decompresses gzip/deflate
-    // on the COPY only (the forwarded stream is never touched); brotli ("br") is not
-    // decoded yet and is shown raw with its encoding marked. Decoded as UTF-8.
+    // Result of relaying a chunked response body: the teed (bounded) snapshot, a
+    // truncated flag (tee hit its cap), and bailed (we stopped framing and raw-copied
+    // the rest, so the caller must return instead of looping for the next response).
+    private class ChunkResult(val bytes: ByteArray, val truncated: Boolean, val bailed: Boolean)
+
+    // Relay an HTTP/1.1 chunked response body chunk-by-chunk, forwarding every byte
+    // the instant it is read (SSE tokens are never delayed by the tee) and teeing a
+    // bounded de-chunked snapshot for the panel. Framing only drives the tee; the
+    // forwarded stream is always byte-for-byte. A malformed chunk size or premature
+    // EOF bails to a raw copy of the rest (bailed=true) so the page stays correct.
+    private fun relayChunked(from: InputStream, to: OutputStream, teeLimit: Int): ChunkResult {
+        val tee = ByteArrayOutputStream()
+        var truncated = false
+        val buf = ByteArray(16 * 1024)
+        try {
+            while (true) {
+                // Read + forward the chunk-size line (up to and including the LF).
+                val sizeLine = readLineForward(from, to)
+                    ?: return ChunkResult(tee.toByteArray(), truncated, true)
+                val hex = sizeLine.trim().substringBefore(';').trim()
+                val size = hex.toLongOrNull(16)
+                    ?: run {
+                        // Malformed chunk size → don't guess; raw copy the rest.
+                        pumpInline(from, to)
+                        return ChunkResult(tee.toByteArray(), truncated, true)
+                    }
+                if (size == 0L) {
+                    // Last chunk: forward trailers up to the terminating blank line.
+                    while (true) {
+                        val tl = readLineForward(from, to) ?: break
+                        if (tl == "\r\n" || tl == "\n") break
+                    }
+                    return ChunkResult(tee.toByteArray(), truncated, false)
+                }
+                // Forward exactly [size] bytes (write-as-read), teeing up to the cap.
+                var remaining = size
+                while (remaining > 0) {
+                    val want = if (remaining < buf.size) remaining.toInt() else buf.size
+                    val n = from.read(buf, 0, want)
+                    if (n < 0) return ChunkResult(tee.toByteArray(), truncated, true)
+                    to.write(buf, 0, n)
+                    to.flush()
+                    if (tee.size() < teeLimit) {
+                        val canTee = minOf(n, teeLimit - tee.size())
+                        tee.write(buf, 0, canTee)
+                        if (canTee < n) truncated = true
+                    } else {
+                        truncated = true
+                    }
+                    remaining -= n
+                }
+                // Forward the CRLF that terminates the chunk data.
+                readLineForward(from, to) ?: return ChunkResult(tee.toByteArray(), truncated, true)
+            }
+        } catch (_: Throwable) {
+            return ChunkResult(tee.toByteArray(), truncated, true)
+        }
+    }
+
+    // Read a single line (up to and including LF), forwarding each byte as it is read,
+    // and return it (incl. terminator) for parsing. Null on EOF before any byte.
+    // Capped so a pathological never-ending line can't exhaust memory.
+    private fun readLineForward(from: InputStream, to: OutputStream): String? {
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val b = from.read()
+            if (b < 0) {
+                if (out.size() == 0) return null
+                break
+            }
+            out.write(b)
+            to.write(b)
+            if (b == '\n'.code) break
+            if (out.size() > 64 * 1024) break
+        }
+        to.flush()
+        return out.toString("ISO-8859-1")
+    }
+
+    // Tee a (bounded) response body snapshot to the panel. Decompresses gzip/deflate/
+    // brotli on the COPY only (the forwarded stream is never touched). Truncated
+    // compressed streams are decoded best-effort (decode what we can, swallow the
+    // trailing error). Decoded as UTF-8.
     private fun emitFlowRespBody(flowId: String, body: ByteArray, truncated: Boolean, contentEncoding: String?) {
         val ce = contentEncoding?.lowercase() ?: ""
         val decoded = try {
             when {
-                ce.contains("gzip") -> java.util.zip.GZIPInputStream(body.inputStream()).readBytes()
-                ce.contains("deflate") -> java.util.zip.InflaterInputStream(body.inputStream()).readBytes()
+                ce.contains("gzip") -> decodeBestEffort(java.util.zip.GZIPInputStream(body.inputStream()))
+                ce.contains("br") -> decodeBestEffort(org.brotli.dec.BrotliInputStream(body.inputStream()))
+                ce.contains("deflate") -> decodeBestEffort(java.util.zip.InflaterInputStream(body.inputStream()))
                 else -> body
             }
         } catch (_: Throwable) {
-            body // fall back to raw bytes if decompression fails
+            body // fall back to raw bytes if decompression fails outright
         }
         emit(
             JSONObject()
@@ -454,6 +542,24 @@ object ProxyProbe {
                 .put("truncated", truncated)
                 .put("encoding", contentEncoding ?: ""),
         )
+    }
+
+    // Decode a (possibly truncated) compressed stream best-effort: return whatever
+    // decoded before an error. A teed body capped mid-stream yields a corrupt tail,
+    // so the final read often throws — we keep the bytes decoded so far.
+    private fun decodeBestEffort(input: InputStream): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        try {
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+            }
+        } catch (_: Throwable) {
+            // Truncated/partial compressed stream → keep what we got.
+        }
+        return out.toByteArray()
     }
 
     // Copy exactly [len] bytes from→to (write-as-you-read, flushing each chunk) and

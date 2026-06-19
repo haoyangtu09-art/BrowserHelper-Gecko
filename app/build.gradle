@@ -228,6 +228,11 @@ dependencies {
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
     implementation 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
 
+    // Brotli ("br" Content-Encoding) decoder for the MITM panel's response-body
+    // preview. Pure-Java, tiny; used ONLY to decode the teed copy for display —
+    // the forwarded stream is never decoded.
+    implementation 'org.brotli:dec:0.1.2'
+
     implementation libs.mozilla.browser.domains
     implementation libs.mozilla.browser.engine.gecko
     implementation libs.mozilla.browser.errorpages
