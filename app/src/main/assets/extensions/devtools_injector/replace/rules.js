@@ -79,7 +79,7 @@ function saveReplaceRules() {
 
 function loadReplaceRules() {
   var st = storageLocal();
-  if (!st || !st.get) return;
+  if (!st || !st.get) { finishLoadReplaceRules(); return; }
   try {
     st.get('bhNetReplaceRules').then(function (res) {
       var saved = res && res.bhNetReplaceRules;
@@ -87,10 +87,18 @@ function loadReplaceRules() {
         netReplaceRules = saved.filter(function (r) { return r && r.from; }).map(function (r) {
           return { id: String(r.id || Date.now().toString(36)), from: String(r.from), to: String(r.to || ''), enabled: !!r.enabled };
         });
-        updateReplaceBtn();
       }
-    }).catch(function () {});
-  } catch (e) {}
+      finishLoadReplaceRules();
+    }).catch(function () { finishLoadReplaceRules(); });
+  } catch (e) { finishLoadReplaceRules(); }
+}
+
+// 规则加载结束（无论成功/为空/失败）后统一收尾：置已加载标志，刷新按钮，并下发到原生。
+// 解开 pushReplaceRulesToNative 的 netReplaceRulesLoaded 守卫，保证此时推的是真实规则。
+function finishLoadReplaceRules() {
+  netReplaceRulesLoaded = true;
+  updateReplaceBtn();
+  pushReplaceRulesToNative();
 }
 
 // ── 网络配置持久化（拦截开关、过滤状态等）──

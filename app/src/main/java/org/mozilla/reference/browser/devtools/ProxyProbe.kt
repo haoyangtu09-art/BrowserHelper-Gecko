@@ -62,6 +62,8 @@ object ProxyProbe {
     @Volatile private var replaceReqScope = false
     @Volatile private var replaceRespScope = false
     @Volatile private var replaceRulesList: List<ReplaceRule> = emptyList()
+    private const val REPLACE_PREFS = "bh_devtools"
+    private const val REPLACE_PREFS_KEY = "replace_config"
     private const val REPLACE_CAP = 1 * 1024 * 1024 // only buffer/replace bodies ≤1MB (raw/compressed)
     private const val REPLACE_DECODED_CAP = 8 * 1024 * 1024 // bail if a compressed resp decodes larger
 
@@ -83,6 +85,54 @@ object ProxyProbe {
         replaceRulesList = rules.filter { it.first.isNotEmpty() }.map {
             ReplaceRule(it.first.toByteArray(Charsets.UTF_8), it.second.toByteArray(Charsets.UTF_8), it.first, it.second)
         }
+        saveReplaceConfig(enabled, scope, rules)
+    }
+
+    // Persist the replace config natively so it survives page reloads AND cold
+    // restarts: the panel restarts on every navigation and re-pushes asynchronously,
+    // but the native proxy keeps the last-known rules as the source of truth so
+    // replacement is never interrupted. Stored as a small JSON blob.
+    private fun saveReplaceConfig(enabled: Boolean, scope: String, rules: List<Pair<String, String>>) {
+        val ctx = appContext ?: return
+        try {
+            val arr = org.json.JSONArray()
+            for (r in rules) {
+                if (r.first.isEmpty()) continue
+                arr.put(JSONObject().put("from", r.first).put("to", r.second))
+            }
+            val obj = JSONObject().put("enabled", enabled).put("scope", scope).put("rules", arr)
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(REPLACE_PREFS_KEY, obj.toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    // Restore the persisted replace config into native memory. Called on cold start
+    // (appContext ready) so the proxy can replace immediately once armed, without
+    // waiting for the panel to connect and re-push.
+    @Synchronized
+    private fun loadReplaceConfig() {
+        val ctx = appContext ?: return
+        try {
+            val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .getString(REPLACE_PREFS_KEY, null) ?: return
+            val obj = JSONObject(s)
+            val scope = obj.optString("scope", "both")
+            val arr = obj.optJSONArray("rules")
+            val rules = ArrayList<ReplaceRule>()
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val from = o.optString("from", "")
+                    if (from.isEmpty()) continue
+                    val to = o.optString("to", "")
+                    rules.add(ReplaceRule(from.toByteArray(Charsets.UTF_8), to.toByteArray(Charsets.UTF_8), from, to))
+                }
+            }
+            replaceEnabled = obj.optBoolean("enabled", false)
+            replaceReqScope = scope == "req" || scope == "both"
+            replaceRespScope = scope == "resp" || scope == "both"
+            replaceRulesList = rules
+        } catch (_: Throwable) {}
     }
 
     private fun replaceActiveForReq(): Boolean =
@@ -229,6 +279,9 @@ object ProxyProbe {
         appContext = context.applicationContext
         running = false
         setInt("network.proxy.type", 0)
+        // Restore the persisted replace config so a cold launch resumes replacement
+        // (once the proxy is re-armed) without depending on the panel re-pushing.
+        loadReplaceConfig()
     }
 
     private fun toast(msg: String) {

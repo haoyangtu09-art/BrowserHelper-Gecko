@@ -26,6 +26,8 @@ function postProxyCmd(action) {
 function pushReplaceRulesToNative() {
   try {
     if (!port) return;
+    // 规则尚未从 storage.local 加载完时不要下发：避免重载早期用空集合覆盖原生（含持久化）。
+    if (typeof netReplaceRulesLoaded !== 'undefined' && !netReplaceRulesLoaded) return;
     var enabled = (typeof netReplaceEnabled !== 'undefined') && !!netReplaceEnabled;
     var scope = (typeof netReplaceScope !== 'undefined') ? netReplaceScope : 'both';
     var rules = (enabled && typeof netReplaceRules !== 'undefined' && Array.isArray(netReplaceRules))
