@@ -17,6 +17,7 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
@@ -237,9 +238,10 @@ object ProxyProbe {
             val cOut = tlsClient.outputStream
             val uIn = upstream.inputStream
             val uOut = upstream.outputStream
-            // The first request on this connection shares its flowId with the first
-            // response (the only response we tee), so both sides can correlate.
-            val firstFlowId = flowSeq.incrementAndGet().toString()
+            // HTTP/1.1 keep-alive returns responses in request order, so we correlate
+            // flowIds through a per-connection FIFO: the request loop enqueues, the
+            // response loop dequeues in lock-step.
+            val flowQueue = ConcurrentLinkedQueue<FlowInfo>()
 
             // Request direction (increment 2a): frame each request on a background
             // thread — read head, forward VERBATIM, emit flowReq, then stream-copy
@@ -248,18 +250,15 @@ object ProxyProbe {
             // (chunked / Upgrade / malformed) bails to a raw blocking copy so we
             // never stall the page. Forwarding stays byte-for-byte (the working
             // pump model from a7b65e87 is preserved; the panel only OBSERVES).
-            Thread({ pumpRequests(cIn, uOut, host, firstFlowId) }, "bh-proxy-req")
+            Thread({ pumpRequests(cIn, uOut, host, flowQueue) }, "bh-proxy-req")
                 .apply { isDaemon = true }.start()
 
-            // Response direction is unchanged from increment 1: read only the FIRST
-            // response head, forward it, emit flowResp, then blind-pump the rest.
-            val respHead = readHead(uIn)
-            if (respHead != null) {
-                cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
-                cOut.flush()
-                emitFlowResp(firstFlowId, respHead)
-            }
-            pump(uIn, cOut)
+            // Response direction (increment 2b-safe): loop reading each response head
+            // (so EVERY keep-alive request gets its own flowResp → duration fills in,
+            // no more pending "…"), tee only non-streaming Content-Length bodies
+            // (<256K). chunked / 101 / Upgrade / no-Content-Length bail to a raw
+            // blocking copy — keeps the page stable; chunked body + brotli come later.
+            pumpResponses(uIn, cOut, flowQueue)
         } catch (_: Throwable) {
             try { tlsClient.close() } catch (_: Throwable) {}
             try { upstream.close() } catch (_: Throwable) {}
@@ -319,14 +318,14 @@ object ProxyProbe {
     //     so fall back to a raw blocking copy of the rest and stop framing.
     //   - no body (GET/HEAD/…): loop straight to the next request.
     // Never buffers-then-forwards, never edits headers, never blocks the page.
-    private fun pumpRequests(cIn: InputStream, uOut: OutputStream, host: String, firstFlowId: String) {
+    private fun pumpRequests(cIn: InputStream, uOut: OutputStream, host: String, flowQueue: ConcurrentLinkedQueue<FlowInfo>) {
         var first = true
         try {
             while (true) {
                 val reqHead = readHead(cIn) ?: break
                 uOut.write(reqHead.toByteArray(Charsets.ISO_8859_1))
                 uOut.flush()
-                val flowId = if (first) firstFlowId else flowSeq.incrementAndGet().toString()
+                val flowId = flowSeq.incrementAndGet().toString()
                 if (first) {
                     first = false
                     if (!firstMitmReported) {
@@ -334,7 +333,10 @@ object ProxyProbe {
                         toast("PROXY-SPIKE: 已解密 HTTPS ✅ $host ▶ ${reqHead.substringBefore("\r\n").trim()}")
                     }
                 }
+                val method = reqHead.trimStart().substringBefore(' ').trim()
                 emitFlowReq(flowId, host, reqHead)
+                // Hand the flowId+method to the response loop (FIFO, in request order).
+                flowQueue.add(FlowInfo(flowId, method))
 
                 val te = headerValue(reqHead, "Transfer-Encoding")
                 val upgrade = headerValue(reqHead, "Upgrade")
@@ -361,6 +363,97 @@ object ProxyProbe {
             try { uOut.close() } catch (_: Throwable) {}
             try { cIn.close() } catch (_: Throwable) {}
         }
+    }
+
+    // Correlates a request with its response across the two relay threads (FIFO).
+    private class FlowInfo(val flowId: String, val method: String)
+
+    // Response direction framing loop (increment 2b-safe; runs on the mitm thread).
+    // Reads each response head, forwards it verbatim, emits flowResp (so every
+    // keep-alive request gets a response → duration is known, no perpetual "…"),
+    // then handles the body conservatively:
+    //   - 1xx interim (100/103): no body, and the FINAL response belongs to the
+    //     same request → do NOT dequeue, just loop.
+    //   - 101 Switching Protocols / Upgrade: WebSocket → raw copy rest, stop.
+    //   - HEAD response / 204 / 304: no body → loop.
+    //   - Content-Length: forward the N bytes; tee them (decoded) only when the
+    //     body is small/non-streaming (<256K); loop for the next keep-alive resp.
+    //   - chunked / no-Content-Length: can't frame safely here → raw copy rest,
+    //     stop (chunked body capture is a later increment).
+    private fun pumpResponses(uIn: InputStream, cOut: OutputStream, flowQueue: ConcurrentLinkedQueue<FlowInfo>) {
+        try {
+            while (true) {
+                val respHead = readHead(uIn) ?: break
+                cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
+                cOut.flush()
+                val status = respHead.substringBefore("\r\n").split(" ").getOrElse(1) { "" }.toIntOrNull() ?: 0
+                if (status == 101 || headerValue(respHead, "Upgrade") != null) {
+                    pumpInline(uIn, cOut)
+                    return
+                }
+                if (status in 100..199) {
+                    // Interim response: no body, same request's final response follows.
+                    continue
+                }
+                val info = flowQueue.poll()
+                val flowId = info?.flowId ?: flowSeq.incrementAndGet().toString()
+                emitFlowResp(flowId, respHead)
+
+                val method = info?.method ?: "GET"
+                if (method.equals("HEAD", ignoreCase = true) || status == 204 || status == 304) {
+                    continue // no body by definition
+                }
+                val ce = headerValue(respHead, "Content-Encoding")
+                val te = headerValue(respHead, "Transfer-Encoding")
+                if (te != null && te.contains("chunked", ignoreCase = true)) {
+                    // chunked body framing not implemented yet → keep page stable.
+                    pumpInline(uIn, cOut)
+                    return
+                }
+                val cl = headerValue(respHead, "Content-Length")?.toLongOrNull()
+                if (cl == null) {
+                    // No Content-Length and not chunked → connection-delimited /
+                    // streaming (SSE / Connection: close): can't know where it ends.
+                    pumpInline(uIn, cOut)
+                    return
+                }
+                if (cl > 0) {
+                    // Always forward all bytes; tee (for the panel) only small bodies.
+                    val teeLimit = if (cl <= 256 * 1024) (256 * 1024) else 0
+                    val tee = streamCopy(uIn, cOut, cl, teeLimit)
+                    if (teeLimit > 0) emitFlowRespBody(flowId, tee.bytes, tee.truncated, ce)
+                }
+                // cl == 0 → no body. Loop for the next keep-alive response.
+            }
+        } catch (_: Throwable) {
+        } finally {
+            try { cOut.close() } catch (_: Throwable) {}
+            try { uIn.close() } catch (_: Throwable) {}
+        }
+    }
+
+    // Tee a (bounded) response body snapshot to the panel. Decompresses gzip/deflate
+    // on the COPY only (the forwarded stream is never touched); brotli ("br") is not
+    // decoded yet and is shown raw with its encoding marked. Decoded as UTF-8.
+    private fun emitFlowRespBody(flowId: String, body: ByteArray, truncated: Boolean, contentEncoding: String?) {
+        val ce = contentEncoding?.lowercase() ?: ""
+        val decoded = try {
+            when {
+                ce.contains("gzip") -> java.util.zip.GZIPInputStream(body.inputStream()).readBytes()
+                ce.contains("deflate") -> java.util.zip.InflaterInputStream(body.inputStream()).readBytes()
+                else -> body
+            }
+        } catch (_: Throwable) {
+            body // fall back to raw bytes if decompression fails
+        }
+        emit(
+            JSONObject()
+                .put("type", "flowRespBody")
+                .put("flowId", flowId)
+                .put("respBody", String(decoded, Charsets.UTF_8))
+                .put("truncated", truncated)
+                .put("encoding", contentEncoding ?: ""),
+        )
     }
 
     // Copy exactly [len] bytes from→to (write-as-you-read, flushing each chunk) and

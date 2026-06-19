@@ -4,7 +4,19 @@
 // 只做展示，不参与任何请求转发/拦截。
 
 var proxyFlowIdMap = {}; // 原生 flowId -> { reqId, t0 }
+var proxyFlowOrder = []; // flowId 到达顺序，用于限长清理
 var proxyReqIdSeq = 0;
+
+// 写入 flowId 映射并限长。respBody 在 flowResp 之后才到，所以 flowResp 不能删 map，
+// 改用「到达顺序 + 上限」清理，避免无 body 响应的映射无限堆积。
+function proxyMapSet(flowId, val) {
+  proxyFlowIdMap[flowId] = val;
+  proxyFlowOrder.push(flowId);
+  if (proxyFlowOrder.length > 400) {
+    var old = proxyFlowOrder.shift();
+    delete proxyFlowIdMap[old];
+  }
+}
 
 function proxyGetPort() {
   return typeof port !== 'undefined' ? port : null;
@@ -28,7 +40,7 @@ function proxyOnMsg(msg) {
   if (msg.type === 'flowReq') {
     var reqId = 'proxy_' + (++proxyReqIdSeq);
     // 记录请求到达时间，flowResp 时算 duration（≈ 服务器处理 + 网络往返，到响应头为止）。
-    proxyFlowIdMap[msg.flowId] = { reqId: reqId, t0: Date.now() };
+    proxyMapSet(msg.flowId, { reqId: reqId, t0: Date.now() });
     try {
       window.postMessage({
         __bhNet: true,
@@ -53,9 +65,9 @@ function proxyOnMsg(msg) {
       }, '*');
     } catch (e) {}
   } else if (msg.type === 'flowResp') {
+    // 不删 map：respBody 在 flowResp 之后才到，需要保留映射（由 proxyMapSet 限长清理）。
     var rec = proxyFlowIdMap[msg.flowId];
     if (!rec) return;
-    delete proxyFlowIdMap[msg.flowId];
     try {
       window.postMessage({
         __bhNet: true,
@@ -65,6 +77,20 @@ function proxyOnMsg(msg) {
         respHeaders: msg.respHeaders || {},
         respBody: null,
         duration: Date.now() - rec.t0,
+      }, '*');
+    } catch (e) {}
+  } else if (msg.type === 'flowRespBody') {
+    // 响应体（在 flowResp 之后到），补给面板对应条目。
+    var respRec = proxyFlowIdMap[msg.flowId];
+    if (!respRec) return;
+    try {
+      window.postMessage({
+        __bhNet: true,
+        type: 'respBody',
+        reqId: respRec.reqId,
+        respBody: msg.respBody || null,
+        truncated: !!msg.truncated,
+        encoding: msg.encoding || '',
       }, '*');
     } catch (e) {}
   }

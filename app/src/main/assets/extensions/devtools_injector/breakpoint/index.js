@@ -88,6 +88,17 @@ window.addEventListener('message', function (e) {
       if (netPanelVisible) renderNetList();
       if (netPanelVisible) renderDetail();
     }
+  } else if (d.type === 'respBody') {
+    // 代理旁路补传的响应体（在 resp 之后到）。resp 已把条目移出 netReqMap，
+    // 用 findReqEntry 回退到列表里查。
+    var respEntry = netReqMap[d.reqId] || findReqEntry(d.reqId);
+    if (respEntry) {
+      respEntry.respBody = d.respBody || null;
+      if (d.truncated) respEntry.respTruncated = true;
+      if (d.encoding) respEntry.respEncoding = d.encoding;
+      if (!respEntry.plain || !respEntry.plain.length) respEntry.plain = collectPlainCandidates(respEntry);
+      if (netPanelVisible) renderDetail();
+    }
   } else if (d.type === 'plain') {
     recordPlainCandidate(d);
   }
