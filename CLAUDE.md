@@ -125,6 +125,21 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - **纠正一个曾经的误判**：以为 Phase 1 页面打不开是删了 `reimportEnterpriseRoots()`。其实把它加回去后（commit `3d0ef650`）页面**依然**打不开 —— 真正元凶是完整 HTTP 解析。`enterprise_roots` 只影响「能否解密 / 信任」，不影响「页面能否加载」，两者是独立的两条线。
 - 以后给面板加抓包数据流 / 过滤 / 拦截，必须在**不破坏 pump 模型**的前提下增量加（例如旁路 tee 一份数据给面板，而不是把转发改成阻塞解析），每加一步单独构建验证。
 
+#### 字符替换的「唯一受控例外」（不要当成回退坑#4 的 bug）
+
+响应方向字符替换**必须改写 body**，这与盲转发天生冲突。`pumpResponses` 里对此开了**两类受控缓冲**，其余一切仍走 forward-as-read：
+
+1. **明文定长**：`Content-Length` 已知、非 chunked、有 body、`≤REPLACE_CAP(1MB)` → `readExact` 缓冲、`decodeForReplace` 解压、替换、以 identity 下发（删 `Content-Encoding`、改 `Content-Length`）。
+2. **chunked 文档型**（`isReplaceableDoc`：html/json/js/css/xml/text，**显式排除 `event-stream`**）→ `readChunkedToBuffer` 整体去分块（带 `REPLACE_CHUNK_RAW_CAP(4MB)` 上限 + `CHUNK_REPLACE_TIMEOUT_MS(30s)` 读超时），再解压/替换/identity 下发。
+
+**安全边界（务必保持）**：
+- 替换**关闭**或 scope 不含 resp 时，`replaceActiveForResp()=false` → 两类缓冲都不进，字节级等同盲转发。
+- **SSE / 无 Content-Length 流式 / WebSocket / 未命中文档型 content-type 的 chunked** 永远不缓冲，仍走 `relayChunked`/`pumpInline`。这是不碰坑#4 的关键。
+- chunked 缓冲一旦命中**超时 / 超上限 / 错帧**：已消费的字节无法回退 → **关连接**（该资源降级重载），这是开「激进模式」时用户已接受的代价；靠 content-type 闸门 + 30s 超时把概率压到最低。
+- 解不开（未知编码 / 解压炸弹）就**原样转发已去分块字节**（保留 `Content-Encoding`，不替换），页面照常。
+
+> 判据：凡是**只对小/有界/文档型响应缓冲、对流式一律放行**的改动，是受控例外；凡是把转发**整体换成**阻塞解析、或对流式也缓冲的，才是坑#4。
+
 ## 持久化
 
 - `browser.storage.local`

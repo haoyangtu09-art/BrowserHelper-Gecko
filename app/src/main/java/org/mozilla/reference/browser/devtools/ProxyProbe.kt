@@ -66,6 +66,8 @@ object ProxyProbe {
     private const val REPLACE_PREFS_KEY = "replace_config"
     private const val REPLACE_CAP = 1 * 1024 * 1024 // only buffer/replace bodies ≤1MB (raw/compressed)
     private const val REPLACE_DECODED_CAP = 8 * 1024 * 1024 // bail if a compressed resp decodes larger
+    private const val REPLACE_CHUNK_RAW_CAP = 4 * 1024 * 1024 // de-chunked doc buffer cap (still-encoded)
+    private const val CHUNK_REPLACE_TIMEOUT_MS = 30000 // read timeout while buffering a chunked doc
 
     fun setChannel(emit: ((JSONObject) -> Unit)?) {
         channel = emit
@@ -206,6 +208,83 @@ object ProxyProbe {
             !(c > 0 && line.substring(0, c).trim().equals(name, ignoreCase = true))
         }
         return kept.joinToString("\r\n")
+    }
+
+    // Content-types we will buffer-and-replace even when chunked/compressed. These are
+    // FINITE documents that terminate promptly. event-stream (SSE) is explicitly excluded
+    // because it is a long-lived stream that must never be buffered (CLAUDE.md 坑#4).
+    private fun isReplaceableDoc(ct: String?): Boolean {
+        val c = ct?.lowercase() ?: return false
+        if (c.contains("event-stream")) return false
+        return c.contains("text/html") || c.contains("xhtml") ||
+            c.contains("application/json") || c.contains("javascript") ||
+            c.contains("text/css") || c.contains("xml") || c.contains("text/plain")
+    }
+
+    // Re-frame a (de-chunked) body as identity: drop Transfer-Encoding and any existing
+    // Content-Length, optionally drop Content-Encoding (when stripCe — i.e. we decoded the
+    // body), then add an accurate Content-Length. Preserves the status line and CRLF tail.
+    private fun toIdentityHead(head: String, stripCe: Boolean, size: Int): String {
+        var h = stripHeader(head, "Transfer-Encoding")
+        if (stripCe) h = stripHeader(h, "Content-Encoding")
+        h = stripHeader(h, "Content-Length")
+        val lines = h.split("\r\n").toMutableList()
+        if (lines.isNotEmpty()) lines.add(1, "Content-Length: $size")
+        return lines.joinToString("\r\n")
+    }
+
+    // De-chunk a chunked response body into one buffer (still in its original
+    // Content-Encoding). Bounded by [rawCap] and guarded by a socket read timeout so a
+    // mislabeled never-ending stream can't hang the connection. Returns null on cap
+    // overflow / timeout / malformed framing / premature EOF — the caller then tears the
+    // connection down (bytes were already consumed; it cannot resume verbatim).
+    private fun readChunkedToBuffer(upstream: Socket, input: InputStream, rawCap: Int): ByteArray? {
+        val prevTimeout = try { upstream.soTimeout } catch (_: Throwable) { 0 }
+        try { upstream.soTimeout = CHUNK_REPLACE_TIMEOUT_MS } catch (_: Throwable) {}
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        try {
+            while (true) {
+                val sizeLine = readAsciiLine(input) ?: return null
+                val hex = sizeLine.trim().substringBefore(';').trim()
+                val size = hex.toLongOrNull(16) ?: return null
+                if (size == 0L) {
+                    // Last chunk: consume trailers up to the terminating blank line.
+                    while (true) {
+                        val tl = readAsciiLine(input) ?: break
+                        if (tl == "\r\n" || tl == "\n" || tl.isEmpty()) break
+                    }
+                    return out.toByteArray()
+                }
+                var remaining = size
+                while (remaining > 0) {
+                    val want = if (remaining < buf.size) remaining.toInt() else buf.size
+                    val n = input.read(buf, 0, want)
+                    if (n < 0) return null
+                    out.write(buf, 0, n)
+                    if (out.size() > rawCap) return null
+                    remaining -= n
+                }
+                readAsciiLine(input) ?: return null // CRLF after chunk data
+            }
+        } catch (_: Throwable) {
+            return null
+        } finally {
+            try { upstream.soTimeout = prevTimeout } catch (_: Throwable) {}
+        }
+    }
+
+    // Read one line (through LF) as ISO-8859-1; null on immediate EOF. Length-capped.
+    private fun readAsciiLine(input: InputStream): String? {
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (out.size() == 0) null else out.toString("ISO-8859-1")
+            out.write(b)
+            if (b == '\n'.code) break
+            if (out.size() > 64 * 1024) break
+        }
+        return out.toString("ISO-8859-1")
     }
 
     // Fully decode a bounded response body so its text can be replaced. Returns null
@@ -459,7 +538,7 @@ object ProxyProbe {
             // (de-chunked on the copy; gzip/deflate/brotli decoded for the panel only).
             // 101 / Upgrade / no-Content-Length non-chunked bail to a raw blocking copy
             // — keeps the page stable. Forwarding is always byte-for-byte.
-            pumpResponses(uIn, cOut, flowQueue)
+            pumpResponses(upstream, uIn, cOut, flowQueue)
         } catch (_: Throwable) {
             try { tlsClient.close() } catch (_: Throwable) {}
             try { upstream.close() } catch (_: Throwable) {}
@@ -614,7 +693,7 @@ object ProxyProbe {
     //   - chunked: relayChunked frames it (forward-as-read), tees a bounded
     //     de-chunked snapshot, then loops — unless a malformed size bails to raw copy.
     //   - no-Content-Length, non-chunked: can't frame safely here → raw copy rest, stop.
-    private fun pumpResponses(uIn: InputStream, cOut: OutputStream, flowQueue: ConcurrentLinkedQueue<FlowInfo>) {
+    private fun pumpResponses(upstream: Socket, uIn: InputStream, cOut: OutputStream, flowQueue: ConcurrentLinkedQueue<FlowInfo>) {
         try {
             while (true) {
                 val respHead = readHead(uIn) ?: break
@@ -682,6 +761,38 @@ object ProxyProbe {
                 emitFlowResp(flowId, respHead)
                 if (noBody) continue // no body by definition
                 if (te != null && te.contains("chunked", ignoreCase = true)) {
+                    // Gated buffered replace: ONLY for finite document content-types
+                    // (html/json/js/css/xml/text, never SSE). De-chunk the whole body
+                    // (bounded + read-timeout), decode, replace, re-emit as identity.
+                    // This is the one deliberate exception to forward-as-read; it never
+                    // touches streaming/SSE responses, which stay on the pump path below.
+                    if (replaceActiveForResp() && isReplaceableDoc(headerValue(respHead, "Content-Type"))) {
+                        val raw = readChunkedToBuffer(upstream, uIn, REPLACE_CHUNK_RAW_CAP)
+                        if (raw == null) return // partial/timeout/overflow → tear down
+                        val decoded = decodeForReplace(raw, ce)
+                        if (decoded == null) {
+                            // Can't decode (unknown enc / bomb): forward the de-chunked
+                            // bytes as identity, KEEPING Content-Encoding so the browser
+                            // still decodes them. No replacement (page stays correct).
+                            val h = toIdentityHead(respHead, false, raw.size)
+                            cOut.write(h.toByteArray(Charsets.ISO_8859_1))
+                            if (raw.isNotEmpty()) cOut.write(raw)
+                            cOut.flush()
+                            emitFlowResp(flowId, h)
+                            val teeLen = minOf(raw.size, 256 * 1024)
+                            emitFlowRespBody(flowId, raw.copyOf(teeLen), raw.size > teeLen, ce)
+                            continue
+                        }
+                        val newBody = applyReplaceBytes(decoded)
+                        val h = toIdentityHead(applyReplaceStr(respHead), ce != null, newBody.size)
+                        cOut.write(h.toByteArray(Charsets.ISO_8859_1))
+                        if (newBody.isNotEmpty()) cOut.write(newBody)
+                        cOut.flush()
+                        emitFlowResp(flowId, h)
+                        val teeLen = minOf(newBody.size, 256 * 1024)
+                        emitFlowRespBody(flowId, newBody.copyOf(teeLen), newBody.size > teeLen, null)
+                        continue
+                    }
                     // chunked body: frame chunk-by-chunk (forward-as-read), teeing a
                     // bounded snapshot. SSE tokens are forwarded the instant they
                     // arrive (tee never delays the stream). A malformed chunk size

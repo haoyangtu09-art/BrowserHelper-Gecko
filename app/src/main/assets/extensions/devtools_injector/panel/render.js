@@ -264,6 +264,38 @@ function highlightHtml(text, q) {
   return out;
 }
 
+// 全局搜索命中在正文/头部（URL 里看不到）时，截取命中处上下文做色块高亮，
+// 在列表行里展示一小段，效果同详情搜索。返回 '' 表示只命中 URL（已就地高亮）。
+function matchSnippet(r, q) {
+  if (!q) return '';
+  var lq = String(q).toLowerCase();
+  var sources = [
+    { label: '响应体', text: String(r.respBody || '') },
+    { label: '请求体', text: String(r.reqBody || '') },
+    { label: '响应头', text: headerBlobRaw(r.respHeaders) },
+    { label: '请求头', text: headerBlobRaw(r.reqHeaders) }
+  ];
+  for (var i = 0; i < sources.length; i++) {
+    var text = sources[i].text;
+    var idx = text.toLowerCase().indexOf(lq);
+    if (idx === -1) continue;
+    var start = Math.max(0, idx - 24);
+    var end = Math.min(text.length, idx + lq.length + 40);
+    var frag = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+    return '<span class="bh-snip"><span class="bh-snip-tag">' + sources[i].label + '</span>' +
+      highlightHtml(frag, q) + '</span>';
+  }
+  return '';
+}
+
+// 原样（不转小写）拼接头部，供 matchSnippet 截取展示用。
+function headerBlobRaw(h) {
+  if (!h) return '';
+  var s = '';
+  try { Object.keys(h).forEach(function (k) { s += k + ': ' + h[k] + '\n'; }); } catch (e) {}
+  return s;
+}
+
 // 兼容旧引用：遥测或噪音。
 function isTunnelNoiseReq(r) {
   return isTelemetryReq(r) || isNoiseReq(r);
@@ -618,9 +650,10 @@ function renderNetList() {
     var tags = [];
     if (r.tag) tags.push(r.tag);
     if (r.plain && r.plain.length) tags.push('明文');
-    // 搜索命中但 URL 里看不到 → 命中在正文/头部，给个提示标签。
-    if (searchQ && String(r.url || '').toLowerCase().indexOf(searchQ.toLowerCase()) === -1) tags.push('正文命中');
     var tag = tags.map(function (t) { return '<span class="bh-tag">' + escHtml(t) + '</span>'; }).join('');
+    // 命中在正文/头部（URL 里看不到）→ 展示带色块的命中片段。
+    var snip = (searchQ && String(r.url || '').toLowerCase().indexOf(searchQ.toLowerCase()) === -1)
+      ? matchSnippet(r, searchQ) : '';
     var bpClass = netBreakpoints.some(function (bp) {
       return r.url.indexOf(bp.pattern) !== -1;
     }) ? ' bh-bp' : '';
@@ -631,6 +664,7 @@ function renderNetList() {
       '<span class="bh-main">' +
         '<span class="bh-url" title="' + escHtml(r.url) + '">' + highlightHtml(truncUrl(r.url), searchQ) + '</span>' +
         '<span class="bh-meta">' + escHtml(meta) + '</span>' +
+        snip +
       '</span>' +
       tag +
       '<span class="bh-status-wrap"' + errTitle + '>' +
