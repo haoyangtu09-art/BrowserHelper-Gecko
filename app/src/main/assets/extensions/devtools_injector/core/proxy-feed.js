@@ -40,6 +40,18 @@ function proxyOnMsg(msg) {
         reqBody: null,
       }, '*');
     } catch (e) {}
+  } else if (msg.type === 'flowReqBody') {
+    // 请求体到达（在 flowResp 之前），把 tee 的正文补给面板里已建的请求条目。
+    var bodyRec = proxyFlowIdMap[msg.flowId];
+    if (!bodyRec) return;
+    try {
+      window.postMessage({
+        __bhNet: true,
+        type: 'reqBody',
+        reqId: bodyRec.reqId,
+        reqBody: msg.reqBody || null,
+      }, '*');
+    } catch (e) {}
   } else if (msg.type === 'flowResp') {
     var rec = proxyFlowIdMap[msg.flowId];
     if (!rec) return;

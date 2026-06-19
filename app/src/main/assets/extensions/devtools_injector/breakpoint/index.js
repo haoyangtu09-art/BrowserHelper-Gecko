@@ -14,6 +14,17 @@ var netReqMap = {}; // reqId -> 请求条目（等待响应）
 var netExtViewEl = null;
 	  var netPlainCandidates = [];
 	  var netPlainSeq = 0;
+
+// 把 netRequests 截到最多 200 条，并清理被截掉条目在 netReqMap 中残留的关联，
+// 避免 keep-alive 上「只入列、永远等不到响应」的条目把 netReqMap 撑爆。
+function trimNetRequests() {
+  if (netRequests.length <= 200) return;
+  var removed = netRequests.splice(200);
+  for (var i = 0; i < removed.length; i++) {
+    if (removed[i] && removed[i].reqId) delete netReqMap[removed[i].reqId];
+  }
+}
+
 window.addEventListener('message', function (e) {
   if (!e.data || !e.data.__bhNet) return;
   var d = e.data;
@@ -27,6 +38,11 @@ window.addEventListener('message', function (e) {
     };
     entry.plain = collectPlainCandidates(entry);
     netReqMap[d.reqId] = entry;
+    // 收到请求即入列（pending，状态显示 …）。代理模式下 keep-alive 连接上的后续
+    // 请求拿不到独立响应（响应方向只读首个响应头），若等 resp 才入列会永远不显示。
+    netRequests.unshift(entry);
+    trimNetRequests();
+    if (netPanelVisible) renderNetList();
   } else if (d.type === 'resp') {
     var entry = netReqMap[d.reqId];
     if (entry) {
@@ -36,10 +52,8 @@ window.addEventListener('message', function (e) {
       entry.duration = d.duration;
       entry.error = d.error || null;
       if (!entry.plain || !entry.plain.length) entry.plain = collectPlainCandidates(entry);
+      // 条目已在 req 时入列，这里只就地更新，不再 unshift（避免重复）。
       delete netReqMap[d.reqId];
-      // 放到列表头部，最多保留 200 条
-      netRequests.unshift(entry);
-      if (netRequests.length > 200) netRequests.length = 200;
       maybeFocusPayload(entry);
       if (netPanelVisible) renderNetList();
       if (netPanelVisible) renderDetail();
@@ -64,6 +78,16 @@ window.addEventListener('message', function (e) {
   } else if (d.type === 'respResolve') {
     var rf = _respBpIsoPending[d.reqId];
     if (rf) { delete _respBpIsoPending[d.reqId]; (rf.resolve || rf)(d); }
+  } else if (d.type === 'reqBody') {
+    // 代理旁路补传的请求体：填回 netReqMap 里已存在（req 时已入列）的请求条目。
+    var bodyEntry = netReqMap[d.reqId];
+    if (bodyEntry) {
+      bodyEntry.reqBody = d.reqBody || null;
+      if (!bodyEntry.plain || !bodyEntry.plain.length) bodyEntry.plain = collectPlainCandidates(bodyEntry);
+      maybeFocusPayload(bodyEntry);
+      if (netPanelVisible) renderNetList();
+      if (netPanelVisible) renderDetail();
+    }
   } else if (d.type === 'plain') {
     recordPlainCandidate(d);
   }

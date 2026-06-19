@@ -237,35 +237,27 @@ object ProxyProbe {
             val cOut = tlsClient.outputStream
             val uIn = upstream.inputStream
             val uOut = upstream.outputStream
-            val flowId = flowSeq.incrementAndGet().toString()
+            // The first request on this connection shares its flowId with the first
+            // response (the only response we tee), so both sides can correlate.
+            val firstFlowId = flowSeq.incrementAndGet().toString()
 
-            // Tee (increment 1, head-only): read the FIRST request head
-            // (client→upstream), forward it VERBATIM and emit its metadata to the
-            // panel; then read the FIRST response head (upstream→client) the same
-            // way; then blind-pump the rest of both directions unchanged.
-            // Forwarding stays byte-for-byte — the panel only OBSERVES heads, so a
-            // parse glitch can never stall the page (the working pump model from
-            // a7b65e87 is preserved). Keep-alive/subsequent messages on the same
-            // connection are not parsed yet (a later increment).
-            val reqHead = readHead(cIn)
-            if (reqHead != null) {
-                if (!firstMitmReported) {
-                    firstMitmReported = true
-                    toast("PROXY-SPIKE: 已解密 HTTPS ✅ $host ▶ ${reqHead.substringBefore("\r\n").trim()}")
-                }
-                uOut.write(reqHead.toByteArray(Charsets.ISO_8859_1))
-                uOut.flush()
-                emitFlowReq(flowId, host, reqHead)
-            }
-            // Forward the rest of client→upstream (request body + any later bytes)
-            // untouched, on a background thread.
-            pump(cIn, uOut)
+            // Request direction (increment 2a): frame each request on a background
+            // thread — read head, forward VERBATIM, emit flowReq, then stream-copy
+            // the body (Content-Length) while teeing a bounded copy to the panel,
+            // and loop for keep-alive follow-ups. Anything we can't frame safely
+            // (chunked / Upgrade / malformed) bails to a raw blocking copy so we
+            // never stall the page. Forwarding stays byte-for-byte (the working
+            // pump model from a7b65e87 is preserved; the panel only OBSERVES).
+            Thread({ pumpRequests(cIn, uOut, host, firstFlowId) }, "bh-proxy-req")
+                .apply { isDaemon = true }.start()
 
+            // Response direction is unchanged from increment 1: read only the FIRST
+            // response head, forward it, emit flowResp, then blind-pump the rest.
             val respHead = readHead(uIn)
             if (respHead != null) {
                 cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
                 cOut.flush()
-                emitFlowResp(flowId, respHead)
+                emitFlowResp(firstFlowId, respHead)
             }
             pump(uIn, cOut)
         } catch (_: Throwable) {
@@ -316,6 +308,110 @@ object ProxyProbe {
                 .put("flowId", flowId)
                 .put("status", status)
                 .put("respHeaders", headers),
+        )
+    }
+
+    // Request direction framing loop (runs on its own daemon thread). Reads each
+    // request head, forwards it verbatim, emits flowReq, then handles the body:
+    //   - Content-Length: N → copy exactly N bytes (write-as-you-read) and tee a
+    //     bounded snapshot to the panel, then loop for the next keep-alive request.
+    //   - chunked / Upgrade(WebSocket) / malformed-CL → we can't frame it safely,
+    //     so fall back to a raw blocking copy of the rest and stop framing.
+    //   - no body (GET/HEAD/…): loop straight to the next request.
+    // Never buffers-then-forwards, never edits headers, never blocks the page.
+    private fun pumpRequests(cIn: InputStream, uOut: OutputStream, host: String, firstFlowId: String) {
+        var first = true
+        try {
+            while (true) {
+                val reqHead = readHead(cIn) ?: break
+                uOut.write(reqHead.toByteArray(Charsets.ISO_8859_1))
+                uOut.flush()
+                val flowId = if (first) firstFlowId else flowSeq.incrementAndGet().toString()
+                if (first) {
+                    first = false
+                    if (!firstMitmReported) {
+                        firstMitmReported = true
+                        toast("PROXY-SPIKE: 已解密 HTTPS ✅ $host ▶ ${reqHead.substringBefore("\r\n").trim()}")
+                    }
+                }
+                emitFlowReq(flowId, host, reqHead)
+
+                val te = headerValue(reqHead, "Transfer-Encoding")
+                val upgrade = headerValue(reqHead, "Upgrade")
+                val clStr = headerValue(reqHead, "Content-Length")
+                if (upgrade != null || (te != null && te.contains("chunked", ignoreCase = true))) {
+                    // WebSocket upgrade or chunked body: framing is unsafe → raw copy rest.
+                    pumpInline(cIn, uOut)
+                    return
+                }
+                val cl = clStr?.toLongOrNull()
+                if (clStr != null && cl == null) {
+                    // Malformed Content-Length → don't guess, bail to raw copy.
+                    pumpInline(cIn, uOut)
+                    return
+                }
+                if (cl != null && cl > 0) {
+                    val tee = streamCopy(cIn, uOut, cl, 256 * 1024)
+                    emitFlowReqBody(flowId, tee.bytes, tee.truncated)
+                }
+                // else: no body → loop to next request.
+            }
+        } catch (_: Throwable) {
+        } finally {
+            try { uOut.close() } catch (_: Throwable) {}
+            try { cIn.close() } catch (_: Throwable) {}
+        }
+    }
+
+    // Copy exactly [len] bytes from→to (write-as-you-read, flushing each chunk) and
+    // tee at most [teeLimit] bytes into the returned snapshot for the panel.
+    private class TeeResult(val bytes: ByteArray, val truncated: Boolean)
+    private fun streamCopy(from: InputStream, to: OutputStream, len: Long, teeLimit: Int): TeeResult {
+        val tee = ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        var remaining = len
+        var truncated = false
+        while (remaining > 0) {
+            val want = if (remaining < buf.size) remaining.toInt() else buf.size
+            val n = from.read(buf, 0, want)
+            if (n < 0) break
+            to.write(buf, 0, n)
+            to.flush()
+            if (tee.size() < teeLimit) {
+                val canTee = minOf(n, teeLimit - tee.size())
+                tee.write(buf, 0, canTee)
+                if (canTee < n) truncated = true
+            } else {
+                truncated = true
+            }
+            remaining -= n
+        }
+        return TeeResult(tee.toByteArray(), truncated)
+    }
+
+    // Blocking byte relay (no thread) — used to bail out of request framing.
+    private fun pumpInline(from: InputStream, to: OutputStream) {
+        val buf = ByteArray(16 * 1024)
+        try {
+            while (true) {
+                val n = from.read(buf)
+                if (n < 0) break
+                to.write(buf, 0, n)
+                to.flush()
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    // Tee a (bounded) request body snapshot to the panel. Decoded as UTF-8 since
+    // these are typically JSON/text API payloads; invalid bytes become U+FFFD.
+    private fun emitFlowReqBody(flowId: String, body: ByteArray, truncated: Boolean) {
+        emit(
+            JSONObject()
+                .put("type", "flowReqBody")
+                .put("flowId", flowId)
+                .put("reqBody", String(body, Charsets.UTF_8))
+                .put("truncated", truncated),
         )
     }
 
