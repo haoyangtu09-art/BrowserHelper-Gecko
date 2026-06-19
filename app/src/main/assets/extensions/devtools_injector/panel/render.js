@@ -184,19 +184,14 @@ function isNoiseReq(r) {
   return lowValueGuard(r);
 }
 
-// 纯 cookie 同步包：无请求体、GET、非 payload、响应体很小，且带 Cookie/Set-Cookie 或命中已知 sync 端点。
+// cookie/session 包：激进过滤——URL 含 cookie/session，或请求带 Cookie 头、响应带 Set-Cookie 头即命中。
+// 用户反馈：开代理后 cookie 同步包刷屏，宁可多隐藏也要清掉。
 function isCookieReq(r) {
-  var method = String(r.method || 'GET').toUpperCase();
-  var rb = byteLen(r.reqBody);
-  var sb = byteLen(r.respBody);
-  if (rb !== 0 || method !== 'GET') return false;
-  if (isPayloadReq(r)) return false;
-  if (sb > 512) return false;
   var url = String(r.url || '').toLowerCase();
-  var hasCookie = !!headerValue(r.reqHeaders, 'cookie');
-  var hasSetCookie = !!headerValue(r.respHeaders, 'set-cookie');
-  var syncRe = /(gen_204|\/sync|\/cookie|getuid|\/id\b|\/pixel|__cf|usersync|cksync|setuid)/;
-  return hasCookie || hasSetCookie || syncRe.test(url);
+  if (/cookie|session/.test(url)) return true;
+  if (headerValue(r.reqHeaders, 'cookie')) return true;
+  if (headerValue(r.respHeaders, 'set-cookie')) return true;
+  return false;
 }
 
 // 兼容旧引用：遥测或噪音。
@@ -474,6 +469,8 @@ function selectFirstVisibleRequest(preferPayload) {
 
 function maybeFocusPayload(entry) {
   if (!netPayloadOnly || netEditing || netSelIntercept || !isPayloadReq(entry)) return;
+  // 已有选中请求时不抢焦点：用户正在看某个请求，新包不该把详情切走。
+  if (netSelReq) return;
   if (netHideTelemetry && isTelemetryReq(entry)) return;
   if (netHideNoise && isNoiseReq(entry)) return;
   if (netHideCookie && isCookieReq(entry)) return;
@@ -483,6 +480,10 @@ function maybeFocusPayload(entry) {
 
 function renderNetList() {
   if (!netListEl) return;
+  // 重渲染前记下滚动位置和总高。新请求是 unshift 到顶部 → 全量重建后顶部多出几行，
+  // 若用户正滚动在下方看某条请求，要按新增高度补偿 scrollTop，让当前查看的行视觉不动。
+  var prevTop = netListEl.scrollTop;
+  var prevHeight = netListEl.scrollHeight;
   var rows = getVisibleRequests();
   var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0 || netRespInterceptQueue.length > 0;
   if (rows.length === 0 && !showIntercepts) {
@@ -564,6 +565,10 @@ function renderNetList() {
       '</div>';
   });
   netListEl.innerHTML = html;
+  // 恢复滚动：用户在顶部(≈0)时保持顶部，让新请求可见；否则按新增高度补偿，保持当前查看行不动。
+  var delta = netListEl.scrollHeight - prevHeight;
+  if (prevTop > 4 && delta > 0) netListEl.scrollTop = prevTop + delta;
+  else netListEl.scrollTop = prevTop;
   // 绑定点击
 	    Array.prototype.forEach.call(netListEl.querySelectorAll('.bh-intercept'), function (el) {
 	      el.addEventListener('click', function () {

@@ -10,8 +10,40 @@ var EXT_STYLE = [
   '#bh-ext-head{display:flex;align-items:center;gap:8px;padding:10px 12px;',
   '  border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
   '#bh-ext-title{flex:1;font-size:15px;font-weight:700;}',
-  '#bh-ext-body{flex:1;display:flex;align-items:center;justify-content:center;color:#888;font-size:14px;}',
+  '#bh-ext-body{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:12px;}',
+  '.bh-ext-card{display:flex;align-items:center;gap:12px;padding:14px 16px;',
+  '  border:1px solid #d0d7de;border-radius:14px;background:#fff;',
+  '  box-shadow:0 1px 3px rgba(0,0,0,.06);}',
+  '.bh-ext-card-info{flex:1;min-width:0;}',
+  '.bh-ext-card-name{font-size:15px;font-weight:600;color:#111;}',
+  '.bh-ext-card-desc{font-size:13px;color:#888;margin-top:2px;}',
+  '.bh-ext-install{flex:none;padding:7px 16px;border:none;border-radius:9px;',
+  '  background:#2563eb;color:#fff;font-size:14px;font-weight:600;}',
 ].join('');
+
+// 单个拓展卡片：圆角卡片 + 名称 + 安装按钮（按钮暂不做任何事，仅占位）。
+function buildExtCard(p) {
+  var card = document.createElement('div');
+  card.className = 'bh-ext-card';
+  var info = document.createElement('div');
+  info.className = 'bh-ext-card-info';
+  var name = document.createElement('div');
+  name.className = 'bh-ext-card-name';
+  name.textContent = p.name || '';
+  info.appendChild(name);
+  if (p.desc) {
+    var desc = document.createElement('div');
+    desc.className = 'bh-ext-card-desc';
+    desc.textContent = p.desc;
+    info.appendChild(desc);
+  }
+  card.appendChild(info);
+  var btn = document.createElement('button');
+  btn.className = 'bh-ext-install';
+  btn.textContent = '安装';
+  card.appendChild(btn);
+  return card;
+}
 
 function buildExtPanel() {
   if (extPanel) return extPanel;
@@ -29,10 +61,26 @@ function buildExtPanel() {
   wrap.appendChild(head);
   var body = document.createElement('div');
   body.id = 'bh-ext-body';
-  body.textContent = '无拓展';
+  var presets = (typeof BH_EXTENSION_PRESETS !== 'undefined' && BH_EXTENSION_PRESETS) || [];
+  presets.forEach(function (p) { body.appendChild(buildExtCard(p)); });
   wrap.appendChild(body);
   extPanel = wrap;
   return wrap;
+}
+
+// eruda 把 settings 之外的所有 tool 都插在「设置」之前，所以「拓展」默认排在设置左边、
+// 紧挨网络。注册后把它的 nav tab DOM 挪到父容器末尾，即排到「设置」右边（最右）。
+function moveExtTabLast() {
+  var tries = 0;
+  (function go() {
+    try {
+      var host = document.querySelector('.eruda-container');
+      var sr = host && host.shadowRoot;
+      var item = sr && sr.querySelector('.eruda-item[data-id="\u62d3\u5c55"]');
+      if (item && item.parentNode) { item.parentNode.appendChild(item); return; }
+    } catch (e) {}
+    if (tries++ < 30) setTimeout(go, 100);
+  }());
 }
 
 // isolated world：直接 eruda.add 一个名为「拓展」的 Tool。
@@ -52,6 +100,7 @@ function registerExtTool(erudaObj) {
     destroy: function () {},
   };
   try { erudaObj.add(tool); } catch (e) {}
+  moveExtTabLast();
 }
 
 // page world：content script 无法直接调用页面里的 eruda.add，注入脚本在页面世界注册。
@@ -83,6 +132,13 @@ function injectExtToolPageWorld() {
     '      destroy:function(){},',
     '    };',
     '  });',
+    // 把「拓展」tab 挪到设置右边（eruda 默认把它插在设置左边）。
+    '  var tries=0;(function go(){try{',
+    '    var host=document.querySelector(".eruda-container");',
+    '    var sr=host&&host.shadowRoot;',
+    '    var item=sr&&sr.querySelector(".eruda-item[data-id=\\"\u62d3\u5c55\\"]");',
+    '    if(item&&item.parentNode){item.parentNode.appendChild(item);return;}',
+    '  }catch(e){}if(tries++<30)setTimeout(go,100);})();',
     '})();',
   ].join('\n'));
 }

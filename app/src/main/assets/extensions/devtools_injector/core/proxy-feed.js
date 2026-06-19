@@ -37,6 +37,14 @@ function proxyFeedInit() {
 
 function proxyOnMsg(msg) {
   if (!msg || msg.ch !== 'proxy') return;
+  if (msg.type === 'proxyState') {
+    // 原生回报代理真实开关态（冷启动会被复位为关），同步「监听」按钮文案，避免误显示。
+    netEnabled = !!msg.running;
+    if (typeof netEnableBtn !== 'undefined' && netEnableBtn) {
+      netEnableBtn.textContent = netEnabled ? '\u25cf \u76d1\u542c\u4e2d' : '\u25cb \u5df2\u505c\u6b62';
+    }
+    return;
+  }
   if (msg.type === 'flowReq') {
     var reqId = 'proxy_' + (++proxyReqIdSeq);
     // 记录请求到达时间，flowResp 时算 duration（≈ 服务器处理 + 网络往返，到响应头为止）。

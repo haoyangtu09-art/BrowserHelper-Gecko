@@ -342,6 +342,7 @@ function buildNetPanel() {
         '<button id="bh-mock-btn">Mock</button>' +
         '<button id="bh-thr-btn">○ 弱网</button>' +
         '<button id="bh-rules-btn">标记</button>' +
+        '<button id="bh-export-ca">导出根证书</button>' +
       '</span>' +
     '</span>' +
     '<span id="bh-filter-wrap">' +
@@ -360,11 +361,18 @@ function buildNetPanel() {
 
 	    netEnableBtn.addEventListener('click', function () {
 	      setNetworkCaptureEnabled(!netEnabled);
+	      // 「监听」按钮直接开/关原生 MITM 代理（代理是抓包数据的唯一来源）。
+	      postProxyCmd(netEnabled ? 'proxyStart' : 'proxyStop');
 	    });
   bar.querySelector('#bh-clear').addEventListener('click', function () {
     netRequests = []; netPlainCandidates = []; netSelReq = null; renderNetList(); renderDetail();
   });
   bar.querySelector('#bh-export-har').addEventListener('click', exportHAR);
+  bar.querySelector('#bh-export-ca').addEventListener('click', function () {
+    postProxyCmd('exportCa');
+    netExtraMenuOpen = false;
+    updateExtraMenu();
+  });
   bar.querySelector('#bh-bp-btn').addEventListener('click', openBreakpointModal);
   bar.querySelector('#bh-mock-btn').addEventListener('click', openMockModal);
 	    var interceptBtn = bar.querySelector('#bh-intercept-btn');

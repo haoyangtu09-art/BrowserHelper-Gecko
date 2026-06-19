@@ -54,8 +54,6 @@ import org.mozilla.reference.browser.addons.AddonsActivity
 import org.mozilla.reference.browser.cookie.CookieAction
 import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.devtools.DevToolsHelper
-import org.mozilla.reference.browser.devtools.MitmCa
-import org.mozilla.reference.browser.devtools.ProxyProbe
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
 import org.mozilla.reference.browser.settings.SettingsActivity
@@ -196,21 +194,6 @@ class ToolbarIntegration(
             },
             TextMenuCandidate(text = "开发者工具") {
                 DevToolsHelper.toggle(context)
-            },
-            TextMenuCandidate(text = "代理探针 开/关") {
-                ProxyProbe.toggle(context)
-            },
-            TextMenuCandidate(text = "导出抓包根证书") {
-                try {
-                    val path = MitmCa.exportRootCert(context)
-                    Toast.makeText(
-                        context,
-                        "根证书已存到 $path\n请到 设置→安全→加密与凭据→安装证书→CA证书 选择它",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                } catch (t: Throwable) {
-                    Toast.makeText(context, "导出根证书失败: ${t.message}", Toast.LENGTH_LONG).show()
-                }
             },
             TextMenuCandidate(text = "设置") {
                 val intent = Intent(context, SettingsActivity::class.java)

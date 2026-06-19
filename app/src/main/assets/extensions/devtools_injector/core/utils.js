@@ -14,6 +14,13 @@ function postStatus(status) {
   } catch (e) {}
 }
 
+// 面板 → 原生命令（开关代理、导出根证书），复用同一条 native port。
+function postProxyCmd(action) {
+  try {
+    if (port) port.postMessage({ action: action });
+  } catch (e) {}
+}
+
 function describeError(e) {
   return String(e && e.message ? e.message : e);
 }

@@ -113,12 +113,20 @@ object DevToolsHelper {
                 pendingToggle = false
                 sendToggle(engineSession)
             }
+            // Tell the freshly-connected panel the real proxy state so its 监听
+            // button reflects reality (the proxy is reset to OFF on cold launch).
+            sendProxyState(engineSession)
         }
         override fun onPortDisconnected(port: Port) {
             registeredSessions.remove(engineSession)
         }
         override fun onPortMessage(message: Any, port: Port) {
                 val data = message as? JSONObject ?: return
+                val action = data.optString("action", "")
+                if (action.isNotEmpty()) {
+                    handlePanelAction(action, engineSession)
+                    return
+                }
                 val status = data.optString("status", "")
                 if (status.isNotEmpty()) {
                     mainHandler.post {
@@ -128,6 +136,39 @@ object DevToolsHelper {
                     }
                 }
             }
+    }
+
+    /** Panel → native commands (proxy on/off, export CA) sent via port.postMessage. */
+    private fun handlePanelAction(action: String, engineSession: EngineSession) {
+        val ctx = appContext ?: return
+        mainHandler.post {
+            when (action) {
+                "proxyStart" -> { ProxyProbe.setEnabled(ctx, true); sendProxyState(engineSession) }
+                "proxyStop" -> { ProxyProbe.setEnabled(ctx, false); sendProxyState(engineSession) }
+                "exportCa" -> {
+                    try {
+                        val path = MitmCa.exportRootCert(ctx)
+                        Toast.makeText(
+                            ctx,
+                            "根证书已存到 $path\n请到 设置→安全→加密与凭据→安装证书→CA证书 选择它",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    } catch (t: Throwable) {
+                        Toast.makeText(ctx, "导出根证书失败: ${t.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    /** Push the current proxy running state to the panel (channel "proxy"). */
+    private fun sendProxyState(engineSession: EngineSession) {
+        if (!controller.portConnected(engineSession, CONTENT_PORT)) return
+        controller.sendContentMessage(
+            JSONObject().put("ch", "proxy").put("type", "proxyState").put("running", ProxyProbe.isRunning()),
+            engineSession,
+            CONTENT_PORT,
+        )
     }
 
     /** Send a proxy flow event to the active tab's content port, if connected. */

@@ -67,6 +67,16 @@ object ProxyProbe {
         if (running) stop() else start()
     }
 
+    /** Explicit on/off, driven by the DevTools panel's 监听 button. Idempotent. */
+    @Synchronized
+    fun setEnabled(context: Context, on: Boolean) {
+        appContext = context.applicationContext
+        if (on && !running) start()
+        else if (!on && running) stop()
+    }
+
+    fun isRunning(): Boolean = running
+
     /**
      * Called once when the GeckoRuntime is (re)created. The proxy prefs are
      * written to PREF_BRANCH_USER, which persists to disk and is restored on the
