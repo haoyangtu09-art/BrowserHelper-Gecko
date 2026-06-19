@@ -1,6 +1,7 @@
 // Entry script. Module files are loaded before this file by manifest.json.
 (function () {
 connect();
+proxyFeedInit();  // 接收原生 MITM 代理的解密流量，旁路显示到面板（不影响转发）
 
 // 页面导航后自动恢复：
 //   阶段 1（document_start，同步）：从 sessionStorage 快照即时恢复拦截标志并注入拦截器，

@@ -25,6 +25,7 @@
       "js": [
         "core/utils.js",
         "core/config.js",
+        "core/proxy-feed.js",
         "replace/apply.js",
         "interceptor/fetch_page.js",
         "interceptor/xhr_page.js",

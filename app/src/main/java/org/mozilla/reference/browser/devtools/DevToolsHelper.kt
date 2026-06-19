@@ -55,6 +55,10 @@ object DevToolsHelper {
         this.sessionUseCases = sessionUseCases
         this.appContext = context.applicationContext
 
+        // Forward decrypted-flow metadata from the MITM proxy to the active tab's
+        // DevTools panel (display only).
+        ProxyProbe.setChannel { obj -> emitToPanel(obj) }
+
         controller.install(
             runtime,
             onSuccess = {
@@ -124,6 +128,16 @@ object DevToolsHelper {
                     }
                 }
             }
+    }
+
+    /** Send a proxy flow event to the active tab's content port, if connected. */
+    private fun emitToPanel(obj: JSONObject) {
+        mainHandler.post {
+            val engineSession = store?.state?.selectedTab?.engineState?.engineSession ?: return@post
+            if (controller.portConnected(engineSession, CONTENT_PORT)) {
+                controller.sendContentMessage(obj, engineSession, CONTENT_PORT)
+            }
+        }
     }
 
     private fun registerForCurrentTab() {

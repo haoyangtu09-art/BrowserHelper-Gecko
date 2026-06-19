@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import org.json.JSONObject
 import org.mozilla.geckoview.GeckoPreferenceController
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -16,6 +17,7 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -43,6 +45,20 @@ object ProxyProbe {
     @Volatile private var firstMitmReported = false
     @Volatile private var firstMitmErrReported = false
     private var appContext: Context? = null
+
+    // Panel tee channel (wired by DevToolsHelper). Emits decrypted-flow metadata
+    // to the DevTools panel for DISPLAY ONLY; it never affects byte forwarding.
+    @Volatile private var channel: ((JSONObject) -> Unit)? = null
+    private val flowSeq = AtomicLong(0)
+
+    fun setChannel(emit: ((JSONObject) -> Unit)?) {
+        channel = emit
+    }
+
+    private fun emit(obj: JSONObject) {
+        obj.put("ch", "proxy")
+        try { channel?.invoke(obj) } catch (_: Throwable) {}
+    }
 
     @Synchronized
     fun toggle(context: Context) {
@@ -221,16 +237,36 @@ object ProxyProbe {
             val cOut = tlsClient.outputStream
             val uIn = upstream.inputStream
             val uOut = upstream.outputStream
-            val line = readReqLine(cIn)
-            if (line != null) {
+            val flowId = flowSeq.incrementAndGet().toString()
+
+            // Tee (increment 1, head-only): read the FIRST request head
+            // (client→upstream), forward it VERBATIM and emit its metadata to the
+            // panel; then read the FIRST response head (upstream→client) the same
+            // way; then blind-pump the rest of both directions unchanged.
+            // Forwarding stays byte-for-byte — the panel only OBSERVES heads, so a
+            // parse glitch can never stall the page (the working pump model from
+            // a7b65e87 is preserved). Keep-alive/subsequent messages on the same
+            // connection are not parsed yet (a later increment).
+            val reqHead = readHead(cIn)
+            if (reqHead != null) {
                 if (!firstMitmReported) {
                     firstMitmReported = true
-                    toast("PROXY-SPIKE: 已解密 HTTPS ✅ $host ▶ ${line.toString(Charsets.ISO_8859_1).trim()}")
+                    toast("PROXY-SPIKE: 已解密 HTTPS ✅ $host ▶ ${reqHead.substringBefore("\r\n").trim()}")
                 }
-                uOut.write(line)
+                uOut.write(reqHead.toByteArray(Charsets.ISO_8859_1))
                 uOut.flush()
+                emitFlowReq(flowId, host, reqHead)
             }
+            // Forward the rest of client→upstream (request body + any later bytes)
+            // untouched, on a background thread.
             pump(cIn, uOut)
+
+            val respHead = readHead(uIn)
+            if (respHead != null) {
+                cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
+                cOut.flush()
+                emitFlowResp(flowId, respHead)
+            }
             pump(uIn, cOut)
         } catch (_: Throwable) {
             try { tlsClient.close() } catch (_: Throwable) {}
@@ -238,16 +274,49 @@ object ProxyProbe {
         }
     }
 
-    // Read one line (up to and including \n) from a now-plaintext stream.
-    private fun readReqLine(input: InputStream): ByteArray? {
-        val out = ByteArrayOutputStream()
-        while (true) {
-            val b = input.read()
-            if (b < 0) return if (out.size() > 0) out.toByteArray() else null
-            out.write(b)
-            if (b == '\n'.code) return out.toByteArray()
-            if (out.size() > 16 * 1024) return out.toByteArray()
+    // Parse a raw request head ("METHOD path HTTP/1.1\r\nHeader: v\r\n...") into a
+    // panel flowReq event. Display-only; failures are swallowed by the caller.
+    private fun emitFlowReq(flowId: String, host: String, head: String) {
+        val lines = head.split("\r\n").filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return
+        val parts = lines[0].split(" ")
+        val method = parts.getOrElse(0) { "" }
+        val path = parts.getOrElse(1) { "/" }
+        val headers = JSONObject()
+        for (i in 1 until lines.size) {
+            val idx = lines[i].indexOf(':')
+            if (idx > 0) headers.put(lines[i].substring(0, idx).trim(), lines[i].substring(idx + 1).trim())
         }
+        emit(
+            JSONObject()
+                .put("type", "flowReq")
+                .put("flowId", flowId)
+                .put("url", "https://$host$path")
+                .put("method", method)
+                .put("host", host)
+                .put("reqHeaders", headers)
+                .put("ts", System.currentTimeMillis()),
+        )
+    }
+
+    // Parse a raw response head ("HTTP/1.1 200 OK\r\nHeader: v\r\n...") into a
+    // panel flowResp event. Display-only.
+    private fun emitFlowResp(flowId: String, head: String) {
+        val lines = head.split("\r\n").filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return
+        val status = lines[0].split(" ").getOrElse(1) { "0" }.toIntOrNull() ?: 0
+        val headers = JSONObject()
+        for (i in 1 until lines.size) {
+            val idx = lines[i].indexOf(':')
+            if (idx > 0) headers.put(lines[i].substring(0, idx).trim(), lines[i].substring(idx + 1).trim())
+        }
+        emit(
+            JSONObject()
+                .put("type", "flowResp")
+                .put("flowId", flowId)
+                .put("status", status)
+                .put("respHeaders", headers),
+        )
     }
 
     // Relay bytes on a daemon thread; closes nothing so both directions can run.
