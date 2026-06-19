@@ -347,7 +347,7 @@ function fmtInterceptHead(d) {
 
 	  function syncInterceptEdit() {
 	    if (!netSelIntercept || !netDetailBody || !netDetailDirty) return;
-	    if (netDetailTab === 0) parseInterceptHead(netDetailBody.value, netSelIntercept);
+	    if (netDetailTab === 0) { parseInterceptHead(netDetailBody.value, netSelIntercept); netSelIntercept.__headEdited = true; }
 	    else if (netDetailTab === 1) {
 	      var body = bodyValueFromTextarea(false);
 	      if (body !== netSelIntercept.reqBody) removeHeaderCI(netSelIntercept.reqHeaders, 'content-length');
@@ -448,6 +448,7 @@ function interceptAsReq(d) {
     method: String(netSelIntercept.method || 'GET').toUpperCase(),
     reqHeaders: netSelIntercept.reqHeaders || {},
     reqBody: netSelIntercept.reqBody || '',
+    headEdited: !!netSelIntercept.__headEdited,
   });
 }
 
@@ -465,6 +466,7 @@ function interceptAsReq(d) {
 	        method: String(d.method || 'GET').toUpperCase(),
 	        reqHeaders: d.reqHeaders || {},
 	        reqBody: d.reqBody || '',
+	        headEdited: !!d.__headEdited,
 	      });
 	    });
 	  }

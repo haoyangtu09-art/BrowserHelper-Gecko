@@ -18,6 +18,7 @@ function bpResolve(reqId, payload) {
       msg.method = payload.method;
       msg.reqHeaders = payload.reqHeaders;
       msg.reqBody = payload.reqBody;
+      msg.headEdited = !!payload.headEdited;
     }
     try { port.postMessage(msg); } catch (e) {}
     return;

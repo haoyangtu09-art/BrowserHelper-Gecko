@@ -847,8 +847,16 @@ object ProxyProbe {
                     } else {
                         body
                     }
-                    val fHead = if (decision != null && verdict == "continue") {
+                    // Only rebuild the head when the user actually edited method/url/
+                    // headers. Otherwise keep the ORIGINAL head bytes verbatim (wire
+                    // order preserved) — rebuilding from an unordered JSONObject scrambles
+                    // header order, which anti-bot layers (Cloudflare/ChatGPT) fingerprint,
+                    // making the server withhold its response (observed as a no-reply hang).
+                    // Just patch Content-Length to match the (possibly edited) body.
+                    val fHead = if (decision != null && verdict == "continue" && decision.optBoolean("headEdited", false)) {
                         buildReqHead(decision, host, reqHead, fBody.size)
+                    } else if (decision != null && verdict == "continue") {
+                        forceContentLength(reqHead, fBody.size)
                     } else {
                         reqHead
                     }
