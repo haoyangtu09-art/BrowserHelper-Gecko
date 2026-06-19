@@ -60,8 +60,10 @@ object ProxyProbe {
     private class ReplaceRule(val from: ByteArray, val to: ByteArray, val fromStr: String, val toStr: String)
     @Volatile private var replaceEnabled = false
     @Volatile private var replaceReqScope = false
+    @Volatile private var replaceRespScope = false
     @Volatile private var replaceRulesList: List<ReplaceRule> = emptyList()
-    private const val REPLACE_CAP = 1 * 1024 * 1024 // only buffer/replace request bodies ≤1MB
+    private const val REPLACE_CAP = 1 * 1024 * 1024 // only buffer/replace bodies ≤1MB (raw/compressed)
+    private const val REPLACE_DECODED_CAP = 8 * 1024 * 1024 // bail if a compressed resp decodes larger
 
     fun setChannel(emit: ((JSONObject) -> Unit)?) {
         channel = emit
@@ -72,11 +74,12 @@ object ProxyProbe {
         try { channel?.invoke(obj) } catch (_: Throwable) {}
     }
 
-    /** Panel → native: install request-rewrite rules. Empty/disabled = no-op pump. */
+    /** Panel → native: install rewrite rules (scope req/resp/both). Empty/disabled = no-op pump. */
     @Synchronized
     fun setReplaceRules(enabled: Boolean, scope: String, rules: List<Pair<String, String>>) {
         replaceEnabled = enabled
         replaceReqScope = scope == "req" || scope == "both"
+        replaceRespScope = scope == "resp" || scope == "both"
         replaceRulesList = rules.filter { it.first.isNotEmpty() }.map {
             ReplaceRule(it.first.toByteArray(Charsets.UTF_8), it.second.toByteArray(Charsets.UTF_8), it.first, it.second)
         }
@@ -84,6 +87,9 @@ object ProxyProbe {
 
     private fun replaceActiveForReq(): Boolean =
         replaceEnabled && replaceReqScope && replaceRulesList.isNotEmpty()
+
+    private fun replaceActiveForResp(): Boolean =
+        replaceEnabled && replaceRespScope && replaceRulesList.isNotEmpty()
 
     // Byte-level replace-all of every rule's from→to over [data]. Operates on raw
     // bytes so UTF-8 text matches and binary is left untouched (won't match).
@@ -138,6 +144,46 @@ object ProxyProbe {
             if (idx < lines.size - 1) sb.append("\r\n")
         }
         return sb.toString()
+    }
+
+    // Remove every header line named [name] (case-insensitive) from a raw head,
+    // preserving the request/status line, the remaining headers and the CRLF framing.
+    private fun stripHeader(head: String, name: String): String {
+        val lines = head.split("\r\n")
+        val kept = lines.filterIndexed { idx, line ->
+            if (idx == 0) return@filterIndexed true // request/status line
+            val c = line.indexOf(':')
+            !(c > 0 && line.substring(0, c).trim().equals(name, ignoreCase = true))
+        }
+        return kept.joinToString("\r\n")
+    }
+
+    // Fully decode a bounded response body so its text can be replaced. Returns null
+    // when we must leave the body untouched: unknown encoding (e.g. zstd), a decode
+    // error (corrupt/partial), or a decoded size beyond REPLACE_DECODED_CAP (a
+    // decompression-bomb guard — the caller then forwards the original bytes verbatim).
+    private fun decodeForReplace(body: ByteArray, contentEncoding: String?): ByteArray? {
+        val ce = contentEncoding?.lowercase()?.trim() ?: ""
+        if (ce.isEmpty() || ce == "identity") return body
+        val stream = when {
+            ce.contains("gzip") -> java.util.zip.GZIPInputStream(body.inputStream())
+            ce.contains("br") -> org.brotli.dec.BrotliInputStream(body.inputStream())
+            ce.contains("deflate") -> java.util.zip.InflaterInputStream(body.inputStream())
+            else -> return null
+        }
+        return try {
+            val out = ByteArrayOutputStream(body.size * 2)
+            val buf = ByteArray(16 * 1024)
+            while (true) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+                if (out.size() > REPLACE_DECODED_CAP) return null
+            }
+            out.toByteArray()
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     // Read exactly [n] bytes (or until EOF) into a fresh array.
@@ -519,27 +565,69 @@ object ProxyProbe {
         try {
             while (true) {
                 val respHead = readHead(uIn) ?: break
-                cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
-                cOut.flush()
                 val status = respHead.substringBefore("\r\n").split(" ").getOrElse(1) { "" }.toIntOrNull() ?: 0
+                // 101 / interim 1xx: forward head verbatim, no body framing here.
                 if (status == 101 || headerValue(respHead, "Upgrade") != null) {
+                    cOut.write(respHead.toByteArray(Charsets.ISO_8859_1)); cOut.flush()
                     pumpInline(uIn, cOut)
                     return
                 }
                 if (status in 100..199) {
                     // Interim response: no body, same request's final response follows.
+                    cOut.write(respHead.toByteArray(Charsets.ISO_8859_1)); cOut.flush()
                     continue
                 }
                 val info = flowQueue.poll()
                 val flowId = info?.flowId ?: flowSeq.incrementAndGet().toString()
-                emitFlowResp(flowId, respHead)
-
                 val method = info?.method ?: "GET"
-                if (method.equals("HEAD", ignoreCase = true) || status == 204 || status == 304) {
-                    continue // no body by definition
-                }
+                val noBody = method.equals("HEAD", ignoreCase = true) || status == 204 || status == 304
                 val ce = headerValue(respHead, "Content-Encoding")
                 val te = headerValue(respHead, "Transfer-Encoding")
+                val cl = headerValue(respHead, "Content-Length")?.toLongOrNull()
+
+                // Response rewrite — ONLY the safe bounded subset: known Content-Length,
+                // not chunked, has a body, ≤cap. Streaming / SSE / chunked / no-CL are
+                // NEVER buffered (CLAUDE.md 坑#4): they fall straight through to the
+                // verbatim forward-as-read paths below. When replace is OFF or scope
+                // excludes resp, respRewritable is false → byte-identical to the working
+                // model. The body is fully read into memory either way, so even the
+                // "can't decode → forward original" branch never desyncs the socket.
+                val respRewritable = replaceActiveForResp() && !noBody &&
+                    (te == null || !te.contains("chunked", ignoreCase = true)) &&
+                    cl != null && cl >= 1L && cl <= REPLACE_CAP.toLong()
+
+                if (respRewritable) {
+                    val raw = readExact(uIn, cl!!.toInt())
+                    val decoded = decodeForReplace(raw, ce)
+                    if (decoded == null) {
+                        // Unknown/oversized/corrupt encoding → forward the original bytes
+                        // untouched (no replacement), keeping the page correct.
+                        cOut.write(respHead.toByteArray(Charsets.ISO_8859_1))
+                        cOut.write(raw); cOut.flush()
+                        emitFlowResp(flowId, respHead)
+                        val teeLen = minOf(raw.size, 256 * 1024)
+                        emitFlowRespBody(flowId, raw.copyOf(teeLen), raw.size > teeLen, ce)
+                        continue
+                    }
+                    val newBody = applyReplaceBytes(decoded)
+                    var newHead = applyReplaceStr(respHead)
+                    // We send the (possibly decompressed) body as identity, so drop the
+                    // old Content-Encoding and rewrite Content-Length to the real size.
+                    if (ce != null) newHead = stripHeader(newHead, "Content-Encoding")
+                    newHead = forceContentLength(newHead, newBody.size)
+                    cOut.write(newHead.toByteArray(Charsets.ISO_8859_1))
+                    if (newBody.isNotEmpty()) cOut.write(newBody)
+                    cOut.flush()
+                    emitFlowResp(flowId, newHead)
+                    val teeLen = minOf(newBody.size, 256 * 1024)
+                    emitFlowRespBody(flowId, newBody.copyOf(teeLen), newBody.size > teeLen, null)
+                    continue
+                }
+
+                // ── verbatim forward-as-read (unchanged working model) ──
+                cOut.write(respHead.toByteArray(Charsets.ISO_8859_1)); cOut.flush()
+                emitFlowResp(flowId, respHead)
+                if (noBody) continue // no body by definition
                 if (te != null && te.contains("chunked", ignoreCase = true)) {
                     // chunked body: frame chunk-by-chunk (forward-as-read), teeing a
                     // bounded snapshot. SSE tokens are forwarded the instant they
@@ -550,7 +638,6 @@ object ProxyProbe {
                     if (r.bailed) return
                     continue
                 }
-                val cl = headerValue(respHead, "Content-Length")?.toLongOrNull()
                 if (cl == null) {
                     // No Content-Length and not chunked → connection-delimited /
                     // streaming (SSE / Connection: close): can't know where it ends.

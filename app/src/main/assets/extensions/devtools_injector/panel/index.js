@@ -353,6 +353,7 @@ var NET_STYLE = [
   '.bh-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#111;}',
   '.bh-meta{font-size:11px;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
   '.bh-tag{font-size:11px;padding:2px 6px;border-radius:3px;background:#6366f1;color:#fff;}',
+  '.bh-hl{background:#fde047;color:#111;border-radius:2px;padding:0 1px;}',
   // 状态颜色
   '.s2{color:#16a34a;}.s3{color:#2563eb;}.s4{color:#ea580c;}.s5{color:#dc2626;}.s0{color:#888;}.s-err{color:#dc2626;font-style:italic;}',
   '.bh-status-wrap{position:absolute;right:8px;top:7px;display:flex;flex-direction:column;align-items:flex-end;min-width:44px;}',

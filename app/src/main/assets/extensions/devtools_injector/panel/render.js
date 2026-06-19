@@ -249,6 +249,21 @@ function headerBlob(h) {
   return s.toLowerCase();
 }
 
+// 把 text 中命中 q 的子串（大小写不敏感）包成 <mark class="bh-hl"> 色块，其余转义。
+function highlightHtml(text, q) {
+  text = String(text == null ? '' : text);
+  if (!q) return escHtml(text);
+  var lower = text.toLowerCase(), lq = String(q).toLowerCase(), out = '', pos = 0;
+  while (true) {
+    var idx = lower.indexOf(lq, pos);
+    if (idx === -1) { out += escHtml(text.slice(pos)); break; }
+    out += escHtml(text.slice(pos, idx)) +
+      '<mark class="bh-hl">' + escHtml(text.slice(idx, idx + lq.length)) + '</mark>';
+    pos = idx + lq.length;
+  }
+  return out;
+}
+
 // 兼容旧引用：遥测或噪音。
 function isTunnelNoiseReq(r) {
   return isTelemetryReq(r) || isNoiseReq(r);
@@ -541,6 +556,7 @@ function renderNetList() {
   // 若用户正滚动在下方看某条请求，要按新增高度补偿 scrollTop，让当前查看的行视觉不动。
   var prevTop = netListEl.scrollTop;
   var prevHeight = netListEl.scrollHeight;
+  var searchQ = netFilterEl ? netFilterEl.value.trim() : '';
   var rows = getVisibleRequests();
   var showIntercepts = netGlobalInterceptEnabled || netInterceptQueue.length > 0 || netRespInterceptQueue.length > 0;
   if (rows.length === 0 && !showIntercepts) {
@@ -602,6 +618,8 @@ function renderNetList() {
     var tags = [];
     if (r.tag) tags.push(r.tag);
     if (r.plain && r.plain.length) tags.push('明文');
+    // 搜索命中但 URL 里看不到 → 命中在正文/头部，给个提示标签。
+    if (searchQ && String(r.url || '').toLowerCase().indexOf(searchQ.toLowerCase()) === -1) tags.push('正文命中');
     var tag = tags.map(function (t) { return '<span class="bh-tag">' + escHtml(t) + '</span>'; }).join('');
     var bpClass = netBreakpoints.some(function (bp) {
       return r.url.indexOf(bp.pattern) !== -1;
@@ -611,7 +629,7 @@ function renderNetList() {
     html += '<div class="bh-row' + bpClass + selClass + '" data-id="' + r.reqId + '">' +
       '<span class="bh-method">' + r.method + '</span>' +
       '<span class="bh-main">' +
-        '<span class="bh-url" title="' + escHtml(r.url) + '">' + escHtml(truncUrl(r.url)) + '</span>' +
+        '<span class="bh-url" title="' + escHtml(r.url) + '">' + highlightHtml(truncUrl(r.url), searchQ) + '</span>' +
         '<span class="bh-meta">' + escHtml(meta) + '</span>' +
       '</span>' +
       tag +
