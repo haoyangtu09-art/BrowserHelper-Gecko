@@ -25,6 +25,7 @@ function saveNetConfig() {
       hideNoise: netHideNoise,
       hideCookie: netHideCookie,
       payloadOnly: netPayloadOnly,
+      thisSiteOnly: netThisSiteOnly,
       replaceEnabled: netReplaceEnabled,
     }}).catch(function () {});
   } catch (e) {}
@@ -74,6 +75,7 @@ function loadNetConfig(cb) {
         }
         netHideCookie = !!cfg.hideCookie;
         netPayloadOnly = !!cfg.payloadOnly;
+        netThisSiteOnly = !!cfg.thisSiteOnly;
         netReplaceEnabled = !!cfg.replaceEnabled;
       }
       if (cb) cb();

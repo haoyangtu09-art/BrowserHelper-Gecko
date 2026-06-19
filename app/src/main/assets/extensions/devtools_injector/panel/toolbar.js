@@ -203,7 +203,8 @@ function updateFilterButtons() {
   var telemetryBtn = netPanel && netPanel.querySelector('#bh-telemetry-btn');
   var noiseBtn = netPanel && netPanel.querySelector('#bh-noise-btn');
   var cookieBtn = netPanel && netPanel.querySelector('#bh-cookie-btn');
-  var active = netPayloadOnly || netHideTelemetry || netHideNoise || netHideCookie;
+  var siteBtn = netPanel && netPanel.querySelector('#bh-site-btn');
+  var active = netPayloadOnly || netHideTelemetry || netHideNoise || netHideCookie || netThisSiteOnly;
   if (filterBtn) {
     filterBtn.textContent = '过滤 ▾';
     filterBtn.style.color = active ? '#2563eb' : '#111';
@@ -228,6 +229,10 @@ function updateFilterButtons() {
   if (cookieBtn) {
     cookieBtn.textContent = (netHideCookie ? '● ' : '○ ') + '过滤cookie包';
     cookieBtn.style.color = netHideCookie ? '#2563eb' : '#888';
+  }
+  if (siteBtn) {
+    siteBtn.textContent = (netThisSiteOnly ? '● ' : '○ ') + '只看本页';
+    siteBtn.style.color = netThisSiteOnly ? '#16a34a' : '#888';
   }
 }
 
@@ -352,9 +357,10 @@ function buildNetPanel() {
         '<button id="bh-telemetry-btn">○ 过滤遥测包</button>' +
         '<button id="bh-noise-btn">○ 过滤噪音包</button>' +
         '<button id="bh-cookie-btn">○ 过滤cookie包</button>' +
+        '<button id="bh-site-btn">○ 只看本页</button>' +
       '</span>' +
     '</span>' +
-    '<input id="bh-filter" placeholder="搜索 URL…">';
+    '<input id="bh-filter" placeholder="搜索 URL/正文…">';
   wrap.appendChild(bar);
   netFilterEl = bar.querySelector('#bh-filter');
   netEnableBtn = bar.querySelector('#bh-toggle');
@@ -469,6 +475,9 @@ function buildNetPanel() {
   bindHideFilter('#bh-cookie-btn',
     function () { return netHideCookie; },
     function (v) { netHideCookie = v; });
+  bindHideFilter('#bh-site-btn',
+    function () { return netThisSiteOnly; },
+    function (v) { netThisSiteOnly = v; });
   // 弱网按钮：单点切换开/关，长按弹菜单选预设
   // 不依赖合成 click（Gecko/Android 上 pointer 事件后 click 可能不触发），
   // 直接用 pointerdown/pointerup 自洽处理，并加 touch 兜底。
@@ -529,7 +538,7 @@ function buildNetPanel() {
 	    // 搜索框也在 shadow root 内，同样改成"点按→light DOM 编辑层"避免 IME 崩坏
 	    netFilterEl.readOnly = true;
 	    netFilterEl.addEventListener('click', function () {
-	      openEditOverlay('搜索 URL', netFilterEl.value, function (text) {
+	      openEditOverlay('搜索 URL/正文', netFilterEl.value, function (text) {
 	        netFilterEl.value = text;
 	        renderNetList();
 	      });

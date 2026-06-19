@@ -453,6 +453,7 @@ var netEnableBtn = null;
 var netHideNoise = false;
 var netHideCookie = false;
 var netPayloadOnly = false;
+var netThisSiteOnly = false;
 var netPlainProbeEnabled = false;
 // 主开关（拦截按钮）：决定拦截功能是否生效
 var netInterceptMaster = false;

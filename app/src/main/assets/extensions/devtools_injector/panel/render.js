@@ -184,14 +184,69 @@ function isNoiseReq(r) {
   return lowValueGuard(r);
 }
 
-// cookie/session 包：激进过滤——URL 含 cookie/session，或请求带 Cookie 头、响应带 Set-Cookie 头即命中。
-// 用户反馈：开代理后 cookie 同步包刷屏，宁可多隐藏也要清掉。
+// cookie/session 同步包：只按 URL 路径里典型的 cookie-sync / 用户同步端点判定。
+// 绝不靠 Cookie / Set-Cookie 请求头判定——几乎每个登录态 API（含 ChatGPT 的
+// /backend-api/conversation）都带 Cookie，靠头判定会把真实接口也一并隐藏掉。
 function isCookieReq(r) {
   var url = String(r.url || '').toLowerCase();
-  if (/cookie|session/.test(url)) return true;
-  if (headerValue(r.reqHeaders, 'cookie')) return true;
-  if (headerValue(r.respHeaders, 'set-cookie')) return true;
+  var ckRe = /(\/|[?&._-])(cookie|cookiesync|setuid|usersync|user-sync|idsync|id-sync|cksync|syncuser|getuid|gen_204|__cf)([/?#._-]|$)/;
+  if (!ckRe.test(url)) return false;
+  return lowValueGuard(r);
+}
+
+// 注册域名（registrable domain）：默认取末两段；常见多级后缀（co.uk / com.cn 等）取三段。
+function registrableDomain(host) {
+  host = String(host || '').toLowerCase().replace(/:\d+$/, '');
+  var parts = host.split('.').filter(Boolean);
+  if (parts.length <= 2) return parts.join('.');
+  var twoLevel = {
+    'co.uk': 1, 'org.uk': 1, 'gov.uk': 1, 'com.cn': 1, 'net.cn': 1, 'org.cn': 1,
+    'gov.cn': 1, 'com.hk': 1, 'com.tw': 1, 'com.au': 1, 'co.jp': 1, 'co.kr': 1,
+    'com.br': 1, 'com.sg': 1, 'co.in': 1, 'com.mx': 1, 'com.ru': 1,
+  };
+  var lastTwo = parts.slice(-2).join('.');
+  if (twoLevel[lastTwo]) return parts.slice(-3).join('.');
+  return lastTwo;
+}
+
+// 从 URL/Origin/Referer 取主机名（含降级字符串解析），失败返回 ''。
+function hostOf(u) {
+  if (!u) return '';
+  try { return new URL(u).host.toLowerCase().replace(/:\d+$/, ''); } catch (e) {}
+  var m = String(u).match(/^[a-z][a-z0-9+.-]*:\/\/([^\/?#]+)/i);
+  return m ? m[1].toLowerCase().replace(/:\d+$/, '') : '';
+}
+
+// 「只看本页」：保留与当前页同注册域名、或由本页发起（Origin/Referer 同注册域）的请求。
+// MITM 代理在套接字层抓全部流量、不知道发起 tab；但请求头里已带 Origin/Referer，
+// content script 又跑在本页（location.host 即本页域），故可纯面板侧判定。
+function isSameSiteReq(r) {
+  var pageHost = (typeof location !== 'undefined' && location.host ? location.host : '').toLowerCase().replace(/:\d+$/, '');
+  if (!pageHost) return true; // 拿不到本页域名时不过滤，避免全空
+  var pageSite = registrableDomain(pageHost);
+  var flowHost = hostOf(r.url);
+  if (flowHost && registrableDomain(flowHost) === pageSite) return true;
+  var initHost = hostOf(headerValue(r.reqHeaders, 'origin')) || hostOf(headerValue(r.reqHeaders, 'referer'));
+  if (initHost && registrableDomain(initHost) === pageSite) return true;
   return false;
+}
+
+// 全局搜索匹配：URL + 请求体 + 响应体 + 头部都搜，用于快速定位「我发出去的内容」在哪条请求。
+function reqMatchesQuery(r, q) {
+  if (!q) return true;
+  if (String(r.url || '').toLowerCase().indexOf(q) !== -1) return true;
+  if (String(r.reqBody || '').toLowerCase().indexOf(q) !== -1) return true;
+  if (String(r.respBody || '').toLowerCase().indexOf(q) !== -1) return true;
+  if (headerBlob(r.reqHeaders).indexOf(q) !== -1) return true;
+  if (headerBlob(r.respHeaders).indexOf(q) !== -1) return true;
+  return false;
+}
+
+function headerBlob(h) {
+  if (!h) return '';
+  var s = '';
+  try { Object.keys(h).forEach(function (k) { s += k + ':' + h[k] + '\n'; }); } catch (e) {}
+  return s.toLowerCase();
 }
 
 // 兼容旧引用：遥测或噪音。
@@ -434,7 +489,8 @@ function interceptAsReq(d) {
 	  function getVisibleRequests() {
   var filter = netFilterEl ? netFilterEl.value.trim().toLowerCase() : '';
   return netRequests.filter(function (r) {
-    if (filter && String(r.url || '').toLowerCase().indexOf(filter) === -1) return false;
+    if (filter && !reqMatchesQuery(r, filter)) return false;
+    if (netThisSiteOnly && !isSameSiteReq(r)) return false;
     if (netPayloadOnly && !isPayloadReq(r)) return false;
     if (netHideTelemetry && isTelemetryReq(r)) return false;
     if (netHideNoise && isNoiseReq(r)) return false;
@@ -471,6 +527,7 @@ function maybeFocusPayload(entry) {
   if (!netPayloadOnly || netEditing || netSelIntercept || !isPayloadReq(entry)) return;
   // 已有选中请求时不抢焦点：用户正在看某个请求，新包不该把详情切走。
   if (netSelReq) return;
+  if (netThisSiteOnly && !isSameSiteReq(entry)) return;
   if (netHideTelemetry && isTelemetryReq(entry)) return;
   if (netHideNoise && isNoiseReq(entry)) return;
   if (netHideCookie && isCookieReq(entry)) return;
