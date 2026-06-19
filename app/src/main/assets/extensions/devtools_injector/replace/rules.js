@@ -75,8 +75,6 @@ function saveReplaceRules() {
   if (st && st.set) {
     try { st.set({ bhNetReplaceRules: netReplaceRules }).catch(function () {}); } catch (e) {}
   }
-  // 同步规则到原生代理
-  if (typeof proxyOnConfigChanged === 'function') proxyOnConfigChanged();
 }
 
 function loadReplaceRules() {

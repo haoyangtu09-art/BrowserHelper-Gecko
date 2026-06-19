@@ -540,27 +540,31 @@ function registerNetTool(erudaObj) {
 	  function installI18n() {
 	    _i18nCore();
 	    installPointerGuard();
-	    // Phase 1+：拦截由原生代理处理，不再注入页内逻辑
+	    // 加载持久化配置（若已在 earlyInjectInterceptor 阶段加载过，这里会覆盖为相同值；若首次开启则在此加载）
 	    loadNetConfig(function () {
 	      loadInterceptRules();
 	      loadReplaceRules();
-	      // 不再调用 injectInterceptor() 等页内拦截器函数
-	      // 所有网络层拦截由 ProxyProbe 原生处理
-	      injectPlainProbe();  // 保留：明文探针仍用页内 hook
+	      injectInterceptor();
+	      syncGlobalInterceptEnabled();
+	      syncGlobalRespInterceptEnabled();
+	      syncGlobalInterceptNoise();
+	      syncReplaceScope();
+	      syncFilterSuppressResp();
+	      syncInterceptRules();
+	      syncReplaceRules();
+	      injectPlainProbe();
 	      // 同步持久化状态到面板 UI（按钮颜色/文字）
 	      updateInterceptBtn();
 	      updateFilterButtons();
 	      updateReplaceBtn();
-	      // 同步配置到原生代理
-	      proxySendConfig();
 	    });
-	  // page-world: eruda 在 window.eruda; isolated: self.eruda
-	  var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
-	  if (erudaMode === 'page') {
+  // page-world: eruda 在 window.eruda; isolated: self.eruda
+  var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);
+  if (erudaMode === 'page') {
     // page world 的 eruda 对象在页面 window 里，content script 无法直接调用 eruda.add()
     // 改为注入一段脚本在页面 window 里注册 Tool
     injectNetToolPageWorld();
-	  } else {
+  } else {
     registerNetTool(erudaObj);
     hookErudaConsoleBypass(erudaObj);
   }
