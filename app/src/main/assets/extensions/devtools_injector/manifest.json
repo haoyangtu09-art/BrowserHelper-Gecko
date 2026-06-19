@@ -35,6 +35,7 @@
         "panel/render.js",
         "panel/detail.js",
         "panel/toolbar.js",
+        "extensions/loader.js",
         "extensions/presets/index.js",
         "extensions/index.js",
         "content.js"
