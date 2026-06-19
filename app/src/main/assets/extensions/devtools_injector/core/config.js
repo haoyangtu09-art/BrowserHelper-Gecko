@@ -73,16 +73,9 @@ function loadNetConfig(cb) {
   } catch (e) { if (cb) cb(); }
 }
 
-// document_start 时提前注入拦截器（不依赖 DOM），让页面第一个请求就能被捕获
+// 已停用 document_start 早期拦截器注入：早期请求由原生 MITM 代理负责抓取（旁路 tee，只读）。
+// 保留空函数仅为兼容现有调用点。
 function earlyInjectInterceptor() {
-  // isolated world：exportFunction 直接操作 page world，完全不需要 DOM
-  if (typeof exportFunction !== 'undefined' && typeof window.wrappedJSObject !== 'undefined') {
-    injectInterceptorViaExportFunction();
-    return;
-  }
-  // page world：需要往 DOM 插 <script>。document_start 时 documentElement 存在但 head 可能没有，
-  // runInPage 内部已用 document.head || document.documentElement 兜底，可以直接调用。
-  runInPage(INTERCEPT_JS);
 }
 
 // 从 sessionStorage 快照同步恢复拦截配置，用于 document_start 阶段即时注入（无需等 storage.local）

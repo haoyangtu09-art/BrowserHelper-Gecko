@@ -62,15 +62,8 @@ var PLAIN_PROBE_JS = (function () {
 }());
 
 function injectInterceptor() {
-  if (erudaMode === 'page') {
-    // page world：直接用 <script> 注入（没有 CSP 问题，因为已经用 blob URL 加载了 eruda）
-    runInPage(INTERCEPT_JS);
-  } else {
-    // isolated world（强 CSP 页面）：<script> 标签被 CSP 阻止。
-    // 用 Gecko 专有 exportFunction/cloneInto API 把拦截函数直接导出到 page world，
-    // 不经过 <script> 标签，完全绕过 CSP。
-    injectInterceptorViaExportFunction();
-  }
+  // 已停用页面内 fetch/XHR 拦截器：抓包数据改由原生 MITM 代理旁路 tee 到面板（只读）。
+  // 保留此空函数仅为兼容现有调用点，不再注入任何 page-world hook。
 }
 
 function syncPlainProbeEnabled() {
@@ -180,12 +173,6 @@ function syncFilterSuppressResp() {
 	  }
 
 	  function injectPlainProbe() {
-  syncPlainProbeEnabled();
-  if (erudaMode === 'page') {
-    runInPage(PLAIN_PROBE_JS);
-    setTimeout(syncPlainProbeEnabled, 50);
-    return;
-  }
-  injectPlainProbeViaExportFunction();
-  syncPlainProbeEnabled();
+  // 已停用页面内明文探针（JSON.stringify / crypto.encrypt 等 hook）：只读代理模式不注入。
+  // 保留空函数仅为兼容现有调用点。
 }
