@@ -156,6 +156,11 @@ object ProxyProbe {
 
     private fun emit(obj: JSONObject) {
         obj.put("ch", "proxy")
+        // Tee a copy into the native queryable flow store (browser.network.* agent
+        // tools). Pure in-memory record of already-emitted display data — never
+        // touches forwarding (CLAUDE.md 坑#4). Done before channel so it captures
+        // flows even when no panel is attached.
+        try { NetFlowStore.record(obj) } catch (_: Throwable) {}
         try { channel?.invoke(obj) } catch (_: Throwable) {}
     }
 

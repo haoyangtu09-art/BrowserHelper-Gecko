@@ -154,6 +154,30 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - 面板侧复用既有「请求拦截」队列 UI：`proxy-feed.js` 收 `reqIntercept`→postMessage `{type:'req'}`+`{type:'breakpoint',mode:'intercept'}`;`bpResolve` 按 `proxyFlowIdForReqId(reqId)` 反查 flowId 回 native。规则下发 `pushInterceptRulesToNative()`（含 `netInterceptRulesLoaded` 守卫，仿 replace），原生 `loadInterceptConfig()` 冷启动恢复。
 - **响应方向拦截（Phase 2）尚未实现**：将在 `pumpResponses` 复用 replace 的解码/identity 重组加同款暂停（`respIntercept`/`resolveRespIntercept`）。
 
+#### 按类拦截（遥测 / 噪音 / cookie 三个独立开关）
+
+「拦截全部低价值流量」的反向开关。原生 `isLowValueUrl(host,target,method,reqBodyLen)` 用 `telemetryRe`/`noiseRe`/`cookieRe` 三条正则 + 小体积/GET 护栏判定某请求是否「低价值」（默认低价值 = 不暂停、直接放行）。三个 `@Volatile` 开关 `interceptTelemetry`/`interceptNoise`/`interceptCookie` 由面板下发：**某类开关打开 → 该类不再算低价值 → 会被拦截暂停**。
+
+- 下发链路：面板「长按拦截配置」勾选 → `pushInterceptRulesToNative()` 带 `interceptTelemetry/Noise/Cookie:(master && netScope*)` → `DevToolsHelper` → `ProxyProbe.setInterceptRules()`。
+- 持久化：`saveInterceptConfig()`/`loadInterceptConfig()` 一并存这三个布尔（`intercept_config`）。
+- 默认全 off = 旧行为（所有低价值流量都放行）。**坑#4 安全**：只改「是否进入既有暂停分支」的判定，不新增缓冲。
+
+#### 原生 Mock（合成响应，复用 abort 模型）
+
+`pumpRequests` 在拦截判定**之前**先查 `matchMock(host,target)`（子串 URL 匹配 `MockRule.pattern`）。命中且 `bounded` 时：`readExact` 抽干有界请求体 → `emitFlowReq` 上报 → `synchronized(clientSock){ write buildMockResponse(rule) }` → `return`（不连上游）。
+
+- `buildMockResponse`：拼 `HTTP/1.1 {status} {reason}\r\n` + 自定义头 + `Content-Length` + `Connection: close\r\n\r\n` + body。等价 Charles「map local / 合成响应」，靠 `Connection: close` 收尾，不触碰 pump。
+- 面板下发：`pushMockRulesToNative()`（`netMockRulesLoaded` 守卫）→ `setMockRules` → `parseMockRules`/`saveMockConfig`（`mock_config`）。
+- **只对有界请求生效**；流式/无法定长的请求不 mock。坑#4 安全。
+
+#### 原生弱网 / 限速（ThrottledOutputStream + 逐响应延迟）
+
+两段实现，都不缓冲（坑#4 安全）：
+
+- **限速**：`mitm()` 用 `throttleWrap(tlsClient.outputStream)` 包下行方向。`ThrottledOutputStream` 按 8K 分片**边读边写**（write-through），片间 `sleep` 把速率压到 `throttleKbps*1024 B/s`；关闭时纯透传，永不整体缓冲。
+- **延迟**：`pumpResponses` 在处理完 1xx、取 `flowQueue.poll()` 之前调 `throttleLatency()`，按 `throttleLatencyMs` 给每个响应注入延迟。
+- 面板下发：`pushThrottleToNative()` → `setThrottle` → `applyThrottleConfig`/`saveThrottleConfig`（`throttle_config`）。字段 `throttleEnabled/throttleLatencyMs/throttleKbps`。
+
 ## 持久化
 
 - `browser.storage.local`
@@ -163,6 +187,10 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - `sessionStorage`
   - `__bhErudaActive`
   - `__bhNetConfigCache`
+- 原生 `SharedPreferences("bh_devtools")`（`REPLACE_PREFS`）—— 代理侧配置冷启动恢复：
+  - `replace_config` / `intercept_config`（含按类拦截三开关）/ `sse_hold_config`
+  - `mock_config` / `throttle_config`
+  - `proxy_enabled`（「监听」意图，冷启动按此自动续开新端口）
 
 DevTools 关闭且页面未处于自动恢复流程时，不应保留可见 UI 或阻塞请求。
 
@@ -196,3 +224,139 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 ## 构建备注
 
 本地 Termux 环境可能缺 Java 17 toolchain，Gradle 会在创建 Android 编译任务时报错。能跑构建时再用当前存在的 app debug 变体验证打包；不要假定旧任务名 `assembleLightningPlusDebug` 一定存在。
+
+---
+
+# Project Handoff Pack（项目接力包）
+
+> 用于在新对话中无损恢复上下文。本节 = 完整版 Handoff + 精简版 + 启动 Prompt 三合一。
+> 与上文规范冲突时，以上文为准；本节是导航与状态快照。
+
+## A. 完整版 Handoff
+
+### 1. Project Overview
+- **是什么**：Android GeckoView 浏览器，内置自研 DevTools 扩展（Eruda 控制台 + Network 抓包/拦截/替换/断点/Mock/弱网面板）。应用名「网络调试助手」，包名 `com.example.videodownloader.browserhelper.gecko`，扩展 id `netdebug@browserhelper.local`，版本 1.1。
+- **为什么存在**：Android 上缺少 Charles/Fiddler 级、又能在手机里直接看自己浏览器流量的工具。把本地 TLS 终止 MITM 代理塞进浏览器进程 + 页面内悬浮面板 = 移动端随身抓包/改包。
+- **核心目标**：不破坏页面加载前提下，对本机浏览器流量做抓包（请求/响应含 body）、拦截改包（请求/响应方向）、字符替换、过滤、Mock、弱网，并以插件扩展。
+- **当前阶段**：核心抓包/拦截/替换/插件框架已稳定且真机验证。本轮新增按类拦截拆分、原生 Mock、原生弱网、冷启动自动续开代理、整体改名，CI 编译通过（`77545f35`、`07fbd65a`），**待真机验证**。
+
+### 2. Architecture Overview
+```
+请求流：Browser → MITM → ProxyProbe → DevToolsHelper → proxy-feed → panel
+响应流：Server → MITM → ProxyProbe →            proxy-feed → panel
+```
+- **GeckoView**：`EngineProvider.kt` 建 GeckoRuntime，`enterpriseRootsEnabled(true)`，冷启动调 `resetProxyStateOnStartup()`。`applyProxyPrefs()` 把 `network.proxy.type=1`、http/ssl 指向 `127.0.0.1:<port>`。
+- **ProxyProbe.kt**（Kotlin object 单例）：解密 + 双向盲转发（forward-as-read），不做完整 HTTP 解析。`handle()` 读首行 → `CONNECT` 进 `mitm()`。`mitm()` 用 `MitmCa.serverContextFor(host)` 对浏览器终止 TLS（不广告 ALPN h2 → 强制 HTTP/1.1），对上游开 TLS，`pumpRequests`/`pumpResponses` 双向转发。抓包/拦截/替换/mock/弱网都在 pump 上旁路 tee / 受控暂停 / 有界缓冲。
+- **DevToolsHelper.kt**：装扩展、连 content port，`onPortMessage` 路由面板指令（setReplaceRules/setInterceptRules/resolveIntercept/resolveRespIntercept/setSseHoldConfig/setMockRules/setThrottle/proxyStart/proxyStop/exportCa），`emitToPanel` 只发当前选中 tab。
+- **proxy-feed.js**：`proxyOnMsg` 收原生 `ch:'proxy'` 事件 → `window.postMessage({__bhNet})`。
+- **breakpoint/index.js**：`window 'message'` 监听 `__bhNet`，维护 `netReqMap`、`netInterceptQueue`/`netRespInterceptQueue`、`trimNetRequests`（上限 200）。
+- **插件系统**：`loader.js` 中枢（注册/启停/持久化 `storage.local:bhEnabledPlugins`，`bhPluginCtx()` 给 `{port,runInPage,log}`）；插件只 `port.postMessage` 下发配置，原生唯一执行。
+- 面板 JS 在 content/isolated world，Eruda 在 page world；**页面世界 fetch/XHR 拦截器已删，原生代理是唯一数据源**。
+
+### 3. Current Stable State
+- ✅ 真机验证：请求抓包、响应抓包、请求体、响应体（含 chunked+gzip/deflate/br）、请求拦截、响应拦截、过滤、字符替换、插件框架（截流 v0.1）。
+- 🟡 已实现 CI 绿、待真机：按类拦截拆分（遥测/噪音/cookie 三独立开关）、原生 Mock、原生弱网、冷启动自动续开代理、改名。
+
+### 4. Remaining Work
+- 真机验证本轮 5 项新特性。
+- Mock（已落地）：`pumpRequests` 拦截前 `matchMock` 子串匹配 → 抽干有界 body → `buildMockResponse`(含 `Connection: close`) 直接回写、不连上游。
+- 弱网（已落地）：`ThrottledOutputStream` 8K write-through 限速 + `pumpResponses` 逐响应 `throttleLatency()` 延迟，均不缓冲。
+- 占位插件（网页 Agent / 本地 GPT Plus-Pro）落地真实逻辑。
+
+### 5. Critical Design Decisions
+- **MITM 代替 page-hook**：page-world hook 受 CSP、跨世界对象权限、h2/WebSocket 不可见限制；MITM 后流量全可见、与页面解耦。死全局 `__bhMockRules/__bhThrottle/__bhGlobalInterceptNoise` 勿再写。
+- **Keep-Alive/逐请求**：同 TCP 逐条处理，`flowQueue` FIFO 对齐请求↔响应，只解析到能定界为止。
+- **Chunked**：默认 `relayChunked` 边读边转；仅响应替换开启且命中文档型 content-type（排除 event-stream）才整体去分块（4MB+30s），超时/超界/错帧 → 关连接降级。
+- **压缩**：仅改 body 时 `decodeForReplace` 解 gzip/deflate/br，identity 下发；不改请求 Accept-Encoding。
+- **插件**：插件=配置下发方，原生=唯一执行方。
+
+### 6. Known Bugs
+- 多 tab 归属粗糙（MITM 不知发起 tab；「只看本页」靠 host+Origin/Referer 启发式）。
+- chunked 替换降级时关连接重载。
+- 新特性未真机。
+- 冷启动必绑新端口并重写 proxy pref，否则面板「监听中」假象。
+
+### 7. Historical Pitfalls
+- **坑#4（最重要）**：MITM 不要做完整 HTTP/1.1 解析/整体缓冲。问题=把盲转发换成按 Content-Length/chunked 整体重组 + 强制 identity；原因=真实流量(keep-alive/chunked/流式/WebSocket/h2-tunnel)错帧或阻塞；结论=开代理后页面加载不出来+Eruda 打不开，只能用「解密后双向 pump」，新功能旁路增量加。
+- **Accept-Encoding 修改风险**：强制 identity 请求头触发错帧，不改。
+- **整体缓冲卡死**：流式/SSE/无 CL 缓冲会卡死，只允许小/有界/文档型缓冲。
+- **reimportEnterpriseRoots 争议**：曾误判页面打不开是删了它，真凶是完整 HTTP 解析；它只影响能否解密/信任，不影响页面加载；每次开代理 false→true 重抓系统 CA，**勿删**。
+- **TLS 信任链**：叶子 issuer 用根证书精确 subject DER，勿走 RFC2253 字符串往返（→SEC_ERROR_UNKNOWN_ISSUER）。
+- **Proxy 持久化误区**：ServerSocket 随进程死→死端口；冷启动按 `proxy_enabled` 意图续开新端口，勿改回一律直连。
+- **Haiku 回归**：低能力模型大改 pump 引回归；动 pump 小步谨慎。
+- **shadow DOM 输入失焦**：面板编辑走 light-DOM `openEditOverlay()`，勿放 Eruda shadow root。
+
+### 8. Important Files
+- `ProxyProbe.kt` — MITM 代理。`handle/mitm/pumpRequests/pumpResponses/relayChunked/pumpInline/pump`；`telemetryRe/noiseRe/cookieRe`；`isLowValueUrl`；Mock `MockRule/setMockRules/matchMock/buildMockResponse`；弱网 `setThrottle/throttleLatency/throttleWrap/ThrottledOutputStream`；续开 `saveProxyEnabled/loadProxyEnabled/resetProxyStateOnStartup`。
+- `DevToolsHelper.kt` — 控制总线，路由面板指令，发当前 tab。
+- `MitmCa.kt` — 根 CA + 叶子签发。
+- `EngineProvider.kt` — 建 Runtime，冷启动续开。
+- `proxy-feed.js` — 原生→page world 桥。
+- `breakpoint/index.js` — `__bhNet` 队列。
+- `panel/toolbar.js` — UI（过滤菜单/拦截配置 5 行/Mock/弱网/buildNetPanel）。
+- `core/utils.js` — `push*RulesToNative`、全局 port。
+- `core/config.js` — `save/loadNetConfig`（mock/throttle/scope* 持久化+旧键迁移）。
+- `manifest.json` — MV2，17 JS 顺序拼接，content.js 最后。
+- `extensions/{loader,presets/*}.js` — 插件。
+
+### 9. Plugin System
+- 架构：`loader.js` 中枢，enabled ids 持久化 `bhEnabledPlugins`，`bhPluginCtx()={port,runInPage,log}`，插件只下发配置。
+- 已有：截流 v0.1（下发 `setSseHoldConfig`，原生 `holdSseAndReplay/sseHoldActiveFor` 心跳保活缓冲 event-stream）；网页 Agent（占位，仅 log）；本地 GPT Plus/Pro 伪装（占位，仅 log）。
+- 未来：mock/弱网/替换沉淀为插件预设；启用即下发、停用即撤回。
+
+### 10. Current Branch Status
+- 分支 `main`（PR→`master`），CI 仓库 `haoyangtu09-art/BrowserHelper-Gecko`。
+- 正在开发：按类拦截拆分 + 原生 Mock + 原生弱网 + 冷启动续开 + 改名（收尾）。
+- 最近成功：核心功能真机验证；最新两 commit CI 绿，APK `BrowserHelper-Gecko-07fbd65a-arm64.apk` 已下载。
+- 最近失败：无构建失败；唯一未完成=新特性待真机。
+- 最值得推进：① 真机验证 5 项新特性；② 验证后 mock/弱网做成插件预设；③ 落地占位插件。
+
+## B. 精简版 Handoff
+> 核心模型：`ProxyProbe.kt`(Kotlin object) = 本地 TLS 终止 MITM，解密+双向盲转发，绝不完整 HTTP 解析/整体缓冲（坑#4：页面加载不出来+Eruda 打不开）。功能在 pump 上旁路 tee/受控有界缓冲/fail-open 暂停增量加。数据流：请求 `Browser→MITM→ProxyProbe→DevToolsHelper→proxy-feed→panel`；响应 `Server→MITM→ProxyProbe→proxy-feed→panel`。page-world 拦截器已删，原生代理唯一数据源。
+> 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流。已实现待真机：按类拦截(遥测/噪音/cookie 三开关 gating `isLowValueUrl`)、原生 Mock(`matchMock`+`buildMockResponse`+`Connection:close`，仅有界)、原生弱网(`ThrottledOutputStream` write-through+逐响应延迟)、冷启动续开(`proxy_enabled`+新端口)、改名。
+> 铁律：①不碰 pump 模型 ②不改请求 Accept-Encoding ③流式/SSE/WS/无 CL 一律放行不缓冲 ④叶子 issuer 用根 subject 精确 DER ⑤`reimportEnterpriseRoots` 勿删（与页面加载无关）⑥冷启动续开新端口勿改回直连 ⑦面板编辑走 light-DOM `openEditOverlay`。
+> 持久化：面板 `storage.local:bhNetConfig/bhNetReplaceRules/bhNetInterceptRules`；原生 `SharedPreferences("bh_devtools")`:`replace_config/intercept_config/sse_hold_config/mock_config/throttle_config/proxy_enabled`。
+> 验证：JS 跑 `node --check` 每文件 + manifest 顺序拼接；Kotlin 仅 CI 编译(allWarningsAsErrors)；APK 名带 commit SHA。下一步：真机验证 5 项新特性。
+
+## C. 新对话启动 Prompt
+```
+你接手 BrowserHelper-Gecko：Android GeckoView 浏览器 + 内置 DevTools 扩展
+（Eruda 控制台 + Network 抓包/拦截/替换/断点/Mock/弱网面板）。开始前：
+
+【先读文档】
+1. 完整读 CLAUDE.md（含本接力包），理解核心模型与铁律。
+2. 核心：ProxyProbe.kt(Kotlin object) = 本地 TLS 终止 MITM，解密+双向盲转发，
+   绝不做完整 HTTP 解析/整体缓冲（坑#4：开代理后页面加载不出来、Eruda 打不开）。
+   功能都在 pump 上旁路 tee/受控有界缓冲/fail-open 暂停增量加。
+3. 数据流：请求 Browser→MITM→ProxyProbe→DevToolsHelper→proxy-feed→panel；
+   响应 Server→MITM→ProxyProbe→proxy-feed→panel。page-world 拦截器已删，
+   原生代理唯一数据源，勿再写 __bhMockRules/__bhThrottle 死全局。
+
+【当前状态】
+- 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流插件。
+- 已实现待真机(77545f35/07fbd65a,CI 绿)：按类拦截拆分、原生 Mock、原生弱网、
+  冷启动自动续开代理、改名。首要任务通常是协助真机验证这 5 项，而非新开特性。
+
+【改特定东西的注意事项】
+· 改 mitm()/pumpRequests/pumpResponses：绝不缓冲流式/SSE/WS/无 Content-Length；
+  只允许小/有界/文档型受控缓冲，改完须能解释为何不碰坑#4。
+· 拦截/暂停必须 fail-open（超时/面板断开=放行原件），绝不让 socket 挂死。
+· 不改请求 Accept-Encoding；只在改 body 时对响应解码后 identity 下发。
+· Mock 保持「仅有界 + buildMockResponse 带 Connection:close + 不连上游」。
+· 弱网保持 ThrottledOutputStream 8K write-through（边读边写、片间 sleep），永不整体缓冲。
+· MitmCa 叶子 issuer 用根证书精确 subject DER，勿走 RFC2253 字符串往返。
+· 不删 reimportEnterpriseRoots（信任链必需），但页面加载卡死先查 pump，别先怀疑证书。
+· 冷启动保持「按 proxy_enabled 意图续开新端口」，绝不改回一律直连。
+· 面板可编辑控件走 light-DOM openEditOverlay()，勿放 Eruda shadow root（IME 丢焦）。
+· DevTools 是 MV2 普通 content script（非 ES module），17 个 JS manifest 顺序拼接
+  共享全局，content.js 必须最后，新增模块同步改 manifest。
+
+【工作方式】
+· 优先稳定，不推翻既有设计；改 pump 小步谨慎（曾因大改回归）。
+· 小步提交：每个独立改动单独 commit。
+· 每步验证：JS 跑 node --check 每文件 + manifest 顺序拼接；Kotlin 仅 CI 编译
+  （allWarningsAsErrors，本地 Termux 无 Java17）；推送触发 CI、下载带 SHA 的 APK 真机验证。
+· 不确定先读代码/问我，别盲改。
+
+现在请先读 CLAUDE.md，再告诉我你理解的当前架构和建议的下一步。
+```

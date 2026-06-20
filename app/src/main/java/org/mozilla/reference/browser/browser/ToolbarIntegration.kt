@@ -4,6 +4,8 @@
 
 package org.mozilla.reference.browser.browser
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
@@ -53,6 +55,7 @@ import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.AddonsActivity
 import org.mozilla.reference.browser.cookie.CookieAction
 import org.mozilla.reference.browser.cookie.CookieExportHelper
+import org.mozilla.reference.browser.devtools.BrowserBridge
 import org.mozilla.reference.browser.devtools.DevToolsHelper
 import org.mozilla.reference.browser.ext.components
 import org.mozilla.reference.browser.ext.share
@@ -194,6 +197,19 @@ class ToolbarIntegration(
             },
             TextMenuCandidate(text = "开发者工具") {
                 DevToolsHelper.toggle(context)
+            },
+            TextMenuCandidate(text = "Agent 桥: 复制连接命令") {
+                BrowserBridge.start(context.applicationContext)
+                if (BrowserBridge.isRunning()) {
+                    val cmd = BrowserBridge.connectCommand()
+                    try {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("bhcodex", cmd))
+                    } catch (_: Throwable) {}
+                    Toast.makeText(context, "已复制连接命令(端口 ${BrowserBridge.port()})到剪贴板", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "Agent 桥启动失败", Toast.LENGTH_LONG).show()
+                }
             },
             TextMenuCandidate(text = "设置") {
                 val intent = Intent(context, SettingsActivity::class.java)

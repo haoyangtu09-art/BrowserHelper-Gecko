@@ -59,6 +59,11 @@ object DevToolsHelper {
         // DevTools panel (display only).
         ProxyProbe.setChannel { obj -> emitToPanel(obj) }
 
+        // Start the local MCP bridge so the Termux-side agent (bhcodex) can reach
+        // BrowserHelper's tools over localhost (token-gated). Localhost-only +
+        // bearer token; Phase 1 exposes read-only network tools.
+        try { BrowserBridge.start(context.applicationContext) } catch (_: Throwable) {}
+
         controller.install(
             runtime,
             onSuccess = {
