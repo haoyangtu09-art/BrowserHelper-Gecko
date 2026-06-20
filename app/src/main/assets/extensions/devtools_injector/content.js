@@ -63,11 +63,45 @@ if (wasActive()) {
       if (erudaActive) return;
       toggle();
     }
-    // load 完成后再等两帧 + 小延时，确保视觉视口已落定再注入。
+    // ⚠️ 关键：load 事件 ≠ 视口已落定。GeckoView 在 reload 后会在 load 之后继续
+    //   settle 视觉视口/缩放(应用 displayDensityOverride→resolution、处理 meta
+    //   viewport、APZ 收敛)，这个窗口可达数百 ms。先前「load + 2 帧 + 50ms」仍落在
+    //   该窗口内 → 此刻注入 Eruda(求值/attach shadow host/注 @font-face)强制 reflow
+    //   → GeckoView 按被扰动的布局重算 resolution 并锁错值 → 整页放大约 1/0.85 +
+    //   触摸坐标错位。手动开 Eruda 不出问题，正因那时视口早已 settle。
+    //   故这里改为「真正等视口稳定」：逐帧轮询 innerWidth + visualViewport.scale，
+    //   连续 ~16 帧不变且至少 400ms 才注入(兜底 3.5s)。轮询值而非监听 resize 事件，
+    //   以兼容 GeckoView 静默 settle(不一定派发 visualViewport resize)。
+    function waitViewportStable(cb) {
+      var vv = window.visualViewport;
+      var lastScale = vv ? vv.scale : 1;
+      var lastW = window.innerWidth;
+      var lastH = window.innerHeight;
+      var stableFrames = 0;
+      var start = Date.now();
+      var done = false;
+      function finish() { if (done) return; done = true; cb(); }
+      function poll() {
+        if (done) return;
+        var s = vv ? vv.scale : 1;
+        var w = window.innerWidth;
+        var h = window.innerHeight;
+        if (s === lastScale && w === lastW && h === lastH) {
+          stableFrames++;
+        } else {
+          stableFrames = 0; lastScale = s; lastW = w; lastH = h;
+        }
+        var elapsed = Date.now() - start;
+        // 既要「值连续不变」也要「至少 1s」：GeckoView 可能静默 settle(值一直不变),
+        // 仅靠稳定帧会过早注入；以手动开 Eruda(load 后数秒,从无 bug)为参照给足缓冲。
+        if ((stableFrames >= 16 && elapsed >= 1000) || elapsed >= 4000) { finish(); return; }
+        requestAnimationFrame(poll);
+      }
+      requestAnimationFrame(poll);
+    }
+    // load 完成后等视口真正落定再注入。
     function afterStable() {
-      requestAnimationFrame(function () {
-        requestAnimationFrame(function () { setTimeout(run, 50); });
-      });
+      waitViewportStable(run);
     }
     if (document.readyState === 'complete') {
       afterStable();
