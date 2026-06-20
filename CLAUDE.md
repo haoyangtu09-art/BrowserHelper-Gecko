@@ -195,6 +195,14 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - 多份分析（commit `c8e0d19e`）判断：**跳变纯发生在 GeckoView 原生 APZ 合成器层**，DOM 完全测不到
   （`window.devicePixelRatio` / `visualViewport.scale` 在跳变前后均**不变**）。这解释了为什么所有
   JS 侧修法都无效。
+  > ⚠️ **该结论本轮被质疑(尚待真机确认)**：当时只测了 `dpr` 和 `visualViewport.scale`——这两者对
+  > 「Gecko MobileViewportManager(MVM) 的布局视口/zoom-to-fit 重适配」**本就不变**;真正会变的是
+  > `window.innerWidth` / `documentElement.clientWidth`,**从没量过**。且捏合分辨率改变**不会**让点击
+  > 命中错位,而本 bug 有「触摸坐标整体错位」——这是**布局视口重适配**的特征,不是捏合 APZ。故新假设:
+  > 这是 **MVM 在 reload 后的「下一次 reflow 就重算」窗口里,被 Eruda 注入的 reflow 触发、锁错了
+  > 布局视口分辨率**(手动开时 MVM 已锁定故不触发)。HEAD 的 `restoreUiSoon` 已加 `geomReport` 打印
+  > 整套几何量(Toast 前缀 `BHZOOM`)做判定:真机刷新后看 `iw=`/`cw=` 是否在 `post-inject`→`post-settle`
+  > 间变化——变=MVM 重适配(JS/meta 可修),不变=才是纯原生 APZ。
 - **手动开 Eruda（页面已 load 完、静置）从不触发**此 bug。差异疑似在「页面刚 reload、APZ 仍在首屏
   解析阶段」时注入 Eruda。
 
@@ -214,12 +222,22 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
    提前 `loadPageEruda`（fetch+求值 bundle+注入 @font-face）后，**手动开 Eruda 不再放大**；但**刷新恢复
    仍放大**。即：早期求值只解释了「手动开就放大」那一半，刷新放大是另一条线，至今未解。
 
-### 当前代码状态（HEAD=`61f23eff`，working tree clean）
+### 当前代码状态（MVM 重适配假设 + 收敛修复 + 判定日志，待真机验证）
 - `core/utils.js`：两处 `eruda.init` 均 `useShadowDom:true`（已回退 false 实验）。
-- `content.js` 阶段 3 `restoreUiSoon`：等「首次用户交互」后 `toggle()`（`92b087fd` 的实现，bug 仍在）。
-  ⚠️ 注意：phase-2 块（约 37–49 行）还残留一段 `6782ac0e` 时代的旧注释，说「真凶是 bundle 求值时机」——
-  那个结论已被后续证伪，**以本节为准**，别被该注释误导。
+- `content.js` 阶段 3 `restoreUiSoon`：**已改**——load 后直接 `toggle()` 注入(不再等手势,时机已证伪),
+  注入前后 `geomReport` 打印 `BHZOOM iw/cw/ow/vvw/vvs/dpr/sw`(Toast + console);注入后 `lastReflowSettle`
+  把「最后一次 reflow」做成一次干净强制重排逼 MVM 收敛,且仅对已声明移动端 viewport 的页面补
+  `initial-scale=1`(桌面型无 viewport 页面只重排不改 meta,避免新回归)。三处量测:`post-inject`/
+  `post-settle`/`post-settle-1200`。
+  - **真机判定**:刷新后看 `BHZOOM` Toast 的 `iw=`/`cw=` 在注入前后是否变化。变→坐实 MVM 布局视口重适配,
+    且若 `lastReflowSettle` 让其收敛回正确值则放大消失=修复成功;若 `iw/cw` 不变但仍放大→才是纯原生
+    APZ,需转「原生侧重置 resolution」方向。判定后可删 `geomReport`(纯诊断噪音)。
+  - ⚠️ phase-2 块(约 37–49 行)残留 `6782ac0e` 时代旧注释说「真凶是 bundle 求值时机」——已被证伪,
+    **以本节为准**。
 - `EngineProvider.kt:53`：`displayDensityOverride(deviceDensity*0.85f)` 保留。
+- **另一未跑的决定性实验**:页面**还在加载时**点工具栏 toggle(`DevToolsHelper.kt:107` port 未连→reload→
+  `pendingToggle`),让「手动」路径也经历一次 reload。若**这样也放大**→触发点是 **reload 本身**而非
+  `wasActive` 的 document_start 恢复路径,可不动自动恢复逻辑直接修。
 
 ### 尚未尝试 / 候选方向
 - **iframe 隔离注入**：把 Eruda 塞进独立 `<iframe>` 文档，主页面布局/APZ 不受其 DOM 影响。注意 Eruda 需

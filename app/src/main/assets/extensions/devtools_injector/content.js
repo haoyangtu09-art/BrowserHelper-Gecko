@@ -49,44 +49,86 @@ if (wasActive()) {
     restoreUiSoon();
   });
 
-  // ─ 阶段 3：刷新后重建 Eruda UI。
-  //   根因(真机逐一证伪 + 历史分析 c8e0d19e):放大/错位纯发生在 GeckoView 原生 APZ 合成器层
-  //   ——reload 后页面尚未被用户交互时,自动注入 Eruda 那块占大半屏的 fixed shadow host
-  //   触发 APZ 分辨率重算,合成器缩放跳变(放大一圈) + 触摸坐标整体锁错(按钮挤一块 / 控制台
-  //   点不开 / 缩放失效)。该跳变 DOM 完全测不到(dpr / visualViewport.scale 均不变),所以
-  //   viewport meta 重写、改注入时机、滚动都修不了(已分别真机证伪);密度 override 亦无罪
-  //   (自然密度下照样跳)。
-  //   关键观察:手动开 Eruda 从不触发——因为那时页面已 load 完且用户刚触屏,APZ 已被用户交互
-  //   "激活"到稳定分辨率。修法:刷新后不再无条件自动注入,而是等用户对页面的第一次真实交互
-  //   (touchstart / pointerdown / wheel / scroll / keydown)之后再 toggle(),复刻"手动开"
-  //   的前置条件(页面静置 + 用户已触屏),从根上避开 APZ 重算跳变。
+  // ─ 阶段 3：刷新后重建 Eruda UI（根因重定位 + MVM 收敛修复 + 真机判定日志）。
+  //   本轮工作假设(推翻「纯原生 APZ、DOM 测不到」旧结论):放大/错位不是捏合分辨率(那会改
+  //   visualViewport.scale、且不会让点击命中错位),而是 Gecko MobileViewportManager(MVM)的
+  //   「布局视口 / zoom-to-fit 重适配」。reload 后 MVM 仍处于「下一次 reflow 就重算分辨率」的
+  //   窗口;此刻注入 Eruda(大块 @font-face light-DOM 样式表 + 占屏 fixed shadow host)触发
+  //   reflow → MVM 锁错分辨率(约 1/0.85,正是 displayDensityOverride 几何被重算时算偏的幅度)。
+  //   手动开 Eruda 不触发,是因为那时页面已 load 完、MVM 早已锁定,reflow 不再重适配。
+  //   ⚠️ 旧判定「DOM 完全测不到」只测了 dpr 与 visualViewport.scale——这两者对「布局视口重适配」
+  //   本就不变;真正会变的是 window.innerWidth / documentElement.clientWidth,之前从没量过。
+  //   故本轮:
+  //     ① geomReport 在注入前/后打印整套几何量(iw/cw/ow/vvw/vvs/dpr/sw),真机一眼判定是哪种放大;
+  //     ② 把「最后一次 reflow」做成一次干净的强制重排(lastReflowSettle),逼 MVM 按真实 viewport
+  //        收敛回正确分辨率——不再像 45d7af64 那样改完 meta 又 restore(restore 自身又触发一次
+  //        重适配 → 失败);且只对已声明移动端 viewport 的页面补 initial-scale=1,绝不把桌面型
+  //        (无 viewport)页面强改成 device-width 造成新回归。
   function restoreUiSoon() {
     var ran = false;
+
+    function geomReport(tag) {
+      try {
+        var vv = window.visualViewport;
+        var de = document.documentElement;
+        var s = 'BHZOOM ' + tag +
+          ' iw=' + window.innerWidth +
+          ' cw=' + (de ? de.clientWidth : -1) +
+          ' ow=' + window.outerWidth +
+          ' vvw=' + (vv ? Math.round(vv.width) : -1) +
+          ' vvs=' + (vv ? vv.scale.toFixed(3) : '-') +
+          ' dpr=' + window.devicePixelRatio +
+          ' sw=' + screen.width;
+        try { console.log(s); } catch (e) {}
+        postStatus(s);
+      } catch (e) {}
+    }
+
+    // 把「最后一次 reflow」做干净:强制一次同步重排,让 MVM 按当前真实 viewport 收敛锁定。
+    // 仅当页面已声明移动端 viewport(width=device-width / initial-scale)且 initial-scale≠1 时,
+    // 才补成 initial-scale=1 作为收敛基准;桌面型(无 viewport)页面只做强制重排、不改 meta。
+    function lastReflowSettle() {
+      try {
+        var m = document.querySelector('meta[name="viewport"]');
+        var content = m ? (m.getAttribute('content') || '') : '';
+        if (m && /device-width|initial-scale/i.test(content) &&
+            !/initial-scale\s*=\s*1(\.0)?\b/i.test(content)) {
+          var fixed = content.replace(/initial-scale\s*=\s*[\d.]+/i, 'initial-scale=1.0');
+          if (fixed === content) fixed = content.replace(/\s*$/, '') + ', initial-scale=1.0';
+          m.setAttribute('content', fixed);
+        }
+        // 强制同步 reflow:读取布局尺寸触发 flush,使 MVM 立即按当前 viewport 重算并锁定。
+        void (document.documentElement && document.documentElement.offsetHeight);
+      } catch (e) {}
+    }
 
     function run() {
       if (ran) return;
       ran = true;
       if (erudaActive) return;
+      geomReport('pre-inject');
       toggle();
-    }
-
-    // 绑定一次性「首次用户交互」监听:任一手势触发即解绑全部并注入。
-    function armGesture() {
-      var evts = ['touchstart', 'pointerdown', 'wheel', 'scroll', 'keydown'];
-      function onGesture() {
-        evts.forEach(function (t) { window.removeEventListener(t, onGesture, true); });
-        // 等这一拍交互引发的 APZ 调整落定后再注入,避免与手势自身的滚动/缩放抢算。
-        requestAnimationFrame(function () { requestAnimationFrame(run); });
-      }
-      evts.forEach(function (t) {
-        window.addEventListener(t, onGesture, { capture: true, passive: true });
-      });
+      // toggle 异步(loadPageEruda→initPageEruda);轮询 erudaActive 置位后把最后一次 reflow
+      // 做成干净收敛,并三处量测(注入后 / 收敛 2 帧后 / 1.2s 兜底)供真机判定是否生效。
+      var tries = 0;
+      (function afterInject() {
+        if (erudaActive || tries++ > 80) {
+          geomReport('post-inject');
+          lastReflowSettle();
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () { geomReport('post-settle'); });
+          });
+          setTimeout(function () { lastReflowSettle(); geomReport('post-settle-1200'); }, 1200);
+          return;
+        }
+        setTimeout(afterInject, 50);
+      })();
     }
 
     if (document.readyState === 'complete') {
-      armGesture();
+      run();
     } else {
-      window.addEventListener('load', armGesture, { once: true });
+      window.addEventListener('load', run, { once: true });
     }
   }
 }
