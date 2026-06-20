@@ -74,7 +74,12 @@ if (wasActive()) {
       afterStable();
     } else {
       window.addEventListener('load', afterStable, { once: true });
-      setTimeout(run, 4000); // 兜底：load 被阻塞时也恢复
+      // 页面世界拦截器已全部停用（earlyInjectInterceptor/injectInterceptor 均为空函数，
+      // 早期请求由原生 MITM 代理抓取），我们的代码不再阻塞 load → 可放心纯等 load。
+      // 之前 4s 兜底在重 SPA（load 常 >4s）会先于 load 提前注入 Eruda，与 GeckoView
+      // 首屏 APZ 抢跑 → 页面放大一圈 + 触摸坐标错位（这正是回归根因）。这里只留一个
+      // 远超正常加载时长的安全网，仅防 load 永不触发的极端卡死，正常加载绝不会先于 load。
+      setTimeout(run, 20000);
     }
   }
 }
