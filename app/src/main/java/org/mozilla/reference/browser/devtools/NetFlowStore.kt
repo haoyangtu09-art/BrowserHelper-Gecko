@@ -93,6 +93,52 @@ object NetFlowStore {
         return ""
     }
 
+    // Header names whose VALUE is a credential. Default L1 tool output masks these
+    // so a (possibly prompt-injected) model never sees raw session tokens. Per the
+    // decided bhcodex architecture, cookie/token redaction happens in the APK
+    // BEFORE bytes leave to bhcodex. A future L3 "reveal" tool (native confirm)
+    // can expose the raw value on explicit user tap.
+    private val SENSITIVE_HEADERS = setOf(
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-auth-token",
+        "x-api-key",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "openai-organization",
+    )
+
+    /**
+     * Return a copy of [headers] with credential-bearing values masked. The mask
+     * keeps the scheme prefix (e.g. "Bearer") and the original length as a hint so
+     * the agent knows the header exists without reading the secret.
+     */
+    private fun redactHeaders(headers: JSONObject?): JSONObject {
+        val out = JSONObject()
+        if (headers == null) return out
+        val keys = headers.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val v = headers.optString(k, "")
+            if (SENSITIVE_HEADERS.contains(k.lowercase())) {
+                out.put(k, maskValue(v))
+            } else {
+                out.put(k, v)
+            }
+        }
+        return out
+    }
+
+    private fun maskValue(v: String): String {
+        if (v.isEmpty()) return v
+        val sp = v.indexOf(' ')
+        // Preserve an auth scheme like "Bearer " / "Basic " if present.
+        val scheme = if (sp in 1..10 && v.substring(0, sp).all { it.isLetter() }) v.substring(0, sp + 1) else ""
+        return "${scheme}***redacted(${v.length})***"
+    }
+
     private fun summary(r: Record): JSONObject = JSONObject()
         .put("id", r.flowId)
         .put("ts", r.ts)
@@ -140,8 +186,8 @@ object NetFlowStore {
                 .put("url", r.url)
                 .put("host", r.host)
                 .put("status", r.status)
-                .put("reqHeaders", r.reqHeaders ?: JSONObject())
-                .put("respHeaders", r.respHeaders ?: JSONObject())
+                .put("reqHeaders", redactHeaders(r.reqHeaders))
+                .put("respHeaders", redactHeaders(r.respHeaders))
                 .put("reqBody", r.reqBody ?: "")
                 .put("reqTruncated", r.reqTruncated)
                 .put("respBody", r.respBody ?: "")
