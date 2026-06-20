@@ -175,6 +175,23 @@ object NetFlowStore {
         return out
     }
 
+    /**
+     * Raw (UN-redacted) value of a single header for one flow — searched in request
+     * headers first, then response headers. For the L3 `cookie_reveal` tool, which
+     * is gated behind a native confirmation dialog (AgentConfirm). Returns null if
+     * the flow or header is absent.
+     */
+    fun revealHeader(flowId: String, name: String): String? {
+        synchronized(lock) {
+            val r = records[flowId] ?: return null
+            val fromReq = headerValue(r.reqHeaders, name)
+            if (fromReq.isNotEmpty()) return fromReq
+            val fromResp = headerValue(r.respHeaders, name)
+            if (fromResp.isNotEmpty()) return fromResp
+            return null
+        }
+    }
+
     /** Full record (headers + bodies) for one flow, or null if unknown. */
     fun getJson(flowId: String): JSONObject? {
         synchronized(lock) {

@@ -110,8 +110,11 @@ object BrowserBridge {
     private fun acceptLoop(srv: ServerSocket) {
         while (running) {
             val sock = try { srv.accept() } catch (_: Throwable) { break }
-            // Each request handled inline then closed; tool calls are fast/in-memory.
-            try { handle(sock) } catch (_: Throwable) {} finally { try { sock.close() } catch (_: Throwable) {} }
+            // One thread per connection: an L3 tool may block on a native confirm
+            // dialog (up to 60s), so we must not stall the accept loop / other calls.
+            Thread({
+                try { handle(sock) } catch (_: Throwable) {} finally { try { sock.close() } catch (_: Throwable) {} }
+            }, "bh-bridge-conn").apply { isDaemon = true }.start()
         }
     }
 
@@ -266,19 +269,53 @@ object BrowserBridge {
         arr.put(
             tool(
                 "network_get",
-                "Get the full record (request+response headers and bodies) for one captured flow by id.",
+                "Get the full record (request+response headers and bodies) for one captured flow by id. " +
+                    "Credential headers (Authorization, Cookie, Set-Cookie, x-api-key, ...) are MASKED in the " +
+                    "output as ***redacted(N)***; use cookie_reveal to read a raw value (needs user approval).",
                 JSONObject()
                     .put("type", "object")
                     .put("properties", JSONObject().put("id", strProp("Flow id from network_list.")))
                     .put("required", JSONArray().put("id")),
             ),
         )
+        arr.put(
+            tool(
+                "cookie_reveal",
+                "[SENSITIVE / L3] Reveal the RAW (un-redacted) value of one credential header for a captured " +
+                    "flow (e.g. the real Authorization bearer or Cookie). Each call pops a NATIVE confirmation " +
+                    "dialog in the app — the value is only returned if the human taps Allow. Use sparingly.",
+                JSONObject()
+                    .put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("id", strProp("Flow id from network_list."))
+                            .put("name", strProp("Header name to reveal (default: authorization). e.g. cookie, set-cookie.")),
+                    )
+                    .put("required", JSONArray().put("id")),
+            ),
+        )
         return arr
+    }
+
+    // L3 = sensitive tools that MUST pass a native human confirmation before they
+    // run. The gate is enforced HERE in the APK; bhcodex can never bypass it.
+    private val L3_TOOLS = setOf("cookie_reveal")
+
+    private fun confirmSummary(name: String, args: JSONObject): String = when (name) {
+        "cookie_reveal" ->
+            "Agent(bhcodex) 请求读取 flow ${args.optString("id")} 的真实「${args.optString("name", "authorization")}」" +
+                "头(含会话令牌/Cookie)。允许后明文会发送给 Termux 侧的 bhcodex。是否允许?"
+        else -> "Agent(bhcodex) 请求执行敏感操作「$name」。是否允许?"
     }
 
     private fun handleToolCall(id: Any?, params: JSONObject): JSONObject {
         val name = params.optString("name", "")
         val args = params.optJSONObject("arguments") ?: JSONObject()
+        if (L3_TOOLS.contains(name)) {
+            val ok = AgentConfirm.requireConfirm("Agent 敏感操作确认", confirmSummary(name, args))
+            if (!ok) return toolError(id, "用户拒绝或确认超时 / 无前台界面 (L3 需原生确认)")
+        }
         return try {
             when (name) {
                 "network_list" -> {
@@ -296,6 +333,12 @@ object BrowserBridge {
                     val flowId = args.optString("id", "")
                     val rec = NetFlowStore.getJson(flowId)
                     if (rec == null) toolError(id, "no flow with id=$flowId") else toolText(id, rec.toString())
+                }
+                "cookie_reveal" -> {
+                    val flowId = args.optString("id", "")
+                    val header = args.optString("name", "authorization")
+                    val v = NetFlowStore.revealHeader(flowId, header)
+                    if (v == null) toolError(id, "flow $flowId 无「$header」头") else toolText(id, v)
                 }
                 else -> toolError(id, "unknown tool: $name")
             }
