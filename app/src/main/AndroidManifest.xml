@@ -8,6 +8,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- Native floating Agent overlay window (web-agent plugin). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"
@@ -189,6 +192,12 @@
 
         <service android:name=".media.MediaSessionService"
             android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
+
+        <!-- Hosts the floating Agent overlay (white ball ↔ chat panel) in a
+             WindowManager TYPE_APPLICATION_OVERLAY window. Started by the
+             web-agent plugin toggle; requires SYSTEM_ALERT_WINDOW. -->
+        <service android:name=".agent.AgentOverlayService"
             android:exported="false" />
 
         <service

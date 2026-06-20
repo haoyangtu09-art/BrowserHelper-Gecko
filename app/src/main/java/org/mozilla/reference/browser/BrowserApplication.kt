@@ -28,6 +28,7 @@ import mozilla.components.support.ktx.android.content.isMainProcess
 import mozilla.components.support.ktx.android.content.runOnlyInMainProcess
 import mozilla.components.support.rusthttp.RustHttpConfig
 import mozilla.components.support.webextensions.WebExtensionSupport
+import org.mozilla.reference.browser.agent.AgentOverlayController
 import org.mozilla.reference.browser.cookie.CookieExportHelper
 import org.mozilla.reference.browser.devtools.AgentConfirm
 import org.mozilla.reference.browser.devtools.DevToolsHelper
@@ -48,7 +49,12 @@ open class BrowserApplication : Application() {
         // (AgentConfirm) always has a window to show on. Approval for sensitive
         // bhcodex tools must originate from a real human tap on that dialog.
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityResumed(activity: Activity) = AgentConfirm.setTopActivity(activity)
+            override fun onActivityResumed(activity: Activity) {
+                AgentConfirm.setTopActivity(activity)
+                // Finish a deferred Agent-overlay start once the user returns from the
+                // "draw over other apps" grant screen with the permission granted.
+                AgentOverlayController.onActivityResumed(activity)
+            }
             override fun onActivityPaused(activity: Activity) = AgentConfirm.setTopActivity(null)
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityStarted(activity: Activity) {}

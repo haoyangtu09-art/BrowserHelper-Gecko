@@ -24,6 +24,7 @@ import mozilla.components.feature.session.SessionUseCases
 import mozilla.components.lib.state.ext.flow
 import mozilla.components.support.webextensions.BuiltInWebExtensionController
 import org.json.JSONObject
+import org.mozilla.reference.browser.agent.AgentOverlayController
 
 object DevToolsHelper {
     private const val EXTENSION_ID = "netdebug@browserhelper.local"
@@ -179,6 +180,14 @@ object DevToolsHelper {
                 }
                 if (action == "setThrottle") {
                     ProxyProbe.setThrottle(data)
+                    return
+                }
+                if (action == "agentOverlayEnable") {
+                    appContext?.let { ctx -> mainHandler.post { AgentOverlayController.enable(ctx) } }
+                    return
+                }
+                if (action == "agentOverlayDisable") {
+                    appContext?.let { ctx -> mainHandler.post { AgentOverlayController.disable(ctx) } }
                     return
                 }
                 if (action.isNotEmpty()) {
