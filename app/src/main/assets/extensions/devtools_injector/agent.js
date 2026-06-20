@@ -48,11 +48,14 @@ function _bhEvalInPage(code, timeoutMs) {
             if (s === undefined || s === null) s = '"' + String(r) + '"';
             return Promise.resolve({ ok: true, value: s });
         }
-    } catch (e) {
-        return Promise.resolve({ ok: false, error: 'wrappedJSObject eval failed: ' + String(e) });
+    } catch (_cspErr) {
+        // wrappedJSObject.Function blocked by CSP (e.g. ChatGPT strict policy).
+        // Fall through to blob URL injection — treated as external script so it
+        // bypasses inline-script / unsafe-eval restrictions on most pages.
     }
 
-    // Fallback: script injection + CustomEvent (async, handles by timeout).
+    // Fallback A: blob URL injection (external script, bypasses inline-script CSP).
+    // Fallback B: inline <script> textContent (last resort, works on permissive pages).
     return new Promise(function (resolve) {
         var evtName = '__bhEval' + (++_bhEvalSeq) + '_' + Date.now();
         var done = false;
@@ -62,19 +65,42 @@ function _bhEvalInPage(code, timeoutMs) {
             resolve(e.detail || { error: 'no detail' });
         }
         document.addEventListener(evtName, handler, { once: true });
-        _bhRunInPage(
+
+        var scriptCode =
             '(function(){try{var __r=(function(){' + code + '})();' +
             'var __s;try{__s=JSON.stringify(__r);}catch(_){__s=String(__r);}' +
             'document.dispatchEvent(new CustomEvent(' + JSON.stringify(evtName) +
             ',{detail:{ok:true,value:__s||"null"}}));' +
             '}catch(e){document.dispatchEvent(new CustomEvent(' + JSON.stringify(evtName) +
-            ',{detail:{ok:false,error:String(e)}}));}})()',
-        );
+            ',{detail:{ok:false,error:String(e)}}));}})()'
+        ;
+
+        var injected = false;
+        // Fallback A: blob URL
+        try {
+            var blob = new Blob([scriptCode], { type: 'application/javascript' });
+            var blobUrl = URL.createObjectURL(blob);
+            var blobScript = document.createElement('script');
+            blobScript.src = blobUrl;
+            blobScript.onerror = function () {
+                URL.revokeObjectURL(blobUrl);
+                blobScript.remove();
+                // Fallback B: inline textContent
+                if (!done) _bhRunInPage(scriptCode);
+            };
+            blobScript.onload = function () { URL.revokeObjectURL(blobUrl); blobScript.remove(); };
+            (document.head || document.documentElement).appendChild(blobScript);
+            injected = true;
+        } catch (_) {}
+
+        // Fallback B directly if blob injection failed to start
+        if (!injected && !done) _bhRunInPage(scriptCode);
+
         setTimeout(function () {
             if (done) return;
             done = true;
             document.removeEventListener(evtName, handler);
-            resolve({ error: 'evalJS timeout after ' + (timeoutMs || 10000) + 'ms' });
+            resolve({ error: 'evalJS timeout — CSP may be blocking all script execution on this page' });
         }, timeoutMs || 10000);
     });
 }
