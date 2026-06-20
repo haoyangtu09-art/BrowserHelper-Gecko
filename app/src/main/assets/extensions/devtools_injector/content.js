@@ -4,13 +4,11 @@ connect();
 proxyFeedInit();  // 接收原生 MITM 代理的解密流量，旁路显示到面板（不影响转发）
 
 // 页面导航后自动恢复：
-//   阶段 1（document_start，同步）：从 sessionStorage 快照即时恢复拦截标志并注入拦截器，
-//     页面第一个 fetch/XHR 就能被拦截（解决登录跳转等早期请求漏抓问题）。
-//   阶段 2（异步）：加载真实配置 → 卸载早期拦截器 → 求值 eruda bundle → 重装拦截器。
-//     顺序约束：eruda bundle 求值时必须看到原生 XHR/fetch（不是我们的 exportFunction 替身），
-//     否则 chobitsu 读 Xray 原型抛错 → window.eruda 不可用。故在求值前调 disableInterceptor()
-//     还原原生，求值后重装。
-//   阶段 3（load 事件）：toggle() 调 eruda.init() 构建 UI。
+//   阶段 1（document_start，同步）：从 sessionStorage 快照即时恢复拦截/过滤标志。
+//     （页面世界拦截器已删除，抓包由原生 MITM 代理负责；earlyInjectInterceptor 为 no-op。）
+//   阶段 2（异步）：加载真实配置、下发替换规则、释放早期挂起的拦截。
+//   阶段 3（load 事件后视口稳定）：restoreUiSoon → toggle() 一次性 loadPageEruda+initPageEruda
+//     构建 Eruda UI。⚠️ 关键：不在 load 期间提前求值 eruda bundle（详见阶段 2 内说明）。
 if (wasActive()) {
   // ─ 阶段 1：同步快速恢复（document_start 即时生效）
   loadNetConfigFromCache();
@@ -18,9 +16,9 @@ if (wasActive()) {
   syncGlobalRespInterceptEnabled();
   syncGlobalInterceptNoise();
   syncFilterSuppressResp();
-  earlyInjectInterceptor(); // ← 立即注入，页面首个 fetch/XHR 即被拦截
+  earlyInjectInterceptor(); // no-op（兼容保留；抓包已由原生 MITM 代理负责）
 
-  // ─ 阶段 2：异步加载真实配置，再卸载→重装拦截器（绕开 eruda 时序约束）
+  // ─ 阶段 2：异步加载真实配置
   loadNetConfig(function () {
     loadReplaceRules();
     // 更新标志（真实配置可能与快照略有不同）
@@ -29,25 +27,26 @@ if (wasActive()) {
     syncGlobalInterceptNoise();
     syncFilterSuppressResp();
     pushReplaceRulesToNative();
-    // 释放早期阶段拦截到的所有请求（UI 尚未就绪，无法手动放行；直接透传原始请求）。
-    // releaseAllIntercepts 只清可见队列；releaseAllPendingIso 兜底清 isolated 世界里
-    // 已挂起但消息尚未入队的 Promise，否则 disableInterceptor 后页面 fetch 永远 pending → reload 循环。
+    // 释放早期阶段挂起的拦截（UI 尚未就绪，直接透传原始请求），避免 disableInterceptor 后
+    // 残留 Promise 永远 pending → reload 循环。
     releaseAllIntercepts();
     releaseAllRespIntercepts();
     releaseAllPendingIso();
-    // 卸载早期拦截器，还原原生 XHR/fetch，使 eruda bundle 可安全 patch 原型
+    // 兼容性 no-op（页面世界拦截器已删除，无可还原的 wrapper）。
     disableInterceptor();
-    loadPageEruda(function () {
-      // eruda 已对原生 XHR/fetch 做 prototype patch；更新 __bhRestore* 指向 eruda-patched 版本，
-      // 保证后续 disableInterceptor() 不会绕过 eruda 直接还原到原始原生 API。
-      try {
-        var _pw = window.wrappedJSObject;
-        if (_pw) { _pw.__bhRestoreFetch = _pw.fetch; _pw.__bhRestoreXHR = _pw.XMLHttpRequest; }
-      } catch (e) {}
-      // 不在这里重装阻塞型拦截器：UI 尚未初始化，重新拦截会卡住触发 load 的请求，造成 reload 死锁。
-      // 让 toggle()->installI18n() 在 UI 可用后统一 injectInterceptor()+sync*。
-      restoreUiSoon();
-    });
+    // ⚠️ 修复「开 Eruda 后刷新 → 整页放大一圈 + 按钮错位 + 控制台点不开」的根因：
+    //   不再在 load 期间提前 loadPageEruda（= fetch+求值 eruda bundle + 注入 @font-face 样式表）。
+    //   该「提前求值」是页面世界拦截器时代的时序遗留——当年必须让 eruda 的 chobitsu 在我们的
+    //   拦截器之前 patch 原生 XHR/fetch，所以在 load 途中先求值 bundle。如今页面世界拦截器已
+    //   删除、抓包改由原生 MITM 代理负责，提前求值毫无意义，却恰是「刷新恢复」相对「手动开
+    //   Eruda」唯一残留的行为差异：在 GeckoView 首屏 APZ 仍在解析 <meta viewport> / 计算
+    //   resolution 的途中注入大块 @font-face 样式表并求值大 bundle，触发 reflow 与视口缩放
+    //   抢算 → 合成器 resolution 跳到约 1/0.85 → 整页放大一圈、触摸坐标整体错位、Eruda 入口
+    //   按钮点不中。这就是为什么先前删 displayDensityOverride / 关 useShadowDom / 推迟 init()
+    //   都没修好——真正的触发点是 bundle 求值与样式注入的时机，而非 init() 本身。
+    //   修法：等 load 后视口稳定，由 restoreUiSoon 一次性 loadPageEruda+initPageEruda，与
+    //   「手动开 Eruda」走完全相同的路径（后者从无放大/错位问题）。
+    restoreUiSoon();
   });
 
   // ─ 阶段 3：刷新后重建 Eruda UI 的时机。
