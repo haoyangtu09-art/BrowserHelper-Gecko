@@ -530,7 +530,18 @@ function connect() {
   try {
     port = browser.runtime.connectNative('devtools_inject');
     port.onMessage.addListener(function (msg) {
-      if (msg && msg.action === 'toggle') toggle();
+      if (!msg) return;
+      if (msg.action === 'toggle') { toggle(); return; }
+      // bhcodex MCP page-channel: forward agentCmd to agent.js handler and
+      // send result back so PageChannel/BrowserBridge can resolve the future.
+      if (msg.action === 'agentCmd' && typeof bhHandleAgentCmd === 'function') {
+        var _reqId = msg.requestId;
+        bhHandleAgentCmd(msg).then(function (result) {
+          if (port) port.postMessage({ action: 'agentResp', requestId: _reqId, result: result });
+        }).catch(function (err) {
+          if (port) port.postMessage({ action: 'agentResp', requestId: _reqId, result: { error: String(err) } });
+        });
+      }
     });
     port.onDisconnect.addListener(function () {
       port = null;

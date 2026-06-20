@@ -39,6 +39,7 @@
         "extensions/presets/index.js",
         "extensions/presets/stream-hold.js",
         "extensions/index.js",
+        "agent.js",
         "content.js"
       ],
       "run_at": "document_start",

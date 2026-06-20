@@ -59,6 +59,10 @@ object DevToolsHelper {
         // DevTools panel (display only).
         ProxyProbe.setChannel { obj -> emitToPanel(obj) }
 
+        // Wire PageChannel so BrowserBridge can send agentCmd messages to the active
+        // page's content script (bhcodex page tools: page_index/search/query/exec).
+        PageChannel.setSender { obj -> emitToPanel(obj) }
+
         // Start the local MCP bridge so the Termux-side agent (bhcodex) can reach
         // BrowserHelper's tools over localhost (token-gated). Localhost-only +
         // bearer token; Phase 1 exposes read-only network tools.
@@ -155,6 +159,10 @@ object DevToolsHelper {
                 }
                 if (action == "resolveRespIntercept") {
                     ProxyProbe.resolveRespIntercept(data.optString("flowId", ""), data)
+                    return
+                }
+                if (action == "agentResp") {
+                    PageChannel.resolve(data.optString("requestId", ""), data.optJSONObject("result") ?: data)
                     return
                 }
                 if (action == "setSseHoldConfig") {

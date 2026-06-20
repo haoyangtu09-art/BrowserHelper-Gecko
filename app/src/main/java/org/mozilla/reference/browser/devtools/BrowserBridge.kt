@@ -5,6 +5,8 @@
 package org.mozilla.reference.browser.devtools
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -14,6 +16,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * BrowserBridge — local MCP server that exposes BrowserHelper's capabilities as
@@ -53,6 +57,17 @@ object BrowserBridge {
     @Volatile private var running = false
     @Volatile private var boundPort = 0
     @Volatile private var token: String = ""
+    @Volatile private var appCtx: Context? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Run [block] on the main thread and wait (max 5s). For ProxyProbe.setEnabled. */
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) { block(); return }
+        val latch = CountDownLatch(1)
+        mainHandler.post { try { block() } finally { latch.countDown() } }
+        latch.await(5, TimeUnit.SECONDS)
+    }
 
     fun isRunning(): Boolean = running
     fun port(): Int = boundPort
@@ -67,6 +82,7 @@ object BrowserBridge {
     @Synchronized
     fun start(context: Context) {
         if (running) return
+        appCtx = context
         token = loadOrCreateToken(context)
         val srv = bindFirstFree() ?: run {
             Log.w(TAG, "no free port for bridge")
@@ -278,6 +294,102 @@ object BrowserBridge {
                     .put("required", JSONArray().put("id")),
             ),
         )
+        // ── Proxy control (L2) ───────────────────────────────────────────────
+        arr.put(tool("proxy_status", "Check whether the MITM proxy is currently running.", emptySchema()))
+        arr.put(tool("proxy_start", "Start the MITM proxy (captures all browser HTTPS traffic).", emptySchema()))
+        arr.put(tool("proxy_stop", "Stop the MITM proxy.", emptySchema()))
+        // ── Network conditioning (L2) ─────────────────────────────────────────
+        arr.put(
+            tool(
+                "throttle_set",
+                "Configure network throttling (weak-network simulation). Set enabled=false to disable.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("enabled", boolProp("Enable throttling."))
+                        .put("latencyMs", numProp("Added latency per response in ms (0 = none)."))
+                        .put("kbps", numProp("Downstream bandwidth limit in KB/s (0 = unlimited).")),
+                ),
+            ),
+        )
+        // ── Text replacement (L2) ─────────────────────────────────────────────
+        arr.put(
+            tool(
+                "replace_set",
+                "Configure text replacement rules applied to proxied request/response bodies. " +
+                    "Rules are {from, to} pairs (substring replace). scope: req | resp | both.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("enabled", boolProp("Enable replacement."))
+                        .put("scope", strProp("Which direction: req, resp, or both (default both)."))
+                        .put(
+                            "rules",
+                            JSONObject().put("type", "array")
+                                .put("description", "Array of {from:string, to:string} replacement pairs.")
+                                .put("items", JSONObject().put("type", "object")
+                                    .put("properties", JSONObject()
+                                        .put("from", strProp("Text to search for."))
+                                        .put("to", strProp("Replacement text.")))),
+                        ),
+                ),
+            ),
+        )
+        // ── Mock rules (L2) ───────────────────────────────────────────────────
+        arr.put(
+            tool(
+                "mock_set",
+                "Set mock rules: URLs matching a pattern get a synthetic response (never reaches the server). " +
+                    "Pattern is a case-insensitive substring of the full URL. Pass empty rules array to clear all mocks.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject().put(
+                        "rules",
+                        JSONObject().put("type", "array")
+                            .put("description", "Array of mock rules.")
+                            .put("items", JSONObject().put("type", "object")
+                                .put("properties", JSONObject()
+                                    .put("pattern", strProp("URL substring to match (case-insensitive)."))
+                                    .put("status", numProp("HTTP status code (default 200)."))
+                                    .put("body", strProp("Response body string."))
+                                    .put("headers", JSONObject().put("type", "object")
+                                        .put("description", "Extra response headers as {name:value}.")))),
+                    ),
+                ).put("required", JSONArray().put("rules")),
+            ),
+        )
+        // ── Page content (L1) ─────────────────────────────────────────────────
+        arr.put(
+            tool(
+                "page_index",
+                "Index the current page: fetches outerHTML into a JS-side buffer (512KB cap) and " +
+                    "returns metadata only (title, url, headings, forms, links). Call before page_search. " +
+                    "Requires DevTools to be open on the target page.",
+                emptySchema(),
+            ),
+        )
+        arr.put(
+            tool(
+                "page_search",
+                "Search the indexed page source for a text query. Returns snippets (±150 chars context). " +
+                    "Call page_index first. Args: query (required), limit (default 10, max 50).",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("query", strProp("Text to search for (case-insensitive substring)."))
+                        .put("limit", numProp("Max results (default 10)."))
+                ).put("required", JSONArray().put("query")),
+            ),
+        )
+        arr.put(
+            tool(
+                "page_query",
+                "Run a CSS selector on the live DOM. Returns matched elements (tag, text, attrs, outerHTML snippet). " +
+                    "Requires DevTools open. Args: selector (required), limit (default 20).",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("selector", strProp("CSS selector string."))
+                        .put("limit", numProp("Max elements to return (default 20)."))
+                ).put("required", JSONArray().put("selector")),
+            ),
+        )
+        // ── Page execution (L3) ───────────────────────────────────────────────
         arr.put(
             tool(
                 "cookie_reveal",
@@ -295,17 +407,34 @@ object BrowserBridge {
                     .put("required", JSONArray().put("id")),
             ),
         )
+        arr.put(
+            tool(
+                "page_exec",
+                "[SENSITIVE / L3] Execute arbitrary JavaScript in the page world (full browser API access: " +
+                    "fetch, document.cookie, window.*, history, localStorage, …). Uses Gecko wrappedJSObject — " +
+                    "no CSP restriction. Return value is JSON-serialized. Requires native confirmation per call.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("code", strProp("JS code to run. Last expression is the return value (use return statement)."))
+                        .put("timeoutMs", numProp("Eval timeout ms (default 10000)."))
+                ).put("required", JSONArray().put("code")),
+            ),
+        )
         return arr
     }
 
     // L3 = sensitive tools that MUST pass a native human confirmation before they
     // run. The gate is enforced HERE in the APK; bhcodex can never bypass it.
-    private val L3_TOOLS = setOf("cookie_reveal")
+    private val L3_TOOLS = setOf("cookie_reveal", "page_exec")
 
     private fun confirmSummary(name: String, args: JSONObject): String = when (name) {
         "cookie_reveal" ->
             "Agent(bhcodex) 请求读取 flow ${args.optString("id")} 的真实「${args.optString("name", "authorization")}」" +
                 "头(含会话令牌/Cookie)。允许后明文会发送给 Termux 侧的 bhcodex。是否允许?"
+        "page_exec" -> {
+            val snippet = args.optString("code", "").take(120)
+            "Agent(bhcodex) 请求在当前页面执行 JS(可访问 cookie/fetch/localStorage 等全部 API)：\n\n$snippet\n\n是否允许?"
+        }
         else -> "Agent(bhcodex) 请求执行敏感操作「$name」。是否允许?"
     }
 
@@ -340,6 +469,73 @@ object BrowserBridge {
                     val v = NetFlowStore.revealHeader(flowId, header)
                     if (v == null) toolError(id, "flow $flowId 无「$header」头") else toolText(id, v)
                 }
+                // ── Proxy control ────────────────────────────────────────────
+                "proxy_status" -> toolText(id, if (ProxyProbe.isRunning()) "running" else "stopped")
+                "proxy_start" -> {
+                    val ctx = appCtx ?: return toolError(id, "no context")
+                    onMain { ProxyProbe.setEnabled(ctx, true) }
+                    toolText(id, if (ProxyProbe.isRunning()) "proxy started" else "proxy start requested")
+                }
+                "proxy_stop" -> {
+                    val ctx = appCtx ?: return toolError(id, "no context")
+                    onMain { ProxyProbe.setEnabled(ctx, false) }
+                    toolText(id, "proxy stopped")
+                }
+                // ── Throttle ─────────────────────────────────────────────────
+                "throttle_set" -> {
+                    val data = JSONObject()
+                        .put("throttleEnabled", args.optBoolean("enabled", false))
+                        .put("latencyMs", args.optLong("latencyMs", 0L))
+                        .put("kbps", args.optLong("kbps", 0L))
+                    ProxyProbe.setThrottle(data)
+                    val enabled = args.optBoolean("enabled", false)
+                    toolText(id, if (enabled) "throttle: ${args.optLong("latencyMs")}ms latency, ${args.optLong("kbps")} kbps" else "throttle disabled")
+                }
+                // ── Replace ───────────────────────────────────────────────────
+                "replace_set" -> {
+                    val enabled = args.optBoolean("enabled", false)
+                    val scope = args.optString("scope", "both")
+                    val rulesArr = args.optJSONArray("rules")
+                    val rules = ArrayList<Pair<String, String>>()
+                    if (rulesArr != null) {
+                        for (i in 0 until rulesArr.length()) {
+                            val o = rulesArr.optJSONObject(i) ?: continue
+                            val from = o.optString("from", "")
+                            if (from.isNotEmpty()) rules.add(from to o.optString("to", ""))
+                        }
+                    }
+                    ProxyProbe.setReplaceRules(enabled, scope, rules)
+                    toolText(id, "replace ${if (enabled) "enabled" else "disabled"}: ${rules.size} rules, scope=$scope")
+                }
+                // ── Mock ──────────────────────────────────────────────────────
+                "mock_set" -> {
+                    val rulesArr = args.optJSONArray("rules") ?: JSONArray()
+                    ProxyProbe.setMockRules(JSONObject().put("rules", rulesArr))
+                    toolText(id, "mock rules set: ${rulesArr.length()} rules")
+                }
+                // ── Page tools ────────────────────────────────────────────────
+                "page_index" -> {
+                    val res = PageChannel.exec("getSource")
+                    if (res.has("error")) toolError(id, res.optString("error")) else toolText(id, res.toString())
+                }
+                "page_search" -> {
+                    val query = args.optString("query", "")
+                    if (query.isEmpty()) return toolError(id, "query required")
+                    val res = PageChannel.exec("searchSource", JSONObject().put("query", query).put("limit", args.optInt("limit", 10)))
+                    if (res.has("error")) toolError(id, res.optString("error")) else toolText(id, res.toString())
+                }
+                "page_query" -> {
+                    val sel = args.optString("selector", "")
+                    if (sel.isEmpty()) return toolError(id, "selector required")
+                    val res = PageChannel.exec("queryDOM", JSONObject().put("selector", sel).put("limit", args.optInt("limit", 20)))
+                    if (res.has("error")) toolError(id, res.optString("error")) else toolText(id, res.toString())
+                }
+                "page_exec" -> {
+                    val code = args.optString("code", "")
+                    if (code.isEmpty()) return toolError(id, "code required")
+                    val res = PageChannel.exec("evalJS", JSONObject().put("code", code).put("timeoutMs", args.optInt("timeoutMs", 10000)), 15_000)
+                    if (res.has("error")) toolError(id, res.optString("error")) else toolText(id, res.toString())
+                }
                 else -> toolError(id, "unknown tool: $name")
             }
         } catch (t: Throwable) {
@@ -350,6 +546,9 @@ object BrowserBridge {
     // ── small builders ────────────────────────────────────────────────────────
 
     private fun strProp(desc: String) = JSONObject().put("type", "string").put("description", desc)
+    private fun numProp(desc: String) = JSONObject().put("type", "number").put("description", desc)
+    private fun boolProp(desc: String) = JSONObject().put("type", "boolean").put("description", desc)
+    private fun emptySchema() = JSONObject().put("type", "object").put("properties", JSONObject())
 
     private fun tool(name: String, desc: String, schema: JSONObject) =
         JSONObject().put("name", name).put("description", desc).put("inputSchema", schema)
