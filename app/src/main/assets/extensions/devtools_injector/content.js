@@ -49,69 +49,69 @@ if (wasActive()) {
     restoreUiSoon();
   });
 
-  // ─ 阶段 3：刷新后重建 Eruda UI 的时机。
-  //   必须等页面 load 完、视口/缩放(GeckoView APZ)稳定后再 init Eruda，否则在加载途中
-  //   注入 Eruda 的大块 fixed-定位 shadow host 会与 GeckoView 的视口计算抢跑，导致页面
-  //   视觉缩放一圈、触摸坐标整体错位(点 Eruda 悬浮窗/页面输入框都点不中)。首次手动开
-  //   Eruda 没有这个问题，正是因为那时页面已 load 完、视口已稳定——这里对齐同样的条件。
-  //   兜底：万一 load 长时间不触发(被流式请求拖住)，超时后仍恢复，避免永远不恢复。
+  // ─ 阶段 3：刷新后重建 Eruda UI。
+  //   根因(真机逐一证伪):密度(displayDensityOverride)无罪——不开 Eruda 只刷新不放大；
+  //   时序无罪——等多久(1s/数秒)注入仍放大、且不自恢复；shadowDOM 无罪。真凶是 Eruda 的
+  //   DOM 注入本身:在「页面刚 reload、尚未稳定交互」时,注入触发 GeckoView 的 meta-viewport
+  //   自动重适配(re-fit) → resolution 跳到约 1/0.85 → 整页放大 + 触摸坐标锁错。手动开
+  //   Eruda(页面已静置)不触发 re-fit,故无此问题。
+  //   修法:不再纠结注入时机(治不了),而是在注入后强制重写一次 <meta name="viewport"> 逼
+  //   GeckoView 把 resolution 重算回 initial-scale,直接撤销这次 re-fit 放大。
   function restoreUiSoon() {
     var ran = false;
+
+    // 重写 viewport meta 逼 GeckoView 重算 resolution=1.0，撤销注入触发的 re-fit 放大。
+    // 内容必须发生变化才会触发重算：先 pin 到 initial-scale=1，两帧后恢复页面原始 viewport。
+    function resetViewportZoom() {
+      try {
+        var m = document.querySelector('meta[name="viewport"]');
+        if (m) {
+          var orig = m.getAttribute('content') || '';
+          m.setAttribute('content', 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0');
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () {
+              m.setAttribute('content', orig || 'width=device-width,initial-scale=1');
+            });
+          });
+        } else {
+          // 页面无 viewport meta：临时插一个标准的逼 GeckoView 重算，随后移除。
+          var tmp = document.createElement('meta');
+          tmp.setAttribute('name', 'viewport');
+          tmp.setAttribute('content', 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0');
+          (document.head || document.documentElement).appendChild(tmp);
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () { if (tmp.parentNode) tmp.parentNode.removeChild(tmp); });
+          });
+        }
+      } catch (e) {}
+    }
+
     function run() {
       if (ran) return;
       ran = true;
       if (erudaActive) return;
       toggle();
-    }
-    // ⚠️ 关键：load 事件 ≠ 视口已落定。GeckoView 在 reload 后会在 load 之后继续
-    //   settle 视觉视口/缩放(应用 displayDensityOverride→resolution、处理 meta
-    //   viewport、APZ 收敛)，这个窗口可达数百 ms。先前「load + 2 帧 + 50ms」仍落在
-    //   该窗口内 → 此刻注入 Eruda(求值/attach shadow host/注 @font-face)强制 reflow
-    //   → GeckoView 按被扰动的布局重算 resolution 并锁错值 → 整页放大约 1/0.85 +
-    //   触摸坐标错位。手动开 Eruda 不出问题，正因那时视口早已 settle。
-    //   故这里改为「真正等视口稳定」：逐帧轮询 innerWidth + visualViewport.scale，
-    //   连续 ~16 帧不变且至少 400ms 才注入(兜底 3.5s)。轮询值而非监听 resize 事件，
-    //   以兼容 GeckoView 静默 settle(不一定派发 visualViewport resize)。
-    function waitViewportStable(cb) {
-      var vv = window.visualViewport;
-      var lastScale = vv ? vv.scale : 1;
-      var lastW = window.innerWidth;
-      var lastH = window.innerHeight;
-      var stableFrames = 0;
-      var start = Date.now();
-      var done = false;
-      function finish() { if (done) return; done = true; cb(); }
-      function poll() {
-        if (done) return;
-        var s = vv ? vv.scale : 1;
-        var w = window.innerWidth;
-        var h = window.innerHeight;
-        if (s === lastScale && w === lastW && h === lastH) {
-          stableFrames++;
-        } else {
-          stableFrames = 0; lastScale = s; lastW = w; lastH = h;
+      // 等 Eruda 真正注入(erudaActive 置位)后再重置 viewport，撤销 re-fit 放大。
+      // toggle 是异步(loadPageEruda→initPageEruda)，故轮询 erudaActive；置位后留缓冲
+      // 等 shadow 内容绘制完(re-fit 此时才发生)再重置，并补打一次兜底。
+      var tries = 0;
+      (function afterInject() {
+        if (erudaActive || tries++ > 60) {
+          setTimeout(resetViewportZoom, 120);
+          setTimeout(resetViewportZoom, 700);
+          return;
         }
-        var elapsed = Date.now() - start;
-        // 既要「值连续不变」也要「至少 1s」：GeckoView 可能静默 settle(值一直不变),
-        // 仅靠稳定帧会过早注入；以手动开 Eruda(load 后数秒,从无 bug)为参照给足缓冲。
-        if ((stableFrames >= 16 && elapsed >= 1000) || elapsed >= 4000) { finish(); return; }
-        requestAnimationFrame(poll);
-      }
-      requestAnimationFrame(poll);
+        setTimeout(afterInject, 50);
+      })();
     }
-    // load 完成后等视口真正落定再注入。
-    function afterStable() {
-      waitViewportStable(run);
-    }
+
     if (document.readyState === 'complete') {
-      afterStable();
+      requestAnimationFrame(function () { requestAnimationFrame(run); });
     } else {
-      window.addEventListener('load', afterStable, { once: true });
-      // 页面世界拦截器已全部停用（earlyInjectInterceptor/injectInterceptor 均为空函数，
-      // 早期请求由原生 MITM 代理抓取），我们的代码不再阻塞 load → 可放心纯等 load。
-      // 之前 4s 兜底在重 SPA（load 常 >4s）会先于 load 提前注入 Eruda，与 GeckoView
-      // 首屏 APZ 抢跑 → 页面放大一圈 + 触摸坐标错位（这正是回归根因）。这里只留一个
-      // 远超正常加载时长的安全网，仅防 load 永不触发的极端卡死，正常加载绝不会先于 load。
+      window.addEventListener('load', function () {
+        requestAnimationFrame(function () { requestAnimationFrame(run); });
+      }, { once: true });
+      // 兜底：万一 load 永不触发(极端卡死)，超时后仍恢复。
       setTimeout(run, 20000);
     }
   }
