@@ -178,6 +178,65 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - **延迟**：`pumpResponses` 在处理完 1xx、取 `flowQueue.poll()` 之前调 `throttleLatency()`，按 `throttleLatencyMs` 给每个响应注入延迟。
 - 面板下发：`pushThrottleToNative()` → `setThrottle` → `applyThrottleConfig`/`saveThrottleConfig`（`throttle_config`）。字段 `throttleEnabled/throttleLatencyMs/throttleKbps`。
 
+## ⚠️ 未解决 Bug：开 Eruda 后刷新页面 → 整页放大一圈 + 错位（APZ 跳变）
+
+> 这是一个**多次尝试仍未修复**的硬骨头。本节是给「全新对话（无记忆）」的完整交接：症状、
+> 已**真机证伪**的全部假设、当前代码状态、未尝试的方向。**新对话务必先读完，不要重复已证伪的尝试。**
+
+### 症状（真机可复现）
+- 打开 Eruda 控制台后**刷新网页**：整页突然放大约一圈（视觉约 1.18×，≈1/0.85），页面按钮/布局
+  挤错位，Eruda 入口按钮点不开，双指缩放也失效（缩不动）。
+- **不开 Eruda 只刷新**：完全正常，不放大。→ 触发与 Eruda 注入强相关。
+- 放大后**不会自恢复**（停留几秒、滚动都不回弹）。
+
+### 关键事实
+- 放大幅度 ≈ 1/0.85，恰是 `EngineProvider.displayDensityOverride(deviceDensity*0.85f)` 的倒数，
+  极具迷惑性——但密度已被证伪（见下）。
+- 多份分析（commit `c8e0d19e`）判断：**跳变纯发生在 GeckoView 原生 APZ 合成器层**，DOM 完全测不到
+  （`window.devicePixelRatio` / `visualViewport.scale` 在跳变前后均**不变**）。这解释了为什么所有
+  JS 侧修法都无效。
+- **手动开 Eruda（页面已 load 完、静置）从不触发**此 bug。差异疑似在「页面刚 reload、APZ 仍在首屏
+  解析阶段」时注入 Eruda。
+
+### 已真机证伪的假设（⛔ 不要再试这些）
+1. **`displayDensityOverride`（密度）无罪**：`c8e0d19e` 移除它后，自然密度下 Eruda 注入照样放大+错位
+   （`b35f0281` 确认）。放大幅度像 1/0.85 是巧合/APZ 自己挑的 resolution，不是密度乘出来的。当前
+   `EngineProvider.kt:53` 仍保留 0.85（用户要它让页面铺满，与 bug 无关）。
+2. **注入时机无罪**：推迟到 load 后、逐帧轮询视口稳定+至少 1s（`34f8a9b7`）、甚至等用户**首次真实交互**
+   （touchstart/scroll/...）后再注入（`92b087fd`）——**全部照样放大**。等多久都没用、且不自恢复。
+3. **viewport meta 重写无罪**：注入后强制重写 `<meta name=viewport>` 逼 GeckoView 重算 resolution
+   （`45d7af64`）——无效（DOM 测不到的原生层跳变，meta 改不动它）。副作用：临时 `user-scalable=0`
+   可能让「缩不了」更糟。已回退。
+4. **滚动无罪**：注入后程序化 scroll 撤销——无效（`c8e0d19e` 记录）。
+5. **`useShadowDom:false`（换 light-DOM 注入）更糟，已回退（`61f23eff`）**：本想绕开「fixed shadow host」，
+   结果**连手动注入都放大**、且**汉化（i18n）失效**。当前两处 `eruda.init` 已回到 `useShadowDom:true`。
+6. **「早期求值 eruda bundle」是另一个独立 bug（已修，勿混淆）**：`6782ac0e` 删掉 phase-2 里 load 期间
+   提前 `loadPageEruda`（fetch+求值 bundle+注入 @font-face）后，**手动开 Eruda 不再放大**；但**刷新恢复
+   仍放大**。即：早期求值只解释了「手动开就放大」那一半，刷新放大是另一条线，至今未解。
+
+### 当前代码状态（HEAD=`61f23eff`，working tree clean）
+- `core/utils.js`：两处 `eruda.init` 均 `useShadowDom:true`（已回退 false 实验）。
+- `content.js` 阶段 3 `restoreUiSoon`：等「首次用户交互」后 `toggle()`（`92b087fd` 的实现，bug 仍在）。
+  ⚠️ 注意：phase-2 块（约 37–49 行）还残留一段 `6782ac0e` 时代的旧注释，说「真凶是 bundle 求值时机」——
+  那个结论已被后续证伪，**以本节为准**，别被该注释误导。
+- `EngineProvider.kt:53`：`displayDensityOverride(deviceDensity*0.85f)` 保留。
+
+### 尚未尝试 / 候选方向
+- **iframe 隔离注入**：把 Eruda 塞进独立 `<iframe>` 文档，主页面布局/APZ 不受其 DOM 影响。注意 Eruda 需
+  hook 主页面 console/network，跨 frame 可行性需先验证。
+- **彻底不在刷新后自动恢复**：刷新后只留一个**自绘的小 light-DOM 按钮**（非 Eruda 容器），用户点它才走
+  「手动开」路径（手动路径已知不触发 bug）。代价：刷新后控制台不自动回来，需点一下。
+- **原生侧重置 APZ resolution**：注入后由 Kotlin 侧调 GeckoView API 强制把 resolution 重算回 1.0。
+  公开 API 是否存在待查（`PanZoomController` 未暴露 setResolution）。
+- **复现最小化**：先确认 bug 是否与 MITM 代理无关（应无关，密度结论里提过「代理不开也这样」）、是否所有站点都复现。
+
+### 给新对话的研判提示
+- 别再赌「时机/viewport/滚动/密度」——这四条都已真机证伪。
+- 核心矛盾点值得深挖：**为什么「手动开」永不触发，而「刷新自动恢复」必触发**，但「等首次用户交互后再注入」
+  却仍触发？这说明差异不在「用户是否已交互」，而可能在**页面 reload 的生命周期阶段本身**（首屏 APZ 解析窗口）
+  或 **restore 路径（phase 1/2）与纯手动 toggle 的某个未对齐副作用**。
+- 验证任何新猜想前，先想清楚「它能否解释 DOM 测不到的原生 APZ 跳变」，否则大概率又是一次无效构建。
+
 ## 持久化
 
 - `browser.storage.local`
@@ -271,6 +330,9 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 - **插件**：插件=配置下发方，原生=唯一执行方。
 
 ### 6. Known Bugs
+- **🔴 未解决：开 Eruda 后刷新页面 → 整页放大一圈 + 按钮错位 + 控制台点不开 + 缩放失效。** 多次尝试未修，
+  完整排查记录（症状/已证伪假设/当前状态/候选方向）见上文「## ⚠️ 未解决 Bug：开 Eruda 后刷新页面」一节。
+  要点：跳变在原生 APZ 合成器层（DOM 测不到），密度/时机/viewport/滚动/useShadowDom 均已真机证伪。
 - 多 tab 归属粗糙（MITM 不知发起 tab；「只看本页」靠 host+Origin/Referer 启发式）。
 - chunked 替换降级时关连接重载。
 - 新特性未真机。
