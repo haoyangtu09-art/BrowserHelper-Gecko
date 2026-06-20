@@ -389,6 +389,74 @@ object BrowserBridge {
                 ).put("required", JSONArray().put("selector")),
             ),
         )
+        // ── Intercept (L2) ───────────────────────────────────────────────────
+        arr.put(
+            tool(
+                "intercept_set",
+                "Configure request/response intercept rules. Matching flows are PAUSED — " +
+                    "call intercept_pending to see them, then intercept_resolve/resp_intercept_resolve to proceed. " +
+                    "Set reqAll/respAll=true to intercept everything, or use rules for specific hosts/paths.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("reqAll", boolProp("Intercept ALL requests (default false)."))
+                        .put("respAll", boolProp("Intercept ALL responses (default false)."))
+                        .put(
+                            "rules",
+                            JSONObject().put("type", "array")
+                                .put("description", "Specific rules: [{host, path, method, hasBody, interceptResp}].")
+                                .put("items", JSONObject().put("type", "object")
+                                    .put("properties", JSONObject()
+                                        .put("host", strProp("Exact host (e.g. api.example.com)."))
+                                        .put("path", strProp("Exact path (no query, e.g. /v1/chat)."))
+                                        .put("method", strProp("HTTP method (GET/POST/…)."))
+                                        .put("hasBody", boolProp("Match only requests with a body."))
+                                        .put("interceptResp", boolProp("Also intercept the response for this rule.")))),
+                        ),
+                ),
+            ),
+        )
+        arr.put(
+            tool(
+                "intercept_pending",
+                "List flows currently paused waiting for an intercept decision. " +
+                    "Returns [{flowId, type:req|resp, url, method, ts}]. Poll this after intercept_set.",
+                emptySchema(),
+            ),
+        )
+        arr.put(
+            tool(
+                "intercept_resolve",
+                "Resolve a paused REQUEST intercept. decision: continue (forward, optionally with edits) or abort (return 403). " +
+                    "Header values support PLACEHOLDER SUBSTITUTION: use {{cookie:<flowId>}} or {{auth:<flowId>}} " +
+                    "or {{header:<flowId>:<headerName>}} — the APK replaces these with the real credential value " +
+                    "BEFORE forwarding, so the real secret never enters the model context.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("flowId", strProp("Flow id from intercept_pending."))
+                        .put("decision", strProp("continue or abort."))
+                        .put("url", strProp("Modified URL (optional, continue only)."))
+                        .put("method", strProp("Modified method (optional, continue only)."))
+                        .put("reqHeaders", JSONObject().put("type", "object").put("description",
+                            "Modified request headers. Values may contain {{cookie:id}}/{{auth:id}}/{{header:id:name}} placeholders."))
+                        .put("reqBody", strProp("Modified request body (optional, continue only)."))
+                ).put("required", JSONArray().put("flowId").put("decision")),
+            ),
+        )
+        arr.put(
+            tool(
+                "resp_intercept_resolve",
+                "Resolve a paused RESPONSE intercept. Header values support the same placeholder substitution as intercept_resolve.",
+                JSONObject().put("type", "object").put(
+                    "properties", JSONObject()
+                        .put("flowId", strProp("Flow id from intercept_pending."))
+                        .put("decision", strProp("continue or abort."))
+                        .put("status", numProp("Modified HTTP status (optional, continue only)."))
+                        .put("respHeaders", JSONObject().put("type", "object").put("description",
+                            "Modified response headers (with optional placeholders)."))
+                        .put("respBody", strProp("Modified response body (optional, continue only)."))
+                ).put("required", JSONArray().put("flowId").put("decision")),
+            ),
+        )
         // ── Page execution (L3) ───────────────────────────────────────────────
         arr.put(
             tool(
@@ -513,6 +581,43 @@ object BrowserBridge {
                     ProxyProbe.setMockRules(JSONObject().put("rules", rulesArr))
                     toolText(id, "mock rules set: ${rulesArr.length()} rules")
                 }
+                // ── Intercept ─────────────────────────────────────────────────
+                "intercept_set" -> {
+                    ProxyProbe.setInterceptRules(
+                        JSONObject()
+                            .put("reqAll", args.optBoolean("reqAll", false))
+                            .put("respAll", args.optBoolean("respAll", false))
+                            .put("interceptTelemetry", false)
+                            .put("interceptNoise", false)
+                            .put("interceptCookie", false)
+                            .put("rules", args.optJSONArray("rules") ?: JSONArray()),
+                    )
+                    toolText(id, "intercept rules set (reqAll=${args.optBoolean("reqAll")}, respAll=${args.optBoolean("respAll")})")
+                }
+                "intercept_pending" -> toolText(id, ProxyProbe.pendingInterceptList().toString())
+                "intercept_resolve" -> {
+                    val flowId = args.optString("flowId", "")
+                    if (flowId.isEmpty()) return toolError(id, "flowId required")
+                    val decision = JSONObject()
+                        .put("decision", args.optString("decision", "continue"))
+                        .put("url", args.optString("url", ""))
+                        .put("method", args.optString("method", ""))
+                        .put("reqHeaders", resolveHeaderPlaceholders(args.optJSONObject("reqHeaders")))
+                        .put("reqBody", resolvePlaceholders(args.optString("reqBody", "")))
+                    ProxyProbe.resolveIntercept(flowId, decision)
+                    toolText(id, "intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
+                }
+                "resp_intercept_resolve" -> {
+                    val flowId = args.optString("flowId", "")
+                    if (flowId.isEmpty()) return toolError(id, "flowId required")
+                    val decision = JSONObject()
+                        .put("decision", args.optString("decision", "continue"))
+                        .put("status", args.optInt("status", 0))
+                        .put("respHeaders", resolveHeaderPlaceholders(args.optJSONObject("respHeaders")))
+                        .put("respBody", resolvePlaceholders(args.optString("respBody", "")))
+                    ProxyProbe.resolveRespIntercept(flowId, decision)
+                    toolText(id, "resp intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
+                }
                 // ── Page tools ────────────────────────────────────────────────
                 "page_index" -> {
                     val res = PageChannel.exec("getSource")
@@ -544,6 +649,37 @@ object BrowserBridge {
     }
 
     // ── small builders ────────────────────────────────────────────────────────
+
+    /**
+     * Resolve credential placeholders in [value] before sending to ProxyProbe.
+     * Format: {{cookie:<flowId>}}, {{auth:<flowId>}}, {{header:<flowId>:<headerName>}}
+     * The real credential is pulled from NetFlowStore (un-redacted internal store)
+     * and substituted HERE in the APK — the model never sees the real value.
+     */
+    private val PLACEHOLDER_RE = Regex("""\{\{(\w+):(\w+)(?::([^}]+))?\}\}""")
+    private fun resolvePlaceholders(value: String): String = PLACEHOLDER_RE.replace(value) { m ->
+        val type = m.groupValues[1].lowercase()
+        val flowId = m.groupValues[2]
+        val extra = m.groupValues[3].ifEmpty { null }
+        val headerName = when (type) {
+            "cookie" -> "cookie"
+            "auth", "authorization" -> "authorization"
+            "header" -> extra ?: return@replace m.value
+            else -> return@replace m.value
+        }
+        NetFlowStore.revealHeader(flowId, headerName) ?: m.value
+    }
+
+    private fun resolveHeaderPlaceholders(headers: JSONObject?): JSONObject {
+        val out = JSONObject()
+        if (headers == null) return out
+        val keys = headers.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            out.put(k, resolvePlaceholders(headers.optString(k, "")))
+        }
+        return out
+    }
 
     private fun strProp(desc: String) = JSONObject().put("type", "string").put("description", desc)
     private fun numProp(desc: String) = JSONObject().put("type", "number").put("description", desc)

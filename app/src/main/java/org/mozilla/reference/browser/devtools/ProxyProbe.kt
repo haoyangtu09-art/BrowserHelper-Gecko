@@ -103,6 +103,20 @@ object ProxyProbe {
     @Volatile private var interceptRulesList: List<InterceptRule> = emptyList()
     private val pendingIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
     private val pendingRespIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
+    // Metadata for agent polling (bhcodex intercept_pending tool). Parallel to the
+    // CompletableFuture maps so the agent can ask "what's waiting?" without a panel.
+    private data class InterceptMeta(val type: String, val url: String, val method: String, val ts: Long = System.currentTimeMillis())
+    private val pendingInterceptMeta = ConcurrentHashMap<String, InterceptMeta>()
+
+    /** Returns a JSONArray of all currently paused intercept flows (req + resp). */
+    fun pendingInterceptList(): org.json.JSONArray {
+        val arr = org.json.JSONArray()
+        for ((flowId, m) in pendingInterceptMeta) {
+            arr.put(JSONObject().put("flowId", flowId).put("type", m.type).put("url", m.url).put("method", m.method).put("ts", m.ts))
+        }
+        return arr
+    }
+
     private const val INTERCEPT_PREFS_KEY = "intercept_config"
     private const val INTERCEPT_TIMEOUT_MS = 60000L
     // Low-value request classes "intercept all" lets through (ports panel/render.js
@@ -546,11 +560,13 @@ object ProxyProbe {
 
     /** Panel → native: the user's decision for a paused request flow. */
     fun resolveIntercept(flowId: String, decision: JSONObject) {
+        pendingInterceptMeta.remove(flowId)
         pendingIntercepts.remove(flowId)?.complete(decision)
     }
 
     /** Panel → native: the user's decision for a paused response flow. */
     fun resolveRespIntercept(flowId: String, decision: JSONObject) {
+        pendingInterceptMeta.remove(flowId)
         pendingRespIntercepts.remove(flowId)?.complete(decision)
     }
 
@@ -573,6 +589,7 @@ object ProxyProbe {
         val fut = CompletableFuture<JSONObject>()
         pendingIntercepts[flowId] = fut
         val method = reqHead.substringBefore("\r\n").trimStart().substringBefore(' ').trim()
+        pendingInterceptMeta[flowId] = InterceptMeta("req", "https://$host$target", method)
         val bodyText = if (isLikelyText(body)) String(body, Charsets.UTF_8) else ""
         emit(
             JSONObject()
@@ -633,6 +650,8 @@ object ProxyProbe {
         val fut = CompletableFuture<JSONObject>()
         pendingRespIntercepts[flowId] = fut
         val status = respHead.substringBefore("\r\n").split(" ").getOrElse(1) { "" }.toIntOrNull() ?: 0
+        // Store resp meta (URL from NetFlowStore/emit is unavailable here, use flowId hint)
+        pendingInterceptMeta[flowId] = InterceptMeta("resp", "flow:$flowId", status.toString())
         val bodyText = if (isLikelyText(decodedBody)) String(decodedBody, Charsets.UTF_8) else ""
         emit(
             JSONObject()
