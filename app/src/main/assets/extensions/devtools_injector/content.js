@@ -49,28 +49,44 @@ if (wasActive()) {
     restoreUiSoon();
   });
 
-  // ─ 阶段 3：刷新后重建 Eruda UI（load 后注入）。
-  //   根因(真机逐一证伪 + 历史分析 c8e0d19e):放大/错位纯发生在 GeckoView 原生 APZ 合成器层。
-  //   已证伪的 JS 侧修法:viewport meta 重写、改注入时机、滚动、等首次用户交互——全无效,
-  //   因为跳变在原生层、DOM 测不到(dpr/visualViewport.scale 均不变);密度 override 亦无罪。
-  //   c8e0d19e 把触发源锁定在「Eruda 注入的那块占大半屏的 fixed SHADOW host」本身。故本轮
-  //   换注入方式:eruda.init 改 useShadowDom:false(见 core/utils.js),用普通 light-DOM 渲染,
-  //   不再创建 fixed shadow host → 避免 GeckoView APZ 把它当新内容触发分辨率重算。
-  //   时机回归最简单的「load 后直接注入」,只动「注入方式」一个变量,便于真机定性。
+  // ─ 阶段 3：刷新后重建 Eruda UI。
+  //   根因(真机逐一证伪 + 历史分析 c8e0d19e):放大/错位纯发生在 GeckoView 原生 APZ 合成器层
+  //   ——reload 后页面尚未被用户交互时,自动注入 Eruda 那块占大半屏的 fixed shadow host
+  //   触发 APZ 分辨率重算,合成器缩放跳变(放大一圈) + 触摸坐标整体锁错(按钮挤一块 / 控制台
+  //   点不开 / 缩放失效)。该跳变 DOM 完全测不到(dpr / visualViewport.scale 均不变),所以
+  //   viewport meta 重写、改注入时机、滚动都修不了(已分别真机证伪);密度 override 亦无罪
+  //   (自然密度下照样跳)。
+  //   关键观察:手动开 Eruda 从不触发——因为那时页面已 load 完且用户刚触屏,APZ 已被用户交互
+  //   "激活"到稳定分辨率。修法:刷新后不再无条件自动注入,而是等用户对页面的第一次真实交互
+  //   (touchstart / pointerdown / wheel / scroll / keydown)之后再 toggle(),复刻"手动开"
+  //   的前置条件(页面静置 + 用户已触屏),从根上避开 APZ 重算跳变。
   function restoreUiSoon() {
     var ran = false;
+
     function run() {
       if (ran) return;
       ran = true;
       if (erudaActive) return;
       toggle();
     }
-    if (document.readyState === 'complete') {
-      requestAnimationFrame(function () { requestAnimationFrame(run); });
-    } else {
-      window.addEventListener('load', function () {
+
+    // 绑定一次性「首次用户交互」监听:任一手势触发即解绑全部并注入。
+    function armGesture() {
+      var evts = ['touchstart', 'pointerdown', 'wheel', 'scroll', 'keydown'];
+      function onGesture() {
+        evts.forEach(function (t) { window.removeEventListener(t, onGesture, true); });
+        // 等这一拍交互引发的 APZ 调整落定后再注入,避免与手势自身的滚动/缩放抢算。
         requestAnimationFrame(function () { requestAnimationFrame(run); });
-      }, { once: true });
+      }
+      evts.forEach(function (t) {
+        window.addEventListener(t, onGesture, { capture: true, passive: true });
+      });
+    }
+
+    if (document.readyState === 'complete') {
+      armGesture();
+    } else {
+      window.addEventListener('load', armGesture, { once: true });
     }
   }
 }

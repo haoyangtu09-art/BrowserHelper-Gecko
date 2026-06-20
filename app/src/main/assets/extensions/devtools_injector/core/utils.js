@@ -412,7 +412,7 @@ function initPageEruda(cb) {
     '      window.eruda._container=null;',
     '      window.eruda._shadowRoot=null;',
     '    }',
-    '    window.eruda.init({useShadowDom:false,tool:["console","elements","resources","sources","info"]});',
+    '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});',
     '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}',
     '  }catch(e){}',
     '})();',
@@ -444,7 +444,7 @@ function initIsolatedEruda(cb) {
         self.eruda._shadowRoot = null;
       }
       self.eruda.init({
-        useShadowDom: false,
+        useShadowDom: true,
         tool: tools,
       });
       resetIsolatedPanel();
