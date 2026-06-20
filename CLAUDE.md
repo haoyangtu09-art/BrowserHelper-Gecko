@@ -199,12 +199,11 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
   > 「Gecko MobileViewportManager(MVM) 的布局视口/zoom-to-fit 重适配」**本就不变**;真正会变的是
   > `window.innerWidth` / `documentElement.clientWidth`,**从没量过**。且捏合分辨率改变**不会**让点击
   > 命中错位,而本 bug 有「触摸坐标整体错位」——这是**布局视口重适配**的特征,不是捏合 APZ。故新假设:
-  > 这是 **MVM 在 reload 后的「下一次 reflow 就重算」窗口里,被 Eruda 注入的 reflow 触发、锁错了
-  > 布局视口分辨率**(手动开时 MVM 已锁定故不触发)。HEAD 的 `restoreUiSoon` 已加 `geomReport` 打印
-  > 整套几何量(Toast 前缀 `BHZOOM`)做判定:真机刷新后看 `iw=`/`cw=` 是否在 `post-inject`→`post-settle`
-  > 间变化——变=MVM 重适配(JS/meta 可修),不变=才是纯原生 APZ。
-- **手动开 Eruda（页面已 load 完、静置）从不触发**此 bug。差异疑似在「页面刚 reload、APZ 仍在首屏
-  解析阶段」时注入 Eruda。
+  > 这是 **MVM/APZ 在 Eruda fixed/shadow host 注入后被扰动**导致的原生 viewport 状态跳变。
+  > 旧的 `BHZOOM` 几何日志和 JS reflow/meta 收敛已经真机失败；当前转向“补原生 viewport commit”。
+- **最新真机反馈（2026-06-20）**：手动开 Eruda **也会瞬时放大**，但不到半秒会被原生侧拉回；
+  刷新后自动恢复会放大但**不会拉回**。所以差异不在“Eruda 是否触发放大”，而在手动路径后面多了一次
+  原生 UI/GeckoView viewport commit（菜单关闭、focus/layout/dynamic-toolbar 更新等）。
 
 ### 已真机证伪的假设（⛔ 不要再试这些）
 1. **`displayDensityOverride`（密度）无罪**：`c8e0d19e` 移除它后，自然密度下 Eruda 注入照样放大+错位
@@ -222,18 +221,15 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
    提前 `loadPageEruda`（fetch+求值 bundle+注入 @font-face）后，**手动开 Eruda 不再放大**；但**刷新恢复
    仍放大**。即：早期求值只解释了「手动开就放大」那一半，刷新放大是另一条线，至今未解。
 
-### 当前代码状态（MVM 重适配假设 + 收敛修复 + 判定日志，待真机验证）
-- `core/utils.js`：两处 `eruda.init` 均 `useShadowDom:true`（已回退 false 实验）。
-- `content.js` 阶段 3 `restoreUiSoon`：**已改**——load 后直接 `toggle()` 注入(不再等手势,时机已证伪),
-  注入前后 `geomReport` 打印 `BHZOOM iw/cw/ow/vvw/vvs/dpr/sw`(Toast + console);注入后 `lastReflowSettle`
-  把「最后一次 reflow」做成一次干净强制重排逼 MVM 收敛,且仅对已声明移动端 viewport 的页面补
-  `initial-scale=1`(桌面型无 viewport 页面只重排不改 meta,避免新回归)。三处量测:`post-inject`/
-  `post-settle`/`post-settle-1200`。
-  - **真机判定**:刷新后看 `BHZOOM` Toast 的 `iw=`/`cw=` 在注入前后是否变化。变→坐实 MVM 布局视口重适配,
-    且若 `lastReflowSettle` 让其收敛回正确值则放大消失=修复成功;若 `iw/cw` 不变但仍放大→才是纯原生
-    APZ,需转「原生侧重置 resolution」方向。判定后可删 `geomReport`(纯诊断噪音)。
-  - ⚠️ phase-2 块(约 37–49 行)残留 `6782ac0e` 时代旧注释说「真凶是 bundle 求值时机」——已被证伪,
-    **以本节为准**。
+### 当前代码状态（自动恢复后补原生 viewport nudge，待真机验证）
+- `core/utils.js`：两处 `eruda.init` 均 `useShadowDom:true` + `autoScale:false` + `eruda.scale(1)`。
+  Eruda 注入成功、`erudaActive` 置位后，发送三次 native message：`viewportNudge`（立即 / 120ms / 450ms）。
+- `DevToolsHelper.kt`：新增 `viewportNudge` native message，转发到当前浏览器 fragment 注册的 callback。
+- `BaseBrowserFragment.kt`：注册 `DevToolsHelper.setViewportNudge(::nudgeEngineViewport)`；nudge 做一次极小的
+  `engineView.setDynamicToolbarMaxHeight(1) → postOnAnimation → 0`，并配合 `requestFocus/requestLayout/invalidate`。
+  目的不是改变 UI，而是触发 GeckoView 原生 viewport commit，复刻手动菜单路径里那次“拉回”。
+- `content.js` 阶段 3 `restoreUiSoon`：恢复 load 后自动 `toggle()`，不再带 `BHZOOM` 诊断日志，也不再做
+  viewport meta/reflow 修补。
 - `EngineProvider.kt:53`：`displayDensityOverride(deviceDensity*0.85f)` 保留。
 - **另一未跑的决定性实验**:页面**还在加载时**点工具栏 toggle(`DevToolsHelper.kt:107` port 未连→reload→
   `pendingToggle`),让「手动」路径也经历一次 reload。若**这样也放大**→触发点是 **reload 本身**而非
@@ -262,8 +258,8 @@ Eruda v3.4.3 的 `init()` 默认 `autoScale=true`；移动端会读取 `<meta na
   `autoScale:false` 是否真正切断放大/错位。
 
 真机判定：
-- 若刷新自动恢复后不再放大/错位，根因就是 Eruda autoScale 与 GeckoView 自动恢复路径的组合。
-- 若仍放大，则保留 `autoScale:false` 这个低风险改动，但继续转向 iframe 隔离或原生侧 APZ reset。
+- `autoScale:false` 单独已真机失败：刷新自动恢复仍放大。
+- 但它是低风险防御，继续保留；当前真正待验的是 **自动路径补原生 viewport nudge**。
 
 ### 给新对话的研判提示
 - 别再赌「时机/viewport/滚动/密度」——这四条都已真机证伪。

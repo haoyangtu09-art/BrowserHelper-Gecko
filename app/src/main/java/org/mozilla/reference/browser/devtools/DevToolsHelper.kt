@@ -37,6 +37,7 @@ object DevToolsHelper {
     private var sessionUseCases: SessionUseCases? = null
     private var appContext: Context? = null
     private var scope: CoroutineScope? = null
+    private var viewportNudge: (() -> Unit)? = null
 
     // Sessions that already have a handler registered.
     private val registeredSessions = mutableSetOf<EngineSession>()
@@ -108,6 +109,10 @@ object DevToolsHelper {
         }
     }
 
+    fun setViewportNudge(callback: (() -> Unit)?) {
+        viewportNudge = callback
+    }
+
     private fun sendToggle(engineSession: EngineSession) {
         controller.sendContentMessage(
             JSONObject().put("action", "toggle"),
@@ -163,6 +168,10 @@ object DevToolsHelper {
                 }
                 if (action == "agentResp") {
                     PageChannel.resolve(data.optString("requestId", ""), data.optJSONObject("result") ?: data)
+                    return
+                }
+                if (action == "viewportNudge") {
+                    mainHandler.post { viewportNudge?.invoke() }
                     return
                 }
                 if (action == "setSseHoldConfig") {

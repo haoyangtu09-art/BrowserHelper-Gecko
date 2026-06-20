@@ -34,10 +34,9 @@ if (wasActive()) {
     releaseAllPendingIso();
     // 兼容性 no-op（页面世界拦截器已删除，无可还原的 wrapper）。
     disableInterceptor();
-    // 刷新后恢复 Eruda UI。根因候选已从「注入时机」收敛到 Eruda 的移动端 autoScale：
-    // eruda.init 默认会读取 viewport initial-scale 并按 1/scale 重写自身 px 尺寸，
-    // 在 GeckoView + displayDensityOverride/自动恢复路径上会触发 1/0.85 量级的错位。
-    // core/utils.js 里已显式 autoScale:false + scale(1)，这里恢复自动注入来验证该根因。
+    // 刷新后恢复 Eruda UI。真机新观察：手动注入也会瞬时放大，但原生菜单/GeckoView 路径
+    // 会在半秒内把 viewport 拉回；自动恢复只走 JS toggle，缺少这次原生 viewport commit。
+    // core/utils.js 在 Eruda 注入成功后会向原生发送 viewportNudge，补上自动路径的回拉。
     restoreUiSoon();
   });
 

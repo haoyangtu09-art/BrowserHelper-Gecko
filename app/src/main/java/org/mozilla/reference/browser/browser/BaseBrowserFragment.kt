@@ -50,6 +50,7 @@ import mozilla.components.ui.widgets.behavior.EngineViewClippingBehavior
 import org.mozilla.reference.browser.BuildConfig
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.addons.WebExtensionPromptFeature
+import org.mozilla.reference.browser.devtools.DevToolsHelper
 import org.mozilla.reference.browser.downloads.DownloadService
 import org.mozilla.reference.browser.ext.getPreferenceKey
 import org.mozilla.reference.browser.ext.requireComponents
@@ -188,6 +189,7 @@ abstract class BaseBrowserFragment :
         )
 
         engineView.setDynamicToolbarMaxHeight(0)
+        DevToolsHelper.setViewportNudge(::nudgeEngineViewport)
 
         toolbarIntegration.set(
             feature = ToolbarIntegration(
@@ -436,6 +438,43 @@ abstract class BaseBrowserFragment :
             setTopChromeContentOffset(resources.getDimensionPixelSize(R.dimen.browser_top_chrome_height))
             engineView.setDynamicToolbarMaxHeight(0)
         }
+    }
+
+    private fun nudgeEngineViewport() {
+        val rootView = view ?: return
+        if (!isAdded) return
+        val engineViewAsView = engineView as? View ?: return
+        engineViewAsView.post {
+            if (!isAdded || view == null) return@post
+            engineView.setDynamicToolbarMaxHeight(1)
+            engineViewAsView.requestFocus()
+            engineViewAsView.requestLayout()
+            engineViewAsView.invalidate()
+            rootView.requestLayout()
+            rootView.invalidate()
+            engineViewAsView.postOnAnimation {
+                if (!isAdded || view == null) return@postOnAnimation
+                engineView.setDynamicToolbarMaxHeight(0)
+                engineViewAsView.requestLayout()
+                engineViewAsView.invalidate()
+                rootView.requestLayout()
+                rootView.invalidate()
+            }
+            engineViewAsView.postDelayed({
+                if (!isAdded || view == null) return@postDelayed
+                engineView.setDynamicToolbarMaxHeight(0)
+                engineViewAsView.requestLayout()
+                engineViewAsView.invalidate()
+                rootView.requestLayout()
+                rootView.invalidate()
+            }, 250)
+        }
+    }
+
+    @CallSuper
+    override fun onDestroyView() {
+        DevToolsHelper.setViewportNudge(null)
+        super.onDestroyView()
     }
 
     private fun setTopChromeContentOffset(topMargin: Int) {
