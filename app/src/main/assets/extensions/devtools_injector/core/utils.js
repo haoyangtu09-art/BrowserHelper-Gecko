@@ -412,7 +412,8 @@ function initPageEruda(cb) {
     '      window.eruda._container=null;',
     '      window.eruda._shadowRoot=null;',
     '    }',
-    '    window.eruda.init({useShadowDom:true,tool:["console","elements","resources","sources","info"]});',
+    '    window.eruda.init({useShadowDom:true,autoScale:false,tool:["console","elements","resources","sources","info"]});',
+    '    try{window.eruda.scale&&window.eruda.scale(1);}catch(e){}',
     '    try{window.eruda.hide&&window.eruda.hide();}catch(e){}',
     '  }catch(e){}',
     '})();',
@@ -445,8 +446,10 @@ function initIsolatedEruda(cb) {
       }
       self.eruda.init({
         useShadowDom: true,
+        autoScale: false,
         tool: tools,
       });
+      try { if (self.eruda.scale) self.eruda.scale(1); } catch (e) {}
       resetIsolatedPanel();
       patchIsolatedPanelStyles();
       centerIsolatedEntry();

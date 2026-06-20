@@ -248,6 +248,23 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
   公开 API 是否存在待查（`PanZoomController` 未暴露 setResolution）。
 - **复现最小化**：先确认 bug 是否与 MITM 代理无关（应无关，密度结论里提过「代理不开也这样」）、是否所有站点都复现。
 
+### 新增根因候选（待真机验证）：Eruda 移动端 autoScale
+
+Eruda v3.4.3 的 `init()` 默认 `autoScale=true`；移动端会读取 `<meta name="viewport">` 的
+`initial-scale`，再执行 `scale(1 / initialScale)`。这个 scale 不只是 transform，而是 Eruda 内部 CSS
+管理器把所有注入样式里的 `px` 统一乘以该倍数。若 GeckoView 自动恢复路径下读到/等效得到 `0.85`，
+数值正好是症状里的 `1 / 0.85 ≈ 1.176`。这也是之前所有“时机 / meta / reflow / useShadowDom”尝试都
+可能无效的原因：真正触发点可能是 Eruda 自己的移动端缩放适配，而不是页面缩放 API。
+
+本轮补丁：
+- `core/utils.js`：两处 `eruda.init` 都加 `autoScale:false`，并在 init 后强制 `eruda.scale(1)`。
+- `content.js`：撤掉“刷新后不自动恢复 Eruda UI”的规避，恢复 load 后自动 `toggle()`，用来验证
+  `autoScale:false` 是否真正切断放大/错位。
+
+真机判定：
+- 若刷新自动恢复后不再放大/错位，根因就是 Eruda autoScale 与 GeckoView 自动恢复路径的组合。
+- 若仍放大，则保留 `autoScale:false` 这个低风险改动，但继续转向 iframe 隔离或原生侧 APZ reset。
+
 ### 给新对话的研判提示
 - 别再赌「时机/viewport/滚动/密度」——这四条都已真机证伪。
 - 核心矛盾点值得深挖：**为什么「手动开」永不触发，而「刷新自动恢复」必触发**，但「等首次用户交互后再注入」
