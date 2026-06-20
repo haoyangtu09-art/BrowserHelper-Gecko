@@ -94,6 +94,12 @@ object ProxyProbe {
     // intercept forces, interceptResp pauses that flow's response.
     @Volatile private var reqInterceptAll = false
     @Volatile private var respInterceptAll = false
+    // Per-class intercept toggles: when on, the matching low-value class is NO LONGER
+    // let through by "intercept all" (it gets paused like everything else). Off = pass
+    // (default), mirroring the panel's 拦截遥测包/拦截噪音包/拦截cookie包 checkboxes.
+    @Volatile private var interceptTelemetry = false
+    @Volatile private var interceptNoise = false
+    @Volatile private var interceptCookie = false
     @Volatile private var interceptRulesList: List<InterceptRule> = emptyList()
     private val pendingIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
     private val pendingRespIntercepts = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
@@ -104,6 +110,23 @@ object ProxyProbe {
     private val telemetryRe = Regex("(collect|telemetry|analytics|metrics|beacon|sentry|trace|traces|stats|gtm|gtag|google-analytics|doubleclick|amplitude|mixpanel|segment|datadog|bugsnag|track|pixel|rum)([/?#_.-]|$)")
     private val noiseRe = Regex("(heartbeat|ping|keepalive|poll|socket\\.io|sockjs|realtime|tunnel|presence|typing|status|health|alive|connect|events?)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=")
     private val cookieRe = Regex("(/|[?&._-])(cookie|cookiesync|setuid|usersync|user-sync|idsync|id-sync|cksync|syncuser|getuid|gen_204|__cf)([/?#._-]|$)")
+
+    // ── Mock (Map Local): synthesize a response for matched requests without ever
+    // touching upstream. A matched BOUNDED request's body is drained, a synthetic
+    // response (status/headers/body) is written to the browser, and the connection
+    // is closed (Connection: close). Streaming/unbounded requests are never mocked.
+    private class MockRule(val pattern: String, val status: Int, val headers: Map<String, String>, val body: String)
+    @Volatile private var mockRulesList: List<MockRule> = emptyList()
+    private const val MOCK_PREFS_KEY = "mock_config"
+
+    // ── Throttle (弱网): pace the DOWNLOAD (response) direction only. latencyMs is
+    // applied once per response (before forwarding its head); kbps rate-limits the
+    // body via ThrottledOutputStream, which writes through immediately (NO buffering,
+    // 坑#4-safe) and only sleeps between chunks. Off (kbps<=0 & latency<=0) = no-op.
+    @Volatile private var throttleEnabled = false
+    @Volatile private var throttleLatencyMs = 0L
+    @Volatile private var throttleKbps = 0L
+    private const val THROTTLE_PREFS_KEY = "throttle_config"
 
     // ── SSE response hold ("截流" plugin) ──
     // Hold a configured-host text/event-stream response: forward the head, run a
@@ -203,6 +226,9 @@ object ProxyProbe {
     fun setInterceptRules(data: JSONObject) {
         reqInterceptAll = data.optBoolean("reqAll", false)
         respInterceptAll = data.optBoolean("respAll", false)
+        interceptTelemetry = data.optBoolean("interceptTelemetry", false)
+        interceptNoise = data.optBoolean("interceptNoise", false)
+        interceptCookie = data.optBoolean("interceptCookie", false)
         val rulesJson = data.optJSONArray("rules")
         interceptRulesList = parseInterceptRules(rulesJson)
         saveInterceptConfig(reqInterceptAll, respInterceptAll, rulesJson)
@@ -232,6 +258,9 @@ object ProxyProbe {
         val ctx = appContext ?: return
         try {
             val obj = JSONObject().put("reqAll", reqAll).put("respAll", respAll)
+                .put("interceptTelemetry", interceptTelemetry)
+                .put("interceptNoise", interceptNoise)
+                .put("interceptCookie", interceptCookie)
                 .put("rules", rulesJson ?: org.json.JSONArray())
             ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .edit().putString(INTERCEPT_PREFS_KEY, obj.toString()).apply()
@@ -247,6 +276,9 @@ object ProxyProbe {
             val obj = JSONObject(s)
             reqInterceptAll = obj.optBoolean("reqAll", false)
             respInterceptAll = obj.optBoolean("respAll", false)
+            interceptTelemetry = obj.optBoolean("interceptTelemetry", false)
+            interceptNoise = obj.optBoolean("interceptNoise", false)
+            interceptCookie = obj.optBoolean("interceptCookie", false)
             interceptRulesList = parseInterceptRules(obj.optJSONArray("rules"))
         } catch (_: Throwable) {}
     }
@@ -254,6 +286,158 @@ object ProxyProbe {
     private fun ruleMatches(r: InterceptRule, host: String, path: String, method: String, hasBody: Boolean): Boolean =
         r.host.equals(host, ignoreCase = true) && r.path == path &&
             r.method.equals(method, ignoreCase = true) && r.hasBody == hasBody
+
+    /** Panel → native: install mock rules (URL-keyword → synthesized response). */
+    @Synchronized
+    fun setMockRules(data: JSONObject) {
+        mockRulesList = parseMockRules(data.optJSONArray("rules"))
+        saveMockConfig(data.optJSONArray("rules"))
+    }
+
+    private fun parseMockRules(arr: org.json.JSONArray?): List<MockRule> {
+        val list = ArrayList<MockRule>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val pattern = o.optString("pattern", "")
+                if (pattern.isEmpty()) continue
+                val headers = LinkedHashMap<String, String>()
+                val h = o.optJSONObject("headers")
+                if (h != null) {
+                    val keys = h.keys()
+                    while (keys.hasNext()) { val k = keys.next(); headers[k] = h.optString(k, "") }
+                }
+                list.add(MockRule(pattern, o.optInt("status", 200), headers, o.optString("body", "")))
+            }
+        }
+        return list
+    }
+
+    private fun saveMockConfig(arr: org.json.JSONArray?) {
+        val ctx = appContext ?: return
+        try {
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(MOCK_PREFS_KEY, (arr ?: org.json.JSONArray()).toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    @Synchronized
+    private fun loadMockConfig() {
+        val ctx = appContext ?: return
+        try {
+            val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .getString(MOCK_PREFS_KEY, null) ?: return
+            mockRulesList = parseMockRules(org.json.JSONArray(s))
+        } catch (_: Throwable) {}
+    }
+
+    // First mock rule whose pattern is a substring of the full URL (case-insensitive).
+    private fun matchMock(host: String, target: String): MockRule? {
+        if (mockRulesList.isEmpty()) return null
+        val url = "https://$host$target".lowercase()
+        return mockRulesList.firstOrNull { url.contains(it.pattern.lowercase()) }
+    }
+
+    private fun reasonPhrase(status: Int): String = when (status) {
+        200 -> "OK"; 201 -> "Created"; 204 -> "No Content"; 301 -> "Moved Permanently"
+        302 -> "Found"; 304 -> "Not Modified"; 400 -> "Bad Request"; 401 -> "Unauthorized"
+        403 -> "Forbidden"; 404 -> "Not Found"; 500 -> "Internal Server Error"
+        502 -> "Bad Gateway"; 503 -> "Service Unavailable"; else -> "OK"
+    }
+
+    // Build a full synthetic HTTP/1.1 response (head + body) for a mock rule. The body
+    // is sent as identity with a correct Content-Length; Connection: close so the
+    // browser doesn't expect more on this (about-to-be-closed) tunnel.
+    private fun buildMockResponse(rule: MockRule): ByteArray {
+        val bodyBytes = rule.body.toByteArray(Charsets.UTF_8)
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 ").append(rule.status).append(' ').append(reasonPhrase(rule.status)).append("\r\n")
+        var hasCT = false
+        for ((k, v) in rule.headers) {
+            if (k.equals("content-length", ignoreCase = true) || k.equals("connection", ignoreCase = true) ||
+                k.equals("transfer-encoding", ignoreCase = true) || k.equals("content-encoding", ignoreCase = true)) continue
+            if (k.equals("content-type", ignoreCase = true)) hasCT = true
+            sb.append(k).append(": ").append(v).append("\r\n")
+        }
+        if (!hasCT) sb.append("Content-Type: application/json; charset=utf-8\r\n")
+        sb.append("Content-Length: ").append(bodyBytes.size).append("\r\n")
+        sb.append("Connection: close\r\n\r\n")
+        return sb.toString().toByteArray(Charsets.ISO_8859_1) + bodyBytes
+    }
+
+    /** Panel → native: install weak-network throttle (download latency + bandwidth). */
+    @Synchronized
+    fun setThrottle(data: JSONObject) {
+        applyThrottleConfig(data)
+        saveThrottleConfig(data)
+    }
+
+    private fun applyThrottleConfig(data: JSONObject) {
+        throttleLatencyMs = maxOf(0L, data.optLong("latencyMs", 0L))
+        throttleKbps = maxOf(0L, data.optLong("kbps", 0L))
+        throttleEnabled = data.optBoolean("enabled", false) && (throttleLatencyMs > 0 || throttleKbps > 0)
+    }
+
+    private fun saveThrottleConfig(data: JSONObject) {
+        val ctx = appContext ?: return
+        try {
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(THROTTLE_PREFS_KEY, data.toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    @Synchronized
+    private fun loadThrottleConfig() {
+        val ctx = appContext ?: return
+        try {
+            val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .getString(THROTTLE_PREFS_KEY, null) ?: return
+            applyThrottleConfig(JSONObject(s))
+        } catch (_: Throwable) {}
+    }
+
+    // Apply the once-per-response latency (download direction). Cheap no-op when off.
+    private fun throttleLatency() {
+        if (throttleEnabled && throttleLatencyMs > 0) {
+            try { Thread.sleep(throttleLatencyMs) } catch (_: InterruptedException) {}
+        }
+    }
+
+    // Wrap the client output stream so the response body is paced to throttleKbps.
+    // Always wraps (the stream reads the volatile fields live and is a pass-through
+    // when throttle is off / kbps<=0), so runtime changes take effect on new writes.
+    private fun throttleWrap(out: OutputStream): OutputStream = ThrottledOutputStream(out)
+
+    // Write-through bandwidth limiter: forwards bytes immediately in small slices and
+    // sleeps between slices so throughput stays under throttleKbps. NEVER buffers the
+    // whole body (坑#4): streaming/SSE still flows, just paced. Pass-through when off.
+    private class ThrottledOutputStream(private val out: OutputStream) : OutputStream() {
+        private var windowStartNs = System.nanoTime()
+        private var windowBytes = 0L
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            val bps = if (throttleEnabled) throttleKbps * 1024L else 0L
+            if (bps <= 0L) { out.write(b, off, len); return }
+            var p = off
+            var remaining = len
+            val slice = 8 * 1024
+            while (remaining > 0) {
+                val n = minOf(slice, remaining)
+                out.write(b, p, n)
+                out.flush()
+                p += n; remaining -= n; windowBytes += n
+                val elapsedNs = System.nanoTime() - windowStartNs
+                val expectedNs = (windowBytes.toDouble() / bps * 1_000_000_000.0).toLong()
+                val sleepNs = expectedNs - elapsedNs
+                if (sleepNs > 0) {
+                    try { Thread.sleep(sleepNs / 1_000_000L, (sleepNs % 1_000_000L).toInt()) } catch (_: InterruptedException) {}
+                }
+                if (elapsedNs > 1_000_000_000L) { windowStartNs = System.nanoTime(); windowBytes = 0L }
+            }
+        }
+        override fun flush() = out.flush()
+        override fun close() = out.close()
+    }
 
     /** Panel → native: arm/disarm the SSE hold and set the host allow-list + heartbeat. */
     @Synchronized
@@ -314,10 +498,16 @@ object ProxyProbe {
     }
 
     // True for low-value telemetry/noise/cookie traffic that "intercept all" lets pass.
+    // A class whose per-class intercept toggle is ON is no longer treated as low-value
+    // (so it gets paused like everything else). Default (all toggles off) = the old
+    // behavior: telemetry/noise/cookie all pass.
     private fun isLowValueUrl(host: String, target: String, method: String, reqBodyLen: Long): Boolean {
         if (!lowValueGuard(method, reqBodyLen)) return false
         val url = "https://$host$target".lowercase()
-        return telemetryRe.containsMatchIn(url) || noiseRe.containsMatchIn(url) || cookieRe.containsMatchIn(url)
+        if (!interceptTelemetry && telemetryRe.containsMatchIn(url)) return true
+        if (!interceptNoise && noiseRe.containsMatchIn(url)) return true
+        if (!interceptCookie && cookieRe.containsMatchIn(url)) return true
+        return false
     }
 
     // Request paused iff: explicit pass rule → never; explicit intercept rule → always;
@@ -817,6 +1007,8 @@ object ProxyProbe {
         loadReplaceConfig()
         loadInterceptConfig()
         loadSseHoldConfig()
+        loadMockConfig()
+        loadThrottleConfig()
     }
 
     private fun toast(msg: String) {
@@ -970,7 +1162,8 @@ object ProxyProbe {
         }
         try {
             val cIn = tlsClient.inputStream
-            val cOut = tlsClient.outputStream
+            // Wrap the download stream for 弱网 throttle (live no-op when off, never buffers).
+            val cOut = throttleWrap(tlsClient.outputStream)
             val uIn = upstream.inputStream
             val uOut = upstream.outputStream
             // HTTP/1.1 keep-alive returns responses in request order, so we correlate
@@ -1088,6 +1281,22 @@ object ProxyProbe {
                 val bodyPresent = cl != null && cl > 0
                 val target = reqHead.substringBefore("\r\n").split(" ").getOrElse(1) { "/" }
                 val pathOnly = target.substringBefore('?').substringBefore('#')
+                // Mock (Map Local) takes precedence: a matched bounded request is answered
+                // locally with a synthetic response — upstream is never contacted. Drain the
+                // (bounded) request body so the TLS stream is consumed, emit the flowReq for
+                // panel visibility, write the synthetic response, then close (return).
+                val mockRule = if (bounded) matchMock(host, target) else null
+                if (mockRule != null) {
+                    if (cl != null && cl > 0) readExact(cIn, cl.toInt())
+                    emitFlowReq(flowId, host, reqHead)
+                    try {
+                        synchronized(clientSock) {
+                            clientSock.outputStream.write(buildMockResponse(mockRule))
+                            clientSock.outputStream.flush()
+                        }
+                    } catch (_: Throwable) {}
+                    return
+                }
                 val doIntercept = bounded && shouldInterceptReq(host, target, pathOnly, method, bodyPresent, cl ?: 0L)
                 if (doIntercept) {
                     // Buffer the bounded body (a complete known-size upload — safe to read
@@ -1237,6 +1446,8 @@ object ProxyProbe {
                     cOut.write(respHead.toByteArray(Charsets.ISO_8859_1)); cOut.flush()
                     continue
                 }
+                // 弱网: delay each final response head by the configured latency (no-op when off).
+                throttleLatency()
                 val info = flowQueue.poll()
                 val flowId = info?.flowId ?: flowSeq.incrementAndGet().toString()
                 val method = info?.method ?: "GET"

@@ -156,6 +156,14 @@ object DevToolsHelper {
                     ProxyProbe.setSseHoldConfig(data)
                     return
                 }
+                if (action == "setMockRules") {
+                    ProxyProbe.setMockRules(data)
+                    return
+                }
+                if (action == "setThrottle") {
+                    ProxyProbe.setThrottle(data)
+                    return
+                }
                 if (action.isNotEmpty()) {
                     handlePanelAction(action, engineSession)
                     return

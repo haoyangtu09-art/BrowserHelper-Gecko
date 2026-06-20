@@ -48,9 +48,11 @@ function openInterceptConfigModal() {
   openModal('拦截配置',
     row('拦截发出去的请求', netScopeReq, 'req') +
     row('拦截服务器响应', netScopeResp, 'resp') +
-    row('拦截噪音包（心跳/遥测等）', netScopeNoise, 'noise') +
+    row('拦截遥测包（collect/analytics/beacon 等）', netScopeTelemetry, 'telemetry') +
+    row('拦截噪音包（心跳/ping/长连接等）', netScopeNoise, 'noise') +
+    row('拦截cookie包（cookie-sync/gen_204 等）', netScopeCookie, 'cookie') +
     row('过滤遥测ACK（204/空体等压制响应）', netScopeFilterSuppressResp, 'suppress') +
-    '<div style="color:#888;font-size:11px;margin-top:6px;">' + escHtml(hint) + '默认过滤心跳/遥测等噪音包，勾选"拦截噪音包"可一并拦截。命中后在面板里手动放行。</div>',
+    '<div style="color:#888;font-size:11px;margin-top:6px;">' + escHtml(hint) + '遥测/噪音/cookie 三类低价值包默认放行；分别勾选可一并拦截。命中后在面板里手动放行。</div>',
     function () { closeModal(); }
   );
   setTimeout(function () {
@@ -62,8 +64,12 @@ function openInterceptConfigModal() {
           netScopeReq = !netScopeReq;
         } else if (act === 'resp') {
           netScopeResp = !netScopeResp;
+        } else if (act === 'telemetry') {
+          netScopeTelemetry = !netScopeTelemetry;
         } else if (act === 'noise') {
           netScopeNoise = !netScopeNoise;
+        } else if (act === 'cookie') {
+          netScopeCookie = !netScopeCookie;
         } else if (act === 'suppress') {
           netScopeFilterSuppressResp = !netScopeFilterSuppressResp;
           syncFilterSuppressResp();
@@ -84,14 +90,11 @@ function openInterceptConfigModal() {
   }, 50);
 }
 
+// Mock 现由原生代理执行（命中即合成响应，不连上游）。页面内拦截器已删除，故不再写
+// page-world 全局，改为下发原生 + 持久化到 storage.local。
 function injectMockRules() {
-  var rulesJson = JSON.stringify(netMockRules);
-  // isolated 模式（强 CSP）：runInPage 的 blob <script> 可能被 CSP 拦截，
-  // 直接通过 wrappedJSObject + cloneInto 写到 page world，确保拦截器能读到。
-  if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
-    try { window.wrappedJSObject.__bhMockRules = cloneInto(netMockRules, window); return; } catch (e) {}
-  }
-  runInPage('(function(){window.__bhMockRules=' + rulesJson + ';})();');
+  pushMockRulesToNative();
+  saveNetConfig();
 }
 
 function injectBreakpoints() {
@@ -171,6 +174,7 @@ var THROTTLE_PRESETS = [
   { label: '自定义…', latencyMs: -1, kbps: -1 },
 ];
 
+// 弱网现由原生代理在响应方向限速（latency + kbps），不再写 page-world 全局。
 function applyThrottle(cfg) {
   if (cfg.latencyMs > 0 || cfg.kbps > 0) {
     netThrottle._last = { latencyMs: cfg.latencyMs, kbps: cfg.kbps };
@@ -178,13 +182,8 @@ function applyThrottle(cfg) {
   netThrottle.latencyMs = cfg.latencyMs;
   netThrottle.kbps = cfg.kbps;
   netThrottle.enabled = cfg.latencyMs > 0 || cfg.kbps > 0;
-  // isolated 模式直写 page world，避免 blob <script> 被强 CSP 拦截
-  if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined' && typeof cloneInto !== 'undefined') {
-    try { window.wrappedJSObject.__bhThrottle = cloneInto(netThrottle, window); }
-    catch (e) { runInPage('(function(){window.__bhThrottle=' + JSON.stringify(netThrottle) + ';})();'); }
-  } else {
-    runInPage('(function(){window.__bhThrottle=' + JSON.stringify(netThrottle) + ';})();');
-  }
+  pushThrottleToNative();
+  saveNetConfig();
   updateThrottleBtn();
 }
 

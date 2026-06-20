@@ -68,7 +68,46 @@ function pushInterceptRulesToNative() {
       action: 'setInterceptRules',
       reqAll: master && scopeReq,
       respAll: master && scopeResp,
+      // 三类低价值包的「一并拦截」开关；仅在主开关开启时生效。
+      interceptTelemetry: master && (typeof netScopeTelemetry !== 'undefined') && !!netScopeTelemetry,
+      interceptNoise: master && (typeof netScopeNoise !== 'undefined') && !!netScopeNoise,
+      interceptCookie: master && (typeof netScopeCookie !== 'undefined') && !!netScopeCookie,
       rules: rules,
+    });
+  } catch (e) {}
+}
+
+// 面板 → 原生：下发 Mock（Map Local）规则。命中 URL 关键词的请求由原生直接合成响应。
+function pushMockRulesToNative() {
+  try {
+    if (!port) return;
+    if (typeof netMockRulesLoaded !== 'undefined' && !netMockRulesLoaded) return;
+    var rules = (typeof netMockRules !== 'undefined' && Array.isArray(netMockRules))
+      ? netMockRules
+          .filter(function (r) { return r && r.pattern; })
+          .map(function (r) {
+            return {
+              pattern: String(r.pattern),
+              status: parseInt(r.status, 10) || 200,
+              headers: (r.headers && typeof r.headers === 'object') ? r.headers : {},
+              body: String(r.body == null ? '' : r.body),
+            };
+          })
+      : [];
+    port.postMessage({ action: 'setMockRules', rules: rules });
+  } catch (e) {}
+}
+
+// 面板 → 原生：下发弱网（throttle）配置。原生在响应方向按 latencyMs/kbps 限速转发。
+function pushThrottleToNative() {
+  try {
+    if (!port) return;
+    var t = (typeof netThrottle !== 'undefined' && netThrottle) ? netThrottle : null;
+    port.postMessage({
+      action: 'setThrottle',
+      enabled: !!(t && t.enabled),
+      latencyMs: t ? (parseInt(t.latencyMs, 10) || 0) : 0,
+      kbps: t ? (parseInt(t.kbps, 10) || 0) : 0,
     });
   } catch (e) {}
 }

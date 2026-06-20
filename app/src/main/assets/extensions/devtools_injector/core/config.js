@@ -5,6 +5,7 @@ var netEnabled = true;
 var netPanelVisible = false;
 var netBreakpoints = []; // [{pattern, id}]
 var netMockRules = [];   // [{pattern, status, headers, body}]
+var netMockRulesLoaded = false; // storage.local 加载完才向原生下发，避免空集合覆盖持久化
 var netThrottle = { enabled: false, latencyMs: 0, kbps: 0 };
 var netPendingBreaks = {}; // reqId -> {resolve, reject, req}
 
@@ -18,7 +19,9 @@ function saveNetConfig() {
       interceptMaster: netInterceptMaster,
       scopeReq: netScopeReq,
       scopeResp: netScopeResp,
+      scopeTelemetry: netScopeTelemetry,
       scopeNoise: netScopeNoise,
+      scopeCookie: netScopeCookie,
       replaceScope: netReplaceScope,
       filterSuppressResp: netScopeFilterSuppressResp,
       hideTelemetry: netHideTelemetry,
@@ -27,6 +30,8 @@ function saveNetConfig() {
       payloadOnly: netPayloadOnly,
       thisSiteOnly: netThisSiteOnly,
       replaceEnabled: netReplaceEnabled,
+      mockRules: netMockRules,
+      throttle: netThrottle,
     }}).catch(function () {});
   } catch (e) {}
   // 同步写入 sessionStorage 快照，供导航后 document_start 阶段即时恢复（不等 storage.local 异步）
@@ -53,14 +58,27 @@ function loadNetConfig(cb) {
           netInterceptMaster = !!cfg.interceptMaster;
           netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
           netScopeResp = !!cfg.scopeResp;
-          netScopeNoise = !!cfg.scopeNoise;
+          // 迁移：旧 scopeNoise（心跳/遥测合一）→ 遥测+噪音两个新开关。cookie 为新增，默认关。
+          if ('scopeTelemetry' in cfg || 'scopeCookie' in cfg) {
+            netScopeTelemetry = !!cfg.scopeTelemetry;
+            netScopeNoise = !!cfg.scopeNoise;
+            netScopeCookie = !!cfg.scopeCookie;
+          } else {
+            netScopeTelemetry = !!cfg.scopeNoise;
+            netScopeNoise = !!cfg.scopeNoise;
+            netScopeCookie = false;
+          }
         } else {
           // 兼容旧配置：旧版无主开关，req/resp 各自即开即拦
           netInterceptMaster = !!cfg.globalIntercept || !!cfg.globalRespIntercept;
           netScopeReq = !!cfg.globalIntercept;
           netScopeResp = !!cfg.globalRespIntercept;
+          netScopeTelemetry = !!cfg.globalInterceptNoise;
           netScopeNoise = !!cfg.globalInterceptNoise;
+          netScopeCookie = false;
         }
+        if (Array.isArray(cfg.mockRules)) netMockRules = cfg.mockRules;
+        if (cfg.throttle && typeof cfg.throttle === 'object') netThrottle = cfg.throttle;
         recomputeIntercept();
         if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
         else netReplaceScope = 'both';
@@ -78,6 +96,10 @@ function loadNetConfig(cb) {
         netThisSiteOnly = !!cfg.thisSiteOnly;
         netReplaceEnabled = !!cfg.replaceEnabled;
       }
+      // 配置加载完，向原生下发 Mock / 弱网（即便无 cfg 也标记已加载，允许后续编辑下发）。
+      netMockRulesLoaded = true;
+      if (typeof pushMockRulesToNative === 'function') pushMockRulesToNative();
+      if (typeof pushThrottleToNative === 'function') pushThrottleToNative();
       if (cb) cb();
     }).catch(function () { if (cb) cb(); });
   } catch (e) { if (cb) cb(); }
