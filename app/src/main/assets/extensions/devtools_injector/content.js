@@ -50,69 +50,43 @@ if (wasActive()) {
   });
 
   // ─ 阶段 3：刷新后重建 Eruda UI。
-  //   根因(真机逐一证伪):密度(displayDensityOverride)无罪——不开 Eruda 只刷新不放大；
-  //   时序无罪——等多久(1s/数秒)注入仍放大、且不自恢复；shadowDOM 无罪。真凶是 Eruda 的
-  //   DOM 注入本身:在「页面刚 reload、尚未稳定交互」时,注入触发 GeckoView 的 meta-viewport
-  //   自动重适配(re-fit) → resolution 跳到约 1/0.85 → 整页放大 + 触摸坐标锁错。手动开
-  //   Eruda(页面已静置)不触发 re-fit,故无此问题。
-  //   修法:不再纠结注入时机(治不了),而是在注入后强制重写一次 <meta name="viewport"> 逼
-  //   GeckoView 把 resolution 重算回 initial-scale,直接撤销这次 re-fit 放大。
+  //   根因(真机逐一证伪 + 历史分析 c8e0d19e):放大/错位纯发生在 GeckoView 原生 APZ 合成器层
+  //   ——reload 后页面尚未被用户交互时,自动注入 Eruda 那块占大半屏的 fixed shadow host
+  //   触发 APZ 分辨率重算,合成器缩放跳变(放大一圈) + 触摸坐标整体锁错(按钮挤一块 / 控制台
+  //   点不开 / 缩放失效)。该跳变 DOM 完全测不到(dpr / visualViewport.scale 均不变),所以
+  //   viewport meta 重写、改注入时机、滚动都修不了(已分别真机证伪);密度 override 亦无罪
+  //   (自然密度下照样跳)。
+  //   关键观察:手动开 Eruda 从不触发——因为那时页面已 load 完且用户刚触屏,APZ 已被用户交互
+  //   "激活"到稳定分辨率。修法:刷新后不再无条件自动注入,而是等用户对页面的第一次真实交互
+  //   (touchstart / pointerdown / wheel / scroll / keydown)之后再 toggle(),复刻"手动开"
+  //   的前置条件(页面静置 + 用户已触屏),从根上避开 APZ 重算跳变。
   function restoreUiSoon() {
     var ran = false;
-
-    // 重写 viewport meta 逼 GeckoView 重算 resolution=1.0，撤销注入触发的 re-fit 放大。
-    // 内容必须发生变化才会触发重算：先 pin 到 initial-scale=1，两帧后恢复页面原始 viewport。
-    function resetViewportZoom() {
-      try {
-        var m = document.querySelector('meta[name="viewport"]');
-        if (m) {
-          var orig = m.getAttribute('content') || '';
-          m.setAttribute('content', 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0');
-          requestAnimationFrame(function () {
-            requestAnimationFrame(function () {
-              m.setAttribute('content', orig || 'width=device-width,initial-scale=1');
-            });
-          });
-        } else {
-          // 页面无 viewport meta：临时插一个标准的逼 GeckoView 重算，随后移除。
-          var tmp = document.createElement('meta');
-          tmp.setAttribute('name', 'viewport');
-          tmp.setAttribute('content', 'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0');
-          (document.head || document.documentElement).appendChild(tmp);
-          requestAnimationFrame(function () {
-            requestAnimationFrame(function () { if (tmp.parentNode) tmp.parentNode.removeChild(tmp); });
-          });
-        }
-      } catch (e) {}
-    }
 
     function run() {
       if (ran) return;
       ran = true;
       if (erudaActive) return;
       toggle();
-      // 等 Eruda 真正注入(erudaActive 置位)后再重置 viewport，撤销 re-fit 放大。
-      // toggle 是异步(loadPageEruda→initPageEruda)，故轮询 erudaActive；置位后留缓冲
-      // 等 shadow 内容绘制完(re-fit 此时才发生)再重置，并补打一次兜底。
-      var tries = 0;
-      (function afterInject() {
-        if (erudaActive || tries++ > 60) {
-          setTimeout(resetViewportZoom, 120);
-          setTimeout(resetViewportZoom, 700);
-          return;
-        }
-        setTimeout(afterInject, 50);
-      })();
+    }
+
+    // 绑定一次性「首次用户交互」监听:任一手势触发即解绑全部并注入。
+    function armGesture() {
+      var evts = ['touchstart', 'pointerdown', 'wheel', 'scroll', 'keydown'];
+      function onGesture() {
+        evts.forEach(function (t) { window.removeEventListener(t, onGesture, true); });
+        // 等这一拍交互引发的 APZ 调整落定后再注入,避免与手势自身的滚动/缩放抢算。
+        requestAnimationFrame(function () { requestAnimationFrame(run); });
+      }
+      evts.forEach(function (t) {
+        window.addEventListener(t, onGesture, { capture: true, passive: true });
+      });
     }
 
     if (document.readyState === 'complete') {
-      requestAnimationFrame(function () { requestAnimationFrame(run); });
+      armGesture();
     } else {
-      window.addEventListener('load', function () {
-        requestAnimationFrame(function () { requestAnimationFrame(run); });
-      }, { once: true });
-      // 兜底：万一 load 永不触发(极端卡死)，超时后仍恢复。
-      setTimeout(run, 20000);
+      window.addEventListener('load', armGesture, { once: true });
     }
   }
 }
