@@ -34,9 +34,10 @@ if (wasActive()) {
     releaseAllPendingIso();
     // 兼容性 no-op（页面世界拦截器已删除，无可还原的 wrapper）。
     disableInterceptor();
-    // 刷新后恢复 Eruda UI。真机新观察：手动注入也会瞬时放大，但原生菜单/GeckoView 路径
-    // 会在半秒内把 viewport 拉回；自动恢复只走 JS toggle，缺少这次原生 viewport commit。
-    // core/utils.js 在 Eruda 注入成功后会向原生发送 viewportNudge，补上自动路径的回拉。
+    // 刷新后恢复 Eruda UI。真机新观察：手动注入也会瞬时放大，但不到半秒会被拉回；
+    // 自动恢复直接在 content script 里 toggle() 则不会拉回。差异不是 Eruda 参数，而是
+    // 手动路径先经过 native sendContentMessage("toggle")。这里让自动恢复也走同一条
+    // native -> content round-trip，避免绕过 GeckoView 原生调度/viewport 收敛点。
     restoreUiSoon();
   });
 
@@ -48,7 +49,17 @@ if (wasActive()) {
       if (ran) return;
       ran = true;
       if (erudaActive) return;
-      toggle();
+      var tries = 0;
+      (function askNative() {
+        if (erudaActive) return;
+        if (requestRestoreToggleViaNative()) return;
+        if (tries++ < 50) {
+          setTimeout(askNative, 100);
+          return;
+        }
+        // 极端情况下 native port 一直不可用，保留旧路径兜底，避免完全无法恢复。
+        toggle();
+      })();
     }
 
     if (document.readyState === 'complete') {

@@ -21,16 +21,13 @@ function postProxyCmd(action) {
   } catch (e) {}
 }
 
-function postViewportNudge() {
+function requestRestoreToggleViaNative() {
   try {
-    if (port) port.postMessage({ action: 'viewportNudge' });
+    if (!port) return false;
+    port.postMessage({ action: 'restoreToggle' });
+    return true;
   } catch (e) {}
-}
-
-function nudgeViewportAfterErudaInit() {
-  postViewportNudge();
-  setTimeout(postViewportNudge, 120);
-  setTimeout(postViewportNudge, 450);
+  return false;
 }
 
 // 面板 → 原生：下发字符替换规则。原生代理在请求方向按规则改写后再转发。
@@ -513,7 +510,6 @@ function toggle() {
         }
         erudaActive = true;
         saveActiveState();
-        nudgeViewportAfterErudaInit();
         postStatus('ok(isolated,blob-blocked:' + err + ')');
         setTimeout(installI18n, 500);
       });
@@ -524,7 +520,6 @@ function toggle() {
       if (!pageErr) {
         erudaActive = true;
         saveActiveState();
-        nudgeViewportAfterErudaInit();
         postStatus('ok(page)');
         setTimeout(installI18n, 500);
         return;
@@ -536,7 +531,6 @@ function toggle() {
         }
         erudaActive = true;
         saveActiveState();
-        nudgeViewportAfterErudaInit();
         postStatus('ok(isolated,page-err:' + pageErr + ')');
         setTimeout(installI18n, 500);
       });

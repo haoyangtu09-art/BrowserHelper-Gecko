@@ -200,7 +200,7 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
   > `window.innerWidth` / `documentElement.clientWidth`,**从没量过**。且捏合分辨率改变**不会**让点击
   > 命中错位,而本 bug 有「触摸坐标整体错位」——这是**布局视口重适配**的特征,不是捏合 APZ。故新假设:
   > 这是 **MVM/APZ 在 Eruda fixed/shadow host 注入后被扰动**导致的原生 viewport 状态跳变。
-  > 旧的 `BHZOOM` 几何日志和 JS reflow/meta 收敛已经真机失败；当前转向“补原生 viewport commit”。
+  > 旧的 `BHZOOM` 几何日志、JS reflow/meta 收敛、注入后原生 viewport nudge 均已真机失败。
 - **最新真机反馈（2026-06-20）**：手动开 Eruda **也会瞬时放大**，但不到半秒会被原生侧拉回；
   刷新后自动恢复会放大但**不会拉回**。所以差异不在“Eruda 是否触发放大”，而在手动路径后面多了一次
   原生 UI/GeckoView viewport commit（菜单关闭、focus/layout/dynamic-toolbar 更新等）。
@@ -221,15 +221,13 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
    提前 `loadPageEruda`（fetch+求值 bundle+注入 @font-face）后，**手动开 Eruda 不再放大**；但**刷新恢复
    仍放大**。即：早期求值只解释了「手动开就放大」那一半，刷新放大是另一条线，至今未解。
 
-### 当前代码状态（自动恢复后补原生 viewport nudge，待真机验证）
+### 当前代码状态（自动恢复改走 native → content toggle round-trip，待真机验证）
 - `core/utils.js`：两处 `eruda.init` 均 `useShadowDom:true` + `autoScale:false` + `eruda.scale(1)`。
-  Eruda 注入成功、`erudaActive` 置位后，发送三次 native message：`viewportNudge`（立即 / 120ms / 450ms）。
-- `DevToolsHelper.kt`：新增 `viewportNudge` native message，转发到当前浏览器 fragment 注册的 callback。
-- `BaseBrowserFragment.kt`：注册 `DevToolsHelper.setViewportNudge(::nudgeEngineViewport)`；nudge 做一次极小的
-  `engineView.setDynamicToolbarMaxHeight(1) → postOnAnimation → 0`，并配合 `requestFocus/requestLayout/invalidate`。
-  目的不是改变 UI，而是触发 GeckoView 原生 viewport commit，复刻手动菜单路径里那次“拉回”。
-- `content.js` 阶段 3 `restoreUiSoon`：恢复 load 后自动 `toggle()`，不再带 `BHZOOM` 诊断日志，也不再做
-  viewport meta/reflow 修补。
+- `content.js` 阶段 3 `restoreUiSoon`：不再直接 `toggle()`；改为 `requestRestoreToggleViaNative()`。
+  如果 native port 暂不可用，最多重试 5s；极端情况下才回退旧的直接 `toggle()`。
+- `DevToolsHelper.kt`：新增 `restoreToggle` native message，收到后调用同一个 `sendToggle(engineSession)`，
+  也就是复用手动菜单路径的 `native -> content action:"toggle"` 调度。
+- `BaseBrowserFragment.kt`：已撤掉失败的 `viewportNudge` / `setDynamicToolbarMaxHeight(1)->0` 实验。
 - `EngineProvider.kt:53`：`displayDensityOverride(deviceDensity*0.85f)` 保留。
 - **另一未跑的决定性实验**:页面**还在加载时**点工具栏 toggle(`DevToolsHelper.kt:107` port 未连→reload→
   `pendingToggle`),让「手动」路径也经历一次 reload。若**这样也放大**→触发点是 **reload 本身**而非
@@ -259,13 +257,14 @@ Eruda v3.4.3 的 `init()` 默认 `autoScale=true`；移动端会读取 `<meta na
 
 真机判定：
 - `autoScale:false` 单独已真机失败：刷新自动恢复仍放大。
-- 但它是低风险防御，继续保留；当前真正待验的是 **自动路径补原生 viewport nudge**。
+- `viewportNudge` 单独已真机失败：刷新自动恢复仍放大且不回拉。
+- 当前真正待验的是 **自动恢复也走 native -> content toggle round-trip**。若这次能回拉，根因就是
+  直接 JS toggle 绕过了手动路径里的 GeckoView 原生消息调度/viewport 收敛点。
 
 ### 给新对话的研判提示
 - 别再赌「时机/viewport/滚动/密度」——这四条都已真机证伪。
-- 核心矛盾点值得深挖：**为什么「手动开」永不触发，而「刷新自动恢复」必触发**，但「等首次用户交互后再注入」
-  却仍触发？这说明差异不在「用户是否已交互」，而可能在**页面 reload 的生命周期阶段本身**（首屏 APZ 解析窗口）
-  或 **restore 路径（phase 1/2）与纯手动 toggle 的某个未对齐副作用**。
+- 核心矛盾点已更新：**手动开也会瞬时触发放大，但能马上回拉；自动恢复不会回拉**。优先对齐手动路径
+  的 native/content 调度，再考虑 iframe 隔离或只恢复小按钮。
 - 验证任何新猜想前，先想清楚「它能否解释 DOM 测不到的原生 APZ 跳变」，否则大概率又是一次无效构建。
 
 ## 持久化
