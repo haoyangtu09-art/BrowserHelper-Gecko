@@ -50,18 +50,31 @@ if (wasActive()) {
     });
   });
 
-  // ─ 阶段 3：不要等 load；load 可能正被拦截请求阻塞。DOMContentLoaded 后尽快初始化 UI。
+  // ─ 阶段 3：刷新后重建 Eruda UI 的时机。
+  //   必须等页面 load 完、视口/缩放(GeckoView APZ)稳定后再 init Eruda，否则在加载途中
+  //   注入 Eruda 的大块 fixed-定位 shadow host 会与 GeckoView 的视口计算抢跑，导致页面
+  //   视觉缩放一圈、触摸坐标整体错位(点 Eruda 悬浮窗/页面输入框都点不中)。首次手动开
+  //   Eruda 没有这个问题，正是因为那时页面已 load 完、视口已稳定——这里对齐同样的条件。
+  //   兜底：万一 load 长时间不触发(被流式请求拖住)，超时后仍恢复，避免永远不恢复。
   function restoreUiSoon() {
+    var ran = false;
     function run() {
+      if (ran) return;
+      ran = true;
       if (erudaActive) return;
       toggle();
     }
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () {
-        setTimeout(run, 50);
-      }, { once: true });
+    // load 完成后再等两帧 + 小延时，确保视觉视口已落定再注入。
+    function afterStable() {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { setTimeout(run, 50); });
+      });
+    }
+    if (document.readyState === 'complete') {
+      afterStable();
     } else {
-      setTimeout(run, 50);
+      window.addEventListener('load', afterStable, { once: true });
+      setTimeout(run, 4000); // 兜底：load 被阻塞时也恢复
     }
   }
 }
