@@ -139,13 +139,6 @@ function proxyOnMsg(msg) {
         respBody: msg.respBody == null ? '' : msg.respBody,
       }, '*');
     } catch (e) {}
-  } else if (msg.type === 'sseHold') {
-    // 「截流」插件：原生已 hold 住这条 SSE 响应（心跳维持页面存活），把整条去分块的
-    // 流式原文交给插件编辑，编辑完插件回 resolveSseHold 放行。插件未启用则无处理器，
-    // 但原生侧只有插件下发配置才会 hold，所以正常不会走到无处理器分支。
-    if (typeof bhHandleSseHold === 'function') {
-      try { bhHandleSseHold(msg.flowId, msg.body || ''); } catch (e) {}
-    }
   } else if (msg.type === 'flowRespBody') {
     // 响应体（在 flowResp 之后到），补给面板对应条目。
     var respRec = proxyFlowIdMap[msg.flowId];

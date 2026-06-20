@@ -120,7 +120,6 @@ object ProxyProbe {
     @Volatile private var sseHoldEnabled = false
     @Volatile private var sseHoldHosts: List<String> = emptyList()
     @Volatile private var sseHoldHeartbeat = ": ping\n\n"
-    private val pendingSseHolds = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
     private const val SSE_HOLD_PREFS_KEY = "sse_hold_config"
     private const val SSE_HOLD_CAP = 8 * 1024 * 1024 // de-chunked SSE buffer cap
     private const val SSE_HEARTBEAT_MS = 10000L // heartbeat interval while held
@@ -294,11 +293,6 @@ object ProxyProbe {
                 .getString(SSE_HOLD_PREFS_KEY, null) ?: return
             applySseHoldConfig(JSONObject(s))
         } catch (_: Throwable) {}
-    }
-
-    /** Panel → native: the user's decision for a held SSE flow (continue/edited body). */
-    fun resolveSseHold(flowId: String, decision: JSONObject) {
-        pendingSseHolds.remove(flowId)?.complete(decision)
     }
 
     private fun sseHoldActiveFor(host: String): Boolean {
@@ -652,20 +646,26 @@ object ProxyProbe {
     // already written verbatim by the caller). A daemon heartbeat thread writes SSE
     // comment chunks every SSE_HEARTBEAT_MS to keep the browser's transport alive while
     // we (1) de-chunk the whole upstream stream into a bounded buffer, (2) hand it to
-    // the panel, and (3) BLOCK with no hard timeout until the panel releases an edited
-    // body. The edited (or, on fail-open, original) body is replayed as one chunk +
-    // the 0-length terminator, completing the chunked stream the browser is reading.
-    // Returns true (caller continues the response loop).
+    // the panel via the EXISTING response-intercept queue/detail UI (放行/搜索/复制),
+    // and (3) BLOCK with no hard timeout until the panel releases an edited body. The
+    // edited (or, on fail-open, original) body is replayed as one chunk + the 0-length
+    // terminator, completing the chunked stream the browser is reading. Returns true
+    // (caller continues the response loop).
+    //
+    // Reuses pendingRespIntercepts + the "respIntercept" event + resolveRespIntercept so
+    // the SSE hold shows up in the same intercepted-response list/detail box as a normal
+    // response intercept — the only differences are the heartbeat keep-alive and the
+    // no-timeout wait (a quick bounded response uses awaitRespIntercept's 60s timeout).
     //
     // Fail-open guarantees (CLAUDE.md 坑#4): a heartbeat write failure means the browser
     // closed the stream → we stop and unblock the wait; the de-chunk read is bounded by
     // SSE_HOLD_CAP + the inherited 30s read timeout; if buffering fails we replay an
     // empty terminator so the socket is never left hanging.
-    private fun holdSseAndReplay(flowId: String, upstream: Socket, uIn: InputStream, cOut: OutputStream): Boolean {
-        val fut = CompletableFuture<JSONObject>()
-        pendingSseHolds[flowId] = fut
+    private fun holdSseAndReplay(flowId: String, upstream: Socket, uIn: InputStream, cOut: OutputStream, respHead: String): Boolean {
         val beating = java.util.concurrent.atomic.AtomicBoolean(true)
         val hbBytes = sseHoldHeartbeat.toByteArray(Charsets.UTF_8)
+        val fut = CompletableFuture<JSONObject>()
+        pendingRespIntercepts[flowId] = fut
         val hb = Thread {
             try {
                 while (beating.get()) {
@@ -681,7 +681,7 @@ object ProxyProbe {
                 // Browser closed the stream (write failed) or thread interrupted: stop
                 // beating and fail-open the wait so the response thread never hangs.
                 beating.set(false)
-                pendingSseHolds.remove(flowId)?.complete(JSONObject().put("decision", "failopen"))
+                pendingRespIntercepts.remove(flowId)?.complete(JSONObject().put("decision", "failopen"))
             }
         }
         hb.isDaemon = true
@@ -690,22 +690,32 @@ object ProxyProbe {
         // Buffer the full upstream SSE stream (de-chunked) under the read-timeout guard.
         val raw = readChunkedToBuffer(upstream, uIn, SSE_HOLD_CAP)
 
-        // Hand the captured stream to the panel for editing.
+        // Hand the captured stream to the panel via the existing respIntercept UI.
+        val status = respHead.substringBefore("\r\n").split(" ").getOrElse(1) { "" }.toIntOrNull() ?: 200
         val bodyText = if (raw != null && isLikelyText(raw)) String(raw, Charsets.UTF_8) else ""
-        emit(JSONObject().put("type", "sseHold").put("flowId", flowId).put("body", bodyText))
+        emit(
+            JSONObject()
+                .put("type", "respIntercept")
+                .put("flowId", flowId)
+                .put("status", status)
+                .put("respHeaders", headersJson(respHead))
+                .put("respBody", bodyText),
+        )
 
         // Block until the panel releases. No hard timeout BY DESIGN — the heartbeat keeps
         // the page alive while the user edits; only a heartbeat write failure (browser
         // gone) ends the wait early via fail-open.
         val decision = try { fut.get() } catch (_: Throwable) { null }
-        pendingSseHolds.remove(flowId)
+        pendingRespIntercepts.remove(flowId)
         beating.set(false)
         hb.interrupt()
 
         val verdict = decision?.optString("decision") ?: "failopen"
+        // abort: head already sent → just terminate the (so-far heartbeat-only) stream.
         val outBody = when {
-            verdict == "continue" -> (decision?.optString("body") ?: "").toByteArray(Charsets.UTF_8)
-            raw != null -> raw // fail-open / abort with captured data → replay original
+            verdict == "abort" -> ByteArray(0)
+            verdict == "continue" -> (decision?.optString("respBody") ?: "").toByteArray(Charsets.UTF_8)
+            raw != null -> raw // fail-open with captured data → replay original
             else -> ByteArray(0)
         }
         try {
@@ -1342,7 +1352,7 @@ object ProxyProbe {
                     if (sseHoldActiveFor(info?.host ?: "") &&
                         isEventStream(headerValue(respHead, "Content-Type")) &&
                         (ce == null || ce.isEmpty() || ce.equals("identity", ignoreCase = true))) {
-                        if (holdSseAndReplay(flowId, upstream, uIn, cOut)) continue
+                        if (holdSseAndReplay(flowId, upstream, uIn, cOut, respHead)) continue
                     }
                     // Gated buffered replace: ONLY for finite document content-types
                     // (html/json/js/css/xml/text, never SSE). De-chunk the whole body
