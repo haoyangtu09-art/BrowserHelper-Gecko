@@ -17,6 +17,8 @@ var EXT_STYLE = [
   '  box-shadow:0 1px 3px rgba(0,0,0,.06);min-height:120px;}',
   '.bh-ext-card-info{flex:1;min-width:0;}',
   '.bh-ext-card-name{font-size:15px;font-weight:600;color:#111;}',
+  '.bh-ext-card-ver{margin-left:6px;font-size:11px;font-weight:600;color:#2563eb;',
+  '  background:#eff6ff;border-radius:6px;padding:1px 6px;vertical-align:middle;}',
   '.bh-ext-card-desc{font-size:12px;color:#888;margin-top:4px;line-height:1.4;}',
   '.bh-ext-toggle{align-self:stretch;padding:8px 0;border:none;border-radius:10px;',
   '  font-size:14px;font-weight:600;color:#fff;}',
@@ -40,6 +42,12 @@ function buildExtCard(p) {
   var name = document.createElement('div');
   name.className = 'bh-ext-card-name';
   name.textContent = p.name || '';
+  if (p.version) {
+    var ver = document.createElement('span');
+    ver.className = 'bh-ext-card-ver';
+    ver.textContent = 'v' + p.version;
+    name.appendChild(ver);
+  }
   info.appendChild(name);
   if (p.desc) {
     var desc = document.createElement('div');

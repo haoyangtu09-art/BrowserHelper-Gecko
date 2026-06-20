@@ -37,6 +37,7 @@
         "panel/toolbar.js",
         "extensions/loader.js",
         "extensions/presets/index.js",
+        "extensions/presets/stream-hold.js",
         "extensions/index.js",
         "content.js"
       ],

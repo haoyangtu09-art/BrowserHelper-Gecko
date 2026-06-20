@@ -152,6 +152,14 @@ object DevToolsHelper {
                     ProxyProbe.resolveRespIntercept(data.optString("flowId", ""), data)
                     return
                 }
+                if (action == "setSseHoldConfig") {
+                    ProxyProbe.setSseHoldConfig(data)
+                    return
+                }
+                if (action == "resolveSseHold") {
+                    ProxyProbe.resolveSseHold(data.optString("flowId", ""), data)
+                    return
+                }
                 if (action.isNotEmpty()) {
                     handlePanelAction(action, engineSession)
                     return

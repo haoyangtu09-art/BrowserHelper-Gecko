@@ -105,6 +105,26 @@ object ProxyProbe {
     private val noiseRe = Regex("(heartbeat|ping|keepalive|poll|socket\\.io|sockjs|realtime|tunnel|presence|typing|status|health|alive|connect|events?)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=")
     private val cookieRe = Regex("(/|[?&._-])(cookie|cookiesync|setuid|usersync|user-sync|idsync|id-sync|cksync|syncuser|getuid|gen_204|__cf)([/?#._-]|$)")
 
+    // ── SSE response hold ("截流" plugin) ──
+    // Hold a configured-host text/event-stream response: forward the head, run a
+    // heartbeat thread that keeps the browser's transport layer alive (SSE comment
+    // lines, which the EventSource/stream parser ignores), de-chunk the full upstream
+    // stream into one buffer, then BLOCK until the panel releases an (optionally edited)
+    // body — replayed as one chunk + terminator. SAFETY (CLAUDE.md 坑#4): this is the
+    // ONLY place a streaming response is ever buffered, and it is tightly gated —
+    // armed hosts only + text/event-stream + identity encoding, off by default. Any
+    // heartbeat write failure (the browser closed the stream) fail-opens immediately so
+    // the socket can never hang. The wait itself has no hard timeout BY DESIGN (the
+    // heartbeat is what keeps the page alive while the user edits); the read-side buffer
+    // is still bounded by SSE_HOLD_CAP + the inherited chunked read timeout.
+    @Volatile private var sseHoldEnabled = false
+    @Volatile private var sseHoldHosts: List<String> = emptyList()
+    @Volatile private var sseHoldHeartbeat = ": ping\n\n"
+    private val pendingSseHolds = ConcurrentHashMap<String, CompletableFuture<JSONObject>>()
+    private const val SSE_HOLD_PREFS_KEY = "sse_hold_config"
+    private const val SSE_HOLD_CAP = 8 * 1024 * 1024 // de-chunked SSE buffer cap
+    private const val SSE_HEARTBEAT_MS = 10000L // heartbeat interval while held
+
     fun setChannel(emit: ((JSONObject) -> Unit)?) {
         channel = emit
     }
@@ -235,6 +255,60 @@ object ProxyProbe {
     private fun ruleMatches(r: InterceptRule, host: String, path: String, method: String, hasBody: Boolean): Boolean =
         r.host.equals(host, ignoreCase = true) && r.path == path &&
             r.method.equals(method, ignoreCase = true) && r.hasBody == hasBody
+
+    /** Panel → native: arm/disarm the SSE hold and set the host allow-list + heartbeat. */
+    @Synchronized
+    fun setSseHoldConfig(data: JSONObject) {
+        applySseHoldConfig(data)
+        saveSseHoldConfig(data)
+    }
+
+    private fun applySseHoldConfig(data: JSONObject) {
+        sseHoldEnabled = data.optBoolean("enabled", false)
+        val arr = data.optJSONArray("hosts")
+        val hosts = ArrayList<String>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val h = arr.optString(i, "").trim().lowercase()
+                if (h.isNotEmpty()) hosts.add(h)
+            }
+        }
+        sseHoldHosts = hosts
+        val hb = data.optString("heartbeat", "")
+        if (hb.isNotEmpty()) sseHoldHeartbeat = hb
+    }
+
+    private fun saveSseHoldConfig(data: JSONObject) {
+        val ctx = appContext ?: return
+        try {
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .edit().putString(SSE_HOLD_PREFS_KEY, data.toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    @Synchronized
+    private fun loadSseHoldConfig() {
+        val ctx = appContext ?: return
+        try {
+            val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .getString(SSE_HOLD_PREFS_KEY, null) ?: return
+            applySseHoldConfig(JSONObject(s))
+        } catch (_: Throwable) {}
+    }
+
+    /** Panel → native: the user's decision for a held SSE flow (continue/edited body). */
+    fun resolveSseHold(flowId: String, decision: JSONObject) {
+        pendingSseHolds.remove(flowId)?.complete(decision)
+    }
+
+    private fun sseHoldActiveFor(host: String): Boolean {
+        if (!sseHoldEnabled || host.isEmpty()) return false
+        val h = host.lowercase()
+        return sseHoldHosts.any { h == it || h.endsWith(".$it") }
+    }
+
+    private fun isEventStream(contentType: String?): Boolean =
+        contentType != null && contentType.lowercase().contains("text/event-stream")
 
     // Telemetry/noise/cookie body guard at request time: small request body, GET-only.
     // (Panel lowValueGuard's resp-size clause is always satisfied here since the response
@@ -566,6 +640,84 @@ object ProxyProbe {
         }
     }
 
+    // Write one HTTP/1.1 chunk: "<hexlen>\r\n<data>\r\n". The caller must hold the
+    // cOut monitor so the heartbeat thread and the final replay never interleave bytes.
+    private fun writeChunk(out: OutputStream, data: ByteArray) {
+        out.write((Integer.toHexString(data.size) + "\r\n").toByteArray(Charsets.ISO_8859_1))
+        out.write(data)
+        out.write("\r\n".toByteArray(Charsets.ISO_8859_1))
+    }
+
+    // Hold a configured SSE response (the head — with Transfer-Encoding: chunked — was
+    // already written verbatim by the caller). A daemon heartbeat thread writes SSE
+    // comment chunks every SSE_HEARTBEAT_MS to keep the browser's transport alive while
+    // we (1) de-chunk the whole upstream stream into a bounded buffer, (2) hand it to
+    // the panel, and (3) BLOCK with no hard timeout until the panel releases an edited
+    // body. The edited (or, on fail-open, original) body is replayed as one chunk +
+    // the 0-length terminator, completing the chunked stream the browser is reading.
+    // Returns true (caller continues the response loop).
+    //
+    // Fail-open guarantees (CLAUDE.md 坑#4): a heartbeat write failure means the browser
+    // closed the stream → we stop and unblock the wait; the de-chunk read is bounded by
+    // SSE_HOLD_CAP + the inherited 30s read timeout; if buffering fails we replay an
+    // empty terminator so the socket is never left hanging.
+    private fun holdSseAndReplay(flowId: String, upstream: Socket, uIn: InputStream, cOut: OutputStream): Boolean {
+        val fut = CompletableFuture<JSONObject>()
+        pendingSseHolds[flowId] = fut
+        val beating = java.util.concurrent.atomic.AtomicBoolean(true)
+        val hbBytes = sseHoldHeartbeat.toByteArray(Charsets.UTF_8)
+        val hb = Thread {
+            try {
+                while (beating.get()) {
+                    Thread.sleep(SSE_HEARTBEAT_MS)
+                    if (!beating.get()) break
+                    synchronized(cOut) {
+                        if (!beating.get()) return@synchronized
+                        writeChunk(cOut, hbBytes)
+                        cOut.flush()
+                    }
+                }
+            } catch (_: Throwable) {
+                // Browser closed the stream (write failed) or thread interrupted: stop
+                // beating and fail-open the wait so the response thread never hangs.
+                beating.set(false)
+                pendingSseHolds.remove(flowId)?.complete(JSONObject().put("decision", "failopen"))
+            }
+        }
+        hb.isDaemon = true
+        hb.start()
+
+        // Buffer the full upstream SSE stream (de-chunked) under the read-timeout guard.
+        val raw = readChunkedToBuffer(upstream, uIn, SSE_HOLD_CAP)
+
+        // Hand the captured stream to the panel for editing.
+        val bodyText = if (raw != null && isLikelyText(raw)) String(raw, Charsets.UTF_8) else ""
+        emit(JSONObject().put("type", "sseHold").put("flowId", flowId).put("body", bodyText))
+
+        // Block until the panel releases. No hard timeout BY DESIGN — the heartbeat keeps
+        // the page alive while the user edits; only a heartbeat write failure (browser
+        // gone) ends the wait early via fail-open.
+        val decision = try { fut.get() } catch (_: Throwable) { null }
+        pendingSseHolds.remove(flowId)
+        beating.set(false)
+        hb.interrupt()
+
+        val verdict = decision?.optString("decision") ?: "failopen"
+        val outBody = when {
+            verdict == "continue" -> (decision?.optString("body") ?: "").toByteArray(Charsets.UTF_8)
+            raw != null -> raw // fail-open / abort with captured data → replay original
+            else -> ByteArray(0)
+        }
+        try {
+            synchronized(cOut) {
+                if (outBody.isNotEmpty()) writeChunk(cOut, outBody)
+                cOut.write("0\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
+                cOut.flush()
+            }
+        } catch (_: Throwable) {}
+        return true
+    }
+
     // Read one line (through LF) as ISO-8859-1; null on immediate EOF. Length-capped.
     private fun readAsciiLine(input: InputStream): String? {
         val out = ByteArrayOutputStream()
@@ -654,6 +806,7 @@ object ProxyProbe {
         // (once the proxy is re-armed) without depending on the panel re-pushing.
         loadReplaceConfig()
         loadInterceptConfig()
+        loadSseHoldConfig()
     }
 
     private fun toast(msg: String) {
@@ -1182,6 +1335,15 @@ object ProxyProbe {
                 emitFlowResp(flowId, respHead)
                 if (noBody) continue // no body by definition
                 if (te != null && te.contains("chunked", ignoreCase = true)) {
+                    // SSE hold ("截流" plugin): armed host + text/event-stream + identity
+                    // encoding only. Keeps the head's chunked framing; heartbeats the
+                    // browser while it buffers + waits for the panel's edited body. This
+                    // is the single, tightly-gated streaming-buffer exception (坑#4).
+                    if (sseHoldActiveFor(info?.host ?: "") &&
+                        isEventStream(headerValue(respHead, "Content-Type")) &&
+                        (ce == null || ce.isEmpty() || ce.equals("identity", ignoreCase = true))) {
+                        if (holdSseAndReplay(flowId, upstream, uIn, cOut)) continue
+                    }
                     // Gated buffered replace: ONLY for finite document content-types
                     // (html/json/js/css/xml/text, never SSE). De-chunk the whole body
                     // (bounded + read-timeout), decode, replace, re-emit as identity.

@@ -28,9 +28,18 @@ function bhPluginCtx() {
     port: (typeof port !== 'undefined') ? port : null,
     runInPage: (typeof runInPage === 'function') ? runInPage : function () {},
     log: function () {
+      var parts = [].slice.call(arguments).map(function (a) {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch (e) { return String(a); }
+      });
+      var msg = '[bh-plugin] ' + parts.join(' ');
+      // content-world console（logcat，调试用）
+      try { console.log(msg); } catch (e) {}
+      // 同时打进页面世界 console，Eruda 的 console 面板才抓得到（两个世界不同 console）
       try {
-        var a = ['[bh-plugin]'].concat([].slice.call(arguments));
-        console.log.apply(console, a);
+        if (typeof runInPage === 'function') {
+          runInPage('console.log(' + JSON.stringify(msg) + ');');
+        }
       } catch (e) {}
     },
   };
