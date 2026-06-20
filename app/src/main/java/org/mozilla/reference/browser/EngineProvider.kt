@@ -44,12 +44,6 @@ object EngineProvider {
             // trigger the Java-side gather on this GeckoView version.
             builder.enterpriseRootsEnabled(true)
 
-            // Render web content slightly smaller than the device default so
-            // pages show more at once. displayDensityOverride takes an absolute
-            // density, so scale the device density rather than hardcoding.
-            val deviceDensity = context.resources.displayMetrics.density
-            builder.displayDensityOverride(deviceDensity * 0.85f)
-
             runtime = GeckoRuntime.create(context, builder.build())
 
             // Phase 0 spike (MITM-proxy plan): confirm we can set arbitrary Gecko
