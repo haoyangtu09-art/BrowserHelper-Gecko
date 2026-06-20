@@ -603,7 +603,8 @@ object BrowserBridge {
                         .put("url", args.optString("url", ""))
                         .put("method", args.optString("method", ""))
                         .put("reqHeaders", resolveHeaderPlaceholders(args.optJSONObject("reqHeaders")))
-                        .put("reqBody", resolvePlaceholders(args.optString("reqBody", "")))
+                    // Only include reqBody when explicitly provided; absence = keep original body.
+                    if (args.has("reqBody")) decision.put("reqBody", resolvePlaceholders(args.optString("reqBody", "")))
                     ProxyProbe.resolveIntercept(flowId, decision)
                     toolText(id, "intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
                 }
@@ -614,7 +615,8 @@ object BrowserBridge {
                         .put("decision", args.optString("decision", "continue"))
                         .put("status", args.optInt("status", 0))
                         .put("respHeaders", resolveHeaderPlaceholders(args.optJSONObject("respHeaders")))
-                        .put("respBody", resolvePlaceholders(args.optString("respBody", "")))
+                    // Only include respBody when explicitly provided; absence = keep original body.
+                    if (args.has("respBody")) decision.put("respBody", resolvePlaceholders(args.optString("respBody", "")))
                     ProxyProbe.resolveRespIntercept(flowId, decision)
                     toolText(id, "resp intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
                 }

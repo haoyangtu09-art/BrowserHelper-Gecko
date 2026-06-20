@@ -931,7 +931,8 @@ object ProxyProbe {
         // abort: head already sent → just terminate the (so-far heartbeat-only) stream.
         val outBody = when {
             verdict == "abort" -> ByteArray(0)
-            verdict == "continue" -> (decision?.optString("respBody") ?: "").toByteArray(Charsets.UTF_8)
+            verdict == "continue" && decision?.has("respBody") == true -> decision.optString("respBody", "").toByteArray(Charsets.UTF_8)
+            verdict == "continue" && raw != null -> raw // no respBody provided → keep original
             raw != null -> raw // fail-open with captured data → replay original
             else -> ByteArray(0)
         }
@@ -1373,7 +1374,7 @@ object ProxyProbe {
                     // Forward the edited request on "continue" (decision present), else the
                     // original on timeout/fail-open. The inline decision != null check lets
                     // Kotlin smart-cast it non-null for optString/buildReqHead.
-                    val fBody = if (decision != null && verdict == "continue") {
+                    val fBody = if (decision != null && verdict == "continue" && decision.has("reqBody")) {
                         decision.optString("reqBody", "").toByteArray(Charsets.UTF_8)
                     } else {
                         body
