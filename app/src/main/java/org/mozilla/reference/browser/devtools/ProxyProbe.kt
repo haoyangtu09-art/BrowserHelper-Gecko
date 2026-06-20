@@ -127,6 +127,9 @@ object ProxyProbe {
     @Volatile private var throttleLatencyMs = 0L
     @Volatile private var throttleKbps = 0L
     private const val THROTTLE_PREFS_KEY = "throttle_config"
+    // Persisted user intent for the 监听 toggle. On cold launch we honor it: if the
+    // proxy was ON, auto-arm a fresh socket so capture resumes without a manual re-toggle.
+    private const val PROXY_ENABLED_KEY = "proxy_enabled"
 
     // ── SSE response hold ("截流" plugin) ──
     // Hold a configured-host text/event-stream response: forward the head, run a
@@ -981,8 +984,25 @@ object ProxyProbe {
     @Synchronized
     fun setEnabled(context: Context, on: Boolean) {
         appContext = context.applicationContext
+        saveProxyEnabled(on)
         if (on && !running) start()
         else if (!on && running) stop()
+    }
+
+    private fun saveProxyEnabled(on: Boolean) {
+        val ctx = appContext ?: return
+        try {
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(PROXY_ENABLED_KEY, on).apply()
+        } catch (_: Throwable) {}
+    }
+
+    private fun loadProxyEnabled(): Boolean {
+        val ctx = appContext ?: return false
+        return try {
+            ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(PROXY_ENABLED_KEY, false)
+        } catch (_: Throwable) { false }
     }
 
     fun isRunning(): Boolean = running
@@ -993,22 +1013,31 @@ object ProxyProbe {
      * next process launch — but the ServerSocket lives only in this in-memory
      * object and dies with the process. So after a background kill + relaunch,
      * Gecko points at a dead local port and every request fails with
-     * NS_ERROR_PROXY_CONNECTION_REFUSED until the probe is re-armed. Reset to
-     * direct on startup so a cold launch is always clean; the user re-toggles to
-     * re-arm (a fresh socket + fresh port).
+     * NS_ERROR_PROXY_CONNECTION_REFUSED until the probe is re-armed.
+     *
+     * We honor the persisted 监听 intent: if the proxy was ON, AUTO-ARM here with a
+     * FRESH socket + fresh port (start() rewrites network.proxy.type=1 to the new
+     * port), so a relaunch resumes capture without a manual re-toggle and the panel's
+     * 监听 state matches reality. If it was OFF, reset to direct for a clean launch.
      */
     @Synchronized
     fun resetProxyStateOnStartup(context: Context) {
         appContext = context.applicationContext
         running = false
-        setInt("network.proxy.type", 0)
-        // Restore the persisted replace config so a cold launch resumes replacement
-        // (once the proxy is re-armed) without depending on the panel re-pushing.
+        // Restore the persisted configs so a cold launch resumes replace/intercept/
+        // mock/throttle without depending on the panel re-pushing.
         loadReplaceConfig()
         loadInterceptConfig()
         loadSseHoldConfig()
         loadMockConfig()
         loadThrottleConfig()
+        if (loadProxyEnabled()) {
+            // Auto-arm: bind a new ServerSocket + point Gecko at it (kills the dead-port
+            // failure mode). start() handles CA + enterprise-roots reimport too.
+            start()
+        } else {
+            setInt("network.proxy.type", 0)
+        }
     }
 
     private fun toast(msg: String) {

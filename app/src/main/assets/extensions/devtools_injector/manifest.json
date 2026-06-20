@@ -1,11 +1,11 @@
 {
   "manifest_version": 2,
-  "name": "DevTools Injector",
-  "version": "2.0.0",
-  "description": "Injects Eruda DevTools into the current page.",
+  "name": "网络调试助手",
+  "version": "1.1",
+  "description": "网络抓包 / 拦截 / 替换 / Mock / 弱网 与控制台调试。",
   "browser_specific_settings": {
     "gecko": {
-      "id": "devtools-injector@browserhelper.local"
+      "id": "netdebug@browserhelper.local"
     }
   },
   "permissions": [

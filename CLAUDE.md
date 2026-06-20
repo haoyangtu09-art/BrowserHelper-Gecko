@@ -87,7 +87,7 @@ devtools_injector/
 ### 持久化约束（已修）
 
 - 代理 pref 写 `PREF_BRANCH_USER` 会持久化、下次启动恢复；但 `ServerSocket` 随进程死。后台被杀+重启后 Gecko 指向死端口 → 全部请求 `NS_ERROR_PROXY_CONNECTION_REFUSED`。
-- `EngineProvider.getOrCreateRuntime()` 每次冷启动调 `ProxyProbe.resetProxyStateOnStartup()` 设 `network.proxy.type=0`（直连），用户再手动开。
+- **冷启动按持久化意图自动续开（已改）**：`setEnabled()` 把「监听」开关意图存进 `proxy_enabled`(SharedPreferences)。`EngineProvider.getOrCreateRuntime()` 冷启动调 `ProxyProbe.resetProxyStateOnStartup()`：若上次为开 → 直接 `start()` 绑**新端口**并重写 `network.proxy.type=1` 指向它（避开死端口），抓包无缝续上、面板「监听中」与实际一致；若上次为关 → 设 `network.proxy.type=0`（直连）。**不要再改回「冷启动一律复位直连、等用户手动开」**——那会让面板显示「监听中」但实际没代理。
 
 ## 严重坑
 

@@ -26,7 +26,7 @@ import mozilla.components.support.webextensions.BuiltInWebExtensionController
 import org.json.JSONObject
 
 object DevToolsHelper {
-    private const val EXTENSION_ID = "devtools-injector@browserhelper.local"
+    private const val EXTENSION_ID = "netdebug@browserhelper.local"
     private const val EXTENSION_URL = "resource://android/assets/extensions/devtools_injector/"
     private const val CONTENT_PORT = "devtools_inject"
 
