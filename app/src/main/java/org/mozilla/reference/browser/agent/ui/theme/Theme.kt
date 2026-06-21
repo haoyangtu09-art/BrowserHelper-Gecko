@@ -24,10 +24,15 @@ object AgentColors {
     val TextSecondary = Color(0xFF666666)
     val TextTertiary = Color(0xFF999999)
     val Hairline = Color(0xFFB0B0B0)
+    // Faint hairline for the in-panel border and the model-selector divider — softer
+    // than the heavier Hairline so it reads as a subtle inset stroke, not a hard rule.
+    val HairlineFaint = Color(0x1F000000)
     val Control = Color(0xFFEAEAEA)
     val UserBubble = Color(0xFFF2F2F2)
     val Accent = Color(0xFF4285F4)
     val Stop = Color(0xFF111111)
+    // Tint behind the floating top-bar buttons' drop shadow.
+    val ShadowTint = Color(0x33000000)
 }
 
 object AgentShapes {
@@ -36,6 +41,14 @@ object AgentShapes {
     val Upload = RoundedCornerShape(32.dp)
     val Field = RoundedCornerShape(24.dp)
     val Sheet = RoundedCornerShape(20.dp)
+    // Ball squircle: a rounded square so large it nearly reads as a circle, yet on close
+    // inspection keeps a square-ish outline (per the ChatGPT-style floating ball).
+    val Squircle = RoundedCornerShape(percent = 38)
+}
+
+/** Shared elevation for the white floating top-bar buttons so they read as hovering. */
+object AgentElevation {
+    val Floating = 4.dp
 }
 
 object AgentText {

@@ -10,13 +10,13 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,12 +38,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
+import org.mozilla.reference.browser.agent.ui.theme.AgentElevation
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 import org.mozilla.reference.browser.agent.ui.theme.AgentText
 
@@ -61,15 +63,10 @@ fun ChatScreen(
     onOpenModels: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var showMenu by remember { mutableStateOf(false) }
     Column(modifier.fillMaxSize()) {
-        ChatTopBar(state, onOpenDrawer, onOpenModels)
-        if (state.tempChat && state.messages.isEmpty()) {
-            BasicText(
-                "此聊天不会被保存",
-                style = AgentText.Label.copy(textAlign = TextAlign.Center),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
-            )
-        }
+        // Conversation fills the area; the top bar floats above it as white buttons, so
+        // messages scroll underneath and only the buttons occlude the context.
         Box(Modifier.fillMaxWidth().weight(1f)) {
             if (state.messages.isEmpty() && !state.generating) {
                 BasicText(
@@ -79,6 +76,31 @@ fun ChatScreen(
                 )
             } else {
                 MessageList(state)
+            }
+            if (state.tempChat && state.messages.isEmpty()) {
+                BasicText(
+                    "此聊天不会被保存",
+                    style = AgentText.Label.copy(textAlign = TextAlign.Center),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 60.dp),
+                )
+            }
+            ChatTopBar(
+                state = state,
+                onOpenDrawer = onOpenDrawer,
+                onOpenModels = onOpenModels,
+                menuOpen = showMenu,
+                onToggleMenu = { showMenu = it },
+                modifier = Modifier.align(Alignment.TopStart),
+            )
+            // Tap anywhere over the conversation to dismiss the overflow menu, then draw
+            // the menu above that dismiss layer.
+            if (showMenu) {
+                Box(Modifier.fillMaxSize().clickable { showMenu = false })
+                OverflowMenu(
+                    onShare = { showMenu = false },
+                    onDelete = { showMenu = false; state.newChat() },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 52.dp, end = 12.dp),
+                )
             }
         }
         InputBar(state)
@@ -90,57 +112,105 @@ private fun ChatTopBar(
     state: PanelState,
     onOpenDrawer: () -> Unit,
     onOpenModels: () -> Unit,
+    menuOpen: Boolean,
+    onToggleMenu: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    var showMenu by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onOpenDrawer) { MenuLinesIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.weight(1f))
-            // Center "Agent" capsule opens the model selector.
-            Box(
-                modifier = Modifier
-                    .clip(AgentShapes.Pill)
-                    .background(AgentColors.Control)
-                    .clickable { onOpenModels() }
-                    .padding(horizontal = 16.dp, vertical = 7.dp),
-            ) {
-                BasicText("Agent", style = AgentText.Title)
-            }
-            Spacer(Modifier.weight(1f))
-            if (state.messages.isEmpty()) {
-                IconButton(onClick = { state.tempChat = !state.tempChat }) {
-                    Box(contentAlignment = Alignment.Center) {
-                        ChatBubbleIcon(color = AgentColors.TextPrimary)
-                        if (state.tempChat) {
-                            Box(
-                                Modifier.size(12.dp).clip(CircleShape).background(AgentColors.Accent),
-                                contentAlignment = Alignment.Center,
-                            ) { CheckIcon(size = 10.dp) }
-                        }
+    Row(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Left: hamburger menu, then the "Agent" capsule right beside it — both white
+        // floating buttons hovering over the conversation.
+        FloatingCircleButton(onClick = onOpenDrawer) { MenuLinesIcon(color = AgentColors.TextPrimary) }
+        Spacer(Modifier.width(8.dp))
+        FloatingPill(onClick = onOpenModels) { BasicText("Agent", style = AgentText.Title) }
+        Spacer(Modifier.weight(1f))
+        if (state.messages.isEmpty()) {
+            FloatingCircleButton(onClick = { state.tempChat = !state.tempChat }) {
+                Box(contentAlignment = Alignment.Center) {
+                    ChatBubbleIcon(color = AgentColors.TextPrimary)
+                    if (state.tempChat) {
+                        Box(
+                            Modifier.size(12.dp).clip(CircleShape).background(AgentColors.Accent),
+                            contentAlignment = Alignment.Center,
+                        ) { CheckIcon(size = 10.dp) }
                     }
                 }
-            } else {
-                IconButton(onClick = { state.newChat() }) { PenSquareIcon(color = AgentColors.TextPrimary) }
-                IconButton(onClick = { showMenu = true }) { MoreDotsIcon(color = AgentColors.TextPrimary) }
             }
+        } else {
+            // New-chat (pen) and overflow (dots) wrapped together in one floating pill.
+            FloatingDualPill(
+                onNew = { state.newChat() },
+                onMore = { onToggleMenu(!menuOpen) },
+            )
         }
-        if (showMenu) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 44.dp, end = 12.dp)
-                    .width(140.dp)
-                    .clip(AgentShapes.Sheet)
-                    .background(AgentColors.Panel)
-                    .border(1.dp, AgentColors.Control, AgentShapes.Sheet),
-            ) {
-                MenuRow("分享") { showMenu = false }
-                MenuRow("删除") { showMenu = false; state.newChat() }
-            }
-        }
+    }
+}
+
+/** White circular button with a soft drop shadow so it reads as floating over content. */
+@Composable
+private fun FloatingCircleButton(onClick: () -> Unit, content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .shadow(AgentElevation.Floating, CircleShape)
+            .clip(CircleShape)
+            .background(Color.White)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/** White pill button with the same floating shadow (the "Agent" capsule). */
+@Composable
+private fun FloatingPill(onClick: () -> Unit, content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(40.dp)
+            .shadow(AgentElevation.Floating, AgentShapes.Pill)
+            .clip(AgentShapes.Pill)
+            .background(Color.White)
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/** Pen (new chat) + dots (overflow) packed into a single floating ellipse capsule. */
+@Composable
+private fun FloatingDualPill(onNew: () -> Unit, onMore: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .height(40.dp)
+            .shadow(AgentElevation.Floating, AgentShapes.Pill)
+            .clip(AgentShapes.Pill)
+            .background(Color.White),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.fillMaxHeight().clickable { onNew() }.padding(start = 14.dp, end = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) { PenSquareIcon(color = AgentColors.TextPrimary, size = 20.dp) }
+        Box(Modifier.width(1.dp).height(20.dp).background(AgentColors.HairlineFaint))
+        Box(
+            Modifier.fillMaxHeight().clickable { onMore() }.padding(start = 10.dp, end = 14.dp),
+            contentAlignment = Alignment.Center,
+        ) { MoreDotsIcon(color = AgentColors.TextPrimary, size = 20.dp) }
+    }
+}
+
+@Composable
+private fun OverflowMenu(onShare: () -> Unit, onDelete: () -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .width(140.dp)
+            .shadow(AgentElevation.Floating, AgentShapes.Sheet)
+            .clip(AgentShapes.Sheet)
+            .background(AgentColors.Panel),
+    ) {
+        MenuRow("分享") { onShare() }
+        MenuRow("删除") { onDelete() }
     }
 }
 
@@ -160,7 +230,8 @@ private fun MessageList(state: PanelState) {
         modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Spacer(Modifier.height(4.dp))
+        // Clear the floating top bar so the first message isn't hidden beneath it.
+        Spacer(Modifier.height(56.dp))
         state.messages.forEach { msg ->
             if (msg.fromUser) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -181,10 +252,9 @@ private fun MessageList(state: PanelState) {
             }
         }
         if (state.generating) {
+            // Single slowly-pulsing dot — no avatar — so the wait state shows one dot, not two.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                AssistantAvatar()
-                Spacer(Modifier.width(10.dp))
-                BlinkingDot(Modifier.padding(top = 10.dp))
+                BlinkingDot(Modifier.padding(start = 4.dp, top = 6.dp))
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -228,17 +298,17 @@ private fun InputBar(state: PanelState) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = { showUpload = !showUpload }) { PlusIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(4.dp))
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .clip(AgentShapes.Field)
                     .background(AgentColors.Bg)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
                 contentAlignment = Alignment.CenterStart,
             ) {
                 if (state.input.isEmpty()) BasicText("问问…", style = AgentText.Hint)
@@ -250,7 +320,7 @@ private fun InputBar(state: PanelState) {
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
             SendStopButton(
                 generating = state.generating,
                 onSend = { state.send() },
@@ -264,7 +334,7 @@ private fun InputBar(state: PanelState) {
 private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(34.dp)
             .clip(CircleShape)
             .background(if (generating) AgentColors.Stop else AgentColors.Accent)
             .clickable { if (generating) onStop() else onSend() },
@@ -272,9 +342,9 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
     ) {
         if (generating) {
             // Rounded square = stop.
-            Box(Modifier.size(13.dp).clip(RoundedCornerShape(4.dp)).background(Color.White))
+            Box(Modifier.size(11.dp).clip(RoundedCornerShape(4.dp)).background(Color.White))
         } else {
-            SendArrowIcon(size = 22.dp, color = Color.White)
+            SendArrowIcon(size = 19.dp, color = Color.White)
         }
     }
 }

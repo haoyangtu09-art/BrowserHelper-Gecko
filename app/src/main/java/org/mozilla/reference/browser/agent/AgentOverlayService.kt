@@ -26,11 +26,17 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import org.mozilla.reference.browser.agent.ui.OverlayRoot
 import kotlin.math.roundToInt
 
-// Panel composable total width: 320dp content + 8dp outer padding on each side.
-private const val PANEL_TOTAL_DP = 336f
+// Outer padding around the panel composable (8dp each side → 16dp total).
+private const val PANEL_PADDING_DP = 16f
 
-// Ball composable total width: 42dp disc + 6dp outer padding on each side.
-private const val BALL_TOTAL_DP = 54f
+// Default / minimum panel content size (resize is clamped to these and the screen).
+private const val DEFAULT_PANEL_W_DP = 320f
+private const val DEFAULT_PANEL_H_DP = 520f
+private const val MIN_PANEL_W_DP = 260f
+private const val MIN_PANEL_H_DP = 360f
+
+// Ball composable total width: 49dp disc + 6dp outer padding on each side.
+private const val BALL_TOTAL_DP = 61f
 
 // Idle delay before a parked ball dims and tucks half off the edge.
 private const val IDLE_DELAY_MS = 2500L
@@ -54,6 +60,8 @@ class AgentOverlayService : Service() {
     private val expandedState = mutableStateOf(false)
     private val anchorRightState = mutableStateOf(false)
     private val dimmedState = mutableStateOf(false)
+    private val panelWidthState = mutableStateOf(DEFAULT_PANEL_W_DP)
+    private val panelHeightState = mutableStateOf(DEFAULT_PANEL_H_DP)
     private var snapAnimator: ValueAnimator? = null
     private var idleHidden = false
     private val idleRunnable = Runnable { enterIdle() }
@@ -124,12 +132,15 @@ class AgentOverlayService : Service() {
                     expanded = expandedState.value,
                     anchorRight = anchorRightState.value,
                     dimmed = dimmedState.value,
+                    panelWidthDp = panelWidthState.value,
+                    panelHeightDp = panelHeightState.value,
                     onExpand = { setExpanded(true) },
                     onCollapse = { setExpanded(false) },
                     onWake = { wake() },
                     onBallDrag = { dx, dy -> moveBy(dx, dy) },
                     onBallDragEnd = { snapToEdge() },
                     onPanelDrag = { dx, dy -> movePanelBy(dx, dy) },
+                    onPanelResize = { dx, dy -> resizePanelBy(dx, dy) },
                 )
             }
         }
@@ -189,7 +200,7 @@ class AgentOverlayService : Service() {
             expandedState.value = true
             lp.flags = expandedFlags()
             // Open on the side the ball sits on, anchored near the top so it stays fully on screen.
-            val panelW = (PANEL_TOTAL_DP * resources.displayMetrics.density).roundToInt()
+            val panelW = ((panelWidthState.value + PANEL_PADDING_DP) * resources.displayMetrics.density).roundToInt()
             lp.x = if (toRight) (screenW - panelW).coerceAtLeast(0) else 0
             lp.y = (resources.displayMetrics.heightPixels * 0.12f).roundToInt()
             safeUpdate()
@@ -271,6 +282,32 @@ class AgentOverlayService : Service() {
     private fun movePanelBy(dx: Float, dy: Float) {
         if (!expandedState.value) return
         moveWindowBy(dx, dy)
+    }
+
+    /**
+     * Resize the expanded panel from its bottom-right grip. Width/height are kept in dp
+     * state (the WRAP_CONTENT window follows the composable's measured size). For a
+     * right-anchored panel the window's left edge is shifted so the right edge stays
+     * pinned to where the panel opened.
+     */
+    private fun resizePanelBy(dx: Float, dy: Float) {
+        if (!expandedState.value) return
+        val density = resources.displayMetrics.density
+        val screenW = resources.displayMetrics.widthPixels / density
+        val screenH = resources.displayMetrics.heightPixels / density
+        val maxW = (screenW - PANEL_PADDING_DP).coerceAtLeast(MIN_PANEL_W_DP)
+        val maxH = (screenH - PANEL_PADDING_DP).coerceAtLeast(MIN_PANEL_H_DP)
+        val oldW = panelWidthState.value
+        val newW = (oldW + dx / density).coerceIn(MIN_PANEL_W_DP, maxW)
+        val newH = (panelHeightState.value + dy / density).coerceIn(MIN_PANEL_H_DP, maxH)
+        panelWidthState.value = newW
+        panelHeightState.value = newH
+        if (anchorRightState.value) {
+            val deltaPx = ((newW - oldW) * density).roundToInt()
+            val lp = params ?: return
+            lp.x = (lp.x - deltaPx).coerceAtLeast(0)
+            safeUpdate()
+        }
     }
 
     private fun moveWindowBy(dx: Float, dy: Float) {

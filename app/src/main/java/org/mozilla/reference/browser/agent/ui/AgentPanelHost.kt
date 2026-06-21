@@ -4,8 +4,15 @@
 
 package org.mozilla.reference.browser.agent.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,15 +27,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
@@ -37,7 +49,10 @@ import org.mozilla.reference.browser.agent.ui.theme.AgentText
 
 /**
  * Hosts the panel's internal navigation: the chat surface plus the slide-in drawer,
- * settings page, and model selector drawn as overlays above it.
+ * settings page, and model selector drawn as animated overlays above it. Each overlay
+ * is an AnimatedVisibility keyed on the current nav target so it gets both an enter and
+ * an exit transition (drawer slides from the left, settings from the right, the model
+ * selector scales out of the Agent button at the top-left).
  */
 @Composable
 fun AgentPanelHost(modifier: Modifier = Modifier) {
@@ -48,14 +63,37 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
             onOpenDrawer = { state.nav = PanelNav.Drawer },
             onOpenModels = { state.nav = PanelNav.ModelSelector },
         )
-        when (state.nav) {
-            PanelNav.Chat -> Unit
-            PanelNav.Drawer -> DrawerSheet(
+        AnimatedVisibility(
+            visible = state.nav == PanelNav.Drawer,
+            enter = slideInHorizontally(tween(240)) { -it } + fadeIn(tween(240)),
+            exit = slideOutHorizontally(tween(220)) { -it } + fadeOut(tween(200)),
+        ) {
+            DrawerSheet(
                 onClose = { state.nav = PanelNav.Chat },
                 onSettings = { state.nav = PanelNav.Settings },
             )
-            PanelNav.Settings -> SettingsScreen(state, onBack = { state.nav = PanelNav.Drawer })
-            PanelNav.ModelSelector -> ModelSelectorSheet(state, onClose = { state.nav = PanelNav.Chat })
+        }
+        AnimatedVisibility(
+            visible = state.nav == PanelNav.Settings,
+            enter = slideInHorizontally(tween(240)) { it } + fadeIn(tween(240)),
+            exit = slideOutHorizontally(tween(220)) { it } + fadeOut(tween(200)),
+        ) {
+            SettingsScreen(state, onBack = { state.nav = PanelNav.Drawer })
+        }
+        AnimatedVisibility(
+            visible = state.nav == PanelNav.ModelSelector,
+            enter = scaleIn(
+                tween(200),
+                initialScale = 0.9f,
+                transformOrigin = TransformOrigin(0f, 0f),
+            ) + fadeIn(tween(200)),
+            exit = scaleOut(
+                tween(180),
+                targetScale = 0.9f,
+                transformOrigin = TransformOrigin(0f, 0f),
+            ) + fadeOut(tween(160)),
+        ) {
+            ModelSelectorOverlay(state, onClose = { state.nav = PanelNav.Chat })
         }
     }
 }
@@ -76,7 +114,16 @@ private fun DrawerSheet(onClose: () -> Unit, onSettings: () -> Unit) {
                 .background(AgentColors.Panel)
                 .padding(16.dp),
         ) {
-            BasicText("记忆", style = AgentText.Title)
+            // Header: title on the left, settings gear pinned to the top-right.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BasicText("记忆", style = AgentText.Title)
+                Spacer(Modifier.weight(1f))
+                Box(
+                    modifier = Modifier.size(40.dp).clip(CircleShape).background(AgentColors.Bg)
+                        .clickable { onSettings() },
+                    contentAlignment = Alignment.Center,
+                ) { GearIcon(color = AgentColors.TextPrimary) }
+            }
             Spacer(Modifier.height(12.dp))
             listOf("偏好与习惯", "项目上下文", "最近会话").forEach {
                 Box(
@@ -85,13 +132,6 @@ private fun DrawerSheet(onClose: () -> Unit, onSettings: () -> Unit) {
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                 ) { BasicText(it, style = AgentText.Body) }
             }
-            Spacer(Modifier.weight(1f))
-            // Gear → settings.
-            Box(
-                modifier = Modifier.size(44.dp).clip(CircleShape).background(AgentColors.Bg)
-                    .clickable { onSettings() },
-                contentAlignment = Alignment.Center,
-            ) { GearIcon(color = AgentColors.TextPrimary) }
         }
     }
 }
@@ -157,66 +197,119 @@ private fun FormatOption(label: String, selected: Boolean, onClick: () -> Unit) 
     }
 }
 
+/**
+ * The model selector as a two-layer card anchored under the Agent button at the top-left
+ * (rather than a bottom sheet). Layer 1 picks the reasoning tier (a checkmark marks the
+ * selected one) and shows the current model; tapping the model row opens layer 2, which
+ * lists models or shows "暂无模型" when none are configured.
+ */
 @Composable
-private fun ModelSelectorSheet(state: PanelState, onClose: () -> Unit) {
+private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
+    var showModels by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
-        Scrim(onClose)
+        Scrim { showModels = false; onClose() }
+        // Layer 1: reasoning tier + current model, anchored below the Agent button.
         Column(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .align(Alignment.TopStart)
+                .padding(start = 10.dp, top = 56.dp)
+                .width(220.dp)
+                .shadow(8.dp, AgentShapes.Sheet)
+                .clip(AgentShapes.Sheet)
                 .background(AgentColors.Panel)
-                .padding(16.dp),
+                .padding(14.dp),
         ) {
-            BasicText("推理模式", style = AgentText.Label)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ReasonTier.values().forEach { tier ->
-                    TierOption(tier.name, state.tier == tier) { state.tier = tier }
+            BasicText("智能", style = AgentText.Title)
+            Spacer(Modifier.height(10.dp))
+            ReasonTier.values().forEach { tier ->
+                TierRow(tier.name, state.tier == tier) { state.tier = tier }
+            }
+            Spacer(Modifier.height(10.dp))
+            // Faint divider between the tier picker and the model row.
+            Box(Modifier.fillMaxWidth().height(1.dp).background(AgentColors.HairlineFaint))
+            Spacer(Modifier.height(10.dp))
+            Box(
+                modifier = Modifier.fillMaxWidth().clip(AgentShapes.Sheet)
+                    .clickable { showModels = true }
+                    .padding(horizontal = 6.dp, vertical = 10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BasicText("模型", style = AgentText.Label)
+                    Spacer(Modifier.weight(1f))
+                    BasicText(state.selectedModel ?: "选择模型", style = AgentText.Body)
                 }
             }
-            BasicText(
-                "对应 token 限额",
-                style = AgentText.Label,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-            Spacer(Modifier.height(16.dp))
-            BasicText("模型", style = AgentText.Label)
-            Spacer(Modifier.height(8.dp))
-            if (state.models.isEmpty()) {
-                Box(
-                    Modifier.fillMaxWidth().clip(AgentShapes.Sheet).background(AgentColors.Bg)
-                        .padding(vertical = 20.dp),
-                    contentAlignment = Alignment.Center,
-                ) { BasicText("暂无模型", style = AgentText.Secondary) }
-            } else {
-                state.models.forEach { m ->
-                    val sel = state.selectedModel == m
+        }
+        // Layer 2: the model list, scaling out of the same anchor on top of layer 1.
+        AnimatedVisibility(
+            visible = showModels,
+            enter = scaleIn(
+                tween(180),
+                initialScale = 0.92f,
+                transformOrigin = TransformOrigin(0f, 0f),
+            ) + fadeIn(tween(180)),
+            exit = scaleOut(
+                tween(160),
+                targetScale = 0.92f,
+                transformOrigin = TransformOrigin(0f, 0f),
+            ) + fadeOut(tween(140)),
+            modifier = Modifier.align(Alignment.TopStart),
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(start = 10.dp, top = 56.dp)
+                    .width(220.dp)
+                    .shadow(8.dp, AgentShapes.Sheet)
+                    .clip(AgentShapes.Sheet)
+                    .background(AgentColors.Panel)
+                    .padding(14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
-                        Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                            .clip(AgentShapes.Sheet)
-                            .background(if (sel) AgentColors.Control else AgentColors.Bg)
-                            .clickable { state.selectedModel = m }
-                            .padding(horizontal = 14.dp, vertical = 13.dp),
-                    ) { BasicText(m, style = AgentText.Body) }
+                        Modifier.size(28.dp).clip(CircleShape).clickable { showModels = false },
+                        contentAlignment = Alignment.Center,
+                    ) { BackIcon(color = AgentColors.TextPrimary, size = 18.dp) }
+                    Spacer(Modifier.width(6.dp))
+                    BasicText("模型", style = AgentText.Title)
+                }
+                Spacer(Modifier.height(10.dp))
+                if (state.models.isEmpty()) {
+                    Box(
+                        Modifier.fillMaxWidth().clip(AgentShapes.Sheet).background(AgentColors.Bg)
+                            .padding(vertical = 20.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { BasicText("暂无模型", style = AgentText.Secondary) }
+                } else {
+                    state.models.forEach { m ->
+                        val sel = state.selectedModel == m
+                        Box(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                .clip(AgentShapes.Sheet)
+                                .background(if (sel) AgentColors.Control else AgentColors.Bg)
+                                .clickable { state.selectedModel = m; showModels = false }
+                                .padding(horizontal = 14.dp, vertical = 13.dp),
+                        ) { BasicText(m, style = AgentText.Body) }
+                    }
                 }
             }
-            Spacer(Modifier.height(8.dp))
         }
     }
 }
 
 @Composable
-private fun TierOption(label: String, selected: Boolean, onClick: () -> Unit) {
-    Box(
+private fun TierRow(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
         modifier = Modifier
-            .clip(AgentShapes.Pill)
-            .background(if (selected) AgentColors.Accent else AgentColors.Bg)
-            .border(1.dp, if (selected) AgentColors.Accent else AgentColors.Control, AgentShapes.Pill)
+            .fillMaxWidth()
+            .clip(AgentShapes.Sheet)
             .clickable { onClick() }
-            .padding(horizontal = 18.dp, vertical = 9.dp),
+            .padding(horizontal = 6.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        BasicText(label, style = if (selected) AgentText.Body.copy(color = Color.White) else AgentText.Body)
+        Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+            if (selected) CheckIcon(size = 14.dp, color = AgentColors.Accent)
+        }
+        Spacer(Modifier.width(8.dp))
+        BasicText(label, style = AgentText.Body)
     }
 }

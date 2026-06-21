@@ -178,32 +178,37 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - **延迟**：`pumpResponses` 在处理完 1xx、取 `flowQueue.poll()` 之前调 `throttleLatency()`，按 `throttleLatencyMs` 给每个响应注入延迟。
 - 面板下发：`pushThrottleToNative()` → `setThrottle` → `applyThrottleConfig`/`saveThrottleConfig`（`throttle_config`）。字段 `throttleEnabled/throttleLatencyMs/throttleKbps`。
 
-## ⚠️ 未解决 Bug：开 Eruda 后刷新页面 → 整页放大一圈 + 错位（APZ 跳变）
+## ✅ 已解决 Bug：开 Eruda 后刷新页面 → 整页放大一圈 + 错位（APZ 跳变）
 
-> 这是一个**多次尝试仍未修复**的硬骨头。本节是给「全新对话（无记忆）」的完整交接：症状、
-> 已**真机证伪**的全部假设、当前代码状态、未尝试的方向。**新对话务必先读完，不要重复已证伪的尝试。**
+> **最终真机验证已恢复（2026-06-20）**：有效修复是 commit `9e6a8c15`
+> `Restore Eruda through native toggle path`。不要再把自动恢复改回 content script 直接 `toggle()`。
+> 本节保留完整踩坑记录，给「全新对话（无记忆）」防回退用。
 
-### 症状（真机可复现）
+### 原症状（已修）
 - 打开 Eruda 控制台后**刷新网页**：整页突然放大约一圈（视觉约 1.18×，≈1/0.85），页面按钮/布局
   挤错位，Eruda 入口按钮点不开，双指缩放也失效（缩不动）。
 - **不开 Eruda 只刷新**：完全正常，不放大。→ 触发与 Eruda 注入强相关。
-- 放大后**不会自恢复**（停留几秒、滚动都不回弹）。
+- 失败版本里放大后**不会自恢复**（停留几秒、滚动都不回弹）。
 
-### 关键事实
+### 最终根因 / 有效修复
+- Eruda 注入本身会让 GeckoView 发生一次瞬时放大；**手动打开 Eruda 也会放大**，但不到半秒会被拉回。
+- 真正差异不是 Eruda 参数、注入延迟、viewport meta、reflow，也不是简单 native layout nudge。
+- 手动路径是：用户点菜单 → `DevToolsHelper.toggle()` → `sendToggle(engineSession)` →
+  content script 收到 `{action:"toggle"}` → `toggle()`。
+- 旧自动恢复路径是：content script 在 `restoreUiSoon()` 里**直接调用 `toggle()`**。
+- 最终修复：自动恢复也必须先发 native message `restoreToggle`，再由原生 `DevToolsHelper` 调同一个
+  `sendToggle(engineSession)` 发回 content script。也就是强制走：
+  `content -> native restoreToggle -> native sendToggle -> content toggle`。
+- 这个 native → content round-trip 会复用手动菜单路径里的 GeckoView 原生调度/viewport 收敛点，真机已确认能恢复。
+
+### 关键事实 / 误导点
 - 放大幅度 ≈ 1/0.85，恰是 `EngineProvider.displayDensityOverride(deviceDensity*0.85f)` 的倒数，
   极具迷惑性——但密度已被证伪（见下）。
 - 多份分析（commit `c8e0d19e`）判断：**跳变纯发生在 GeckoView 原生 APZ 合成器层**，DOM 完全测不到
   （`window.devicePixelRatio` / `visualViewport.scale` 在跳变前后均**不变**）。这解释了为什么所有
   JS 侧修法都无效。
-  > ⚠️ **该结论本轮被质疑(尚待真机确认)**：当时只测了 `dpr` 和 `visualViewport.scale`——这两者对
-  > 「Gecko MobileViewportManager(MVM) 的布局视口/zoom-to-fit 重适配」**本就不变**;真正会变的是
-  > `window.innerWidth` / `documentElement.clientWidth`,**从没量过**。且捏合分辨率改变**不会**让点击
-  > 命中错位,而本 bug 有「触摸坐标整体错位」——这是**布局视口重适配**的特征,不是捏合 APZ。故新假设:
-  > 这是 **MVM/APZ 在 Eruda fixed/shadow host 注入后被扰动**导致的原生 viewport 状态跳变。
-  > 旧的 `BHZOOM` 几何日志、JS reflow/meta 收敛、注入后原生 viewport nudge 均已真机失败。
-- **最新真机反馈（2026-06-20）**：手动开 Eruda **也会瞬时放大**，但不到半秒会被原生侧拉回；
-  刷新后自动恢复会放大但**不会拉回**。所以差异不在“Eruda 是否触发放大”，而在手动路径后面多了一次
-  原生 UI/GeckoView viewport commit（菜单关闭、focus/layout/dynamic-toolbar 更新等）。
+  但不要再试图用普通 JS/API 去“重算回去”；已失败。
+- `displayDensityOverride(deviceDensity*0.85f)` 保留，和 bug 无关。
 
 ### 已真机证伪的假设（⛔ 不要再试这些）
 1. **`displayDensityOverride`（密度）无罪**：`c8e0d19e` 移除它后，自然密度下 Eruda 注入照样放大+错位
@@ -220,8 +225,13 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 6. **「早期求值 eruda bundle」是另一个独立 bug（已修，勿混淆）**：`6782ac0e` 删掉 phase-2 里 load 期间
    提前 `loadPageEruda`（fetch+求值 bundle+注入 @font-face）后，**手动开 Eruda 不再放大**；但**刷新恢复
    仍放大**。即：早期求值只解释了「手动开就放大」那一半，刷新放大是另一条线，至今未解。
+7. **Eruda `autoScale:false` 单独无效**：加 `autoScale:false` + `eruda.scale(1)` 后刷新自动恢复仍放大。
+   该改动低风险，当前保留，但它不是根因。
+8. **注入后原生 `viewportNudge` 无效**：`BaseBrowserFragment` 注册 callback 后做
+   `setDynamicToolbarMaxHeight(1)->0` + `requestFocus/requestLayout/invalidate`，真机仍放大且不回拉。
+   这证明手动回拉不是普通 layout commit，别再加大 nudge。
 
-### 当前代码状态（自动恢复改走 native → content toggle round-trip，待真机验证）
+### 当前有效代码状态（不要回退）
 - `core/utils.js`：两处 `eruda.init` 均 `useShadowDom:true` + `autoScale:false` + `eruda.scale(1)`。
 - `content.js` 阶段 3 `restoreUiSoon`：不再直接 `toggle()`；改为 `requestRestoreToggleViaNative()`。
   如果 native port 暂不可用，最多重试 5s；极端情况下才回退旧的直接 `toggle()`。
@@ -229,43 +239,145 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
   也就是复用手动菜单路径的 `native -> content action:"toggle"` 调度。
 - `BaseBrowserFragment.kt`：已撤掉失败的 `viewportNudge` / `setDynamicToolbarMaxHeight(1)->0` 实验。
 - `EngineProvider.kt:53`：`displayDensityOverride(deviceDensity*0.85f)` 保留。
-- **另一未跑的决定性实验**:页面**还在加载时**点工具栏 toggle(`DevToolsHelper.kt:107` port 未连→reload→
-  `pendingToggle`),让「手动」路径也经历一次 reload。若**这样也放大**→触发点是 **reload 本身**而非
-  `wasActive` 的 document_start 恢复路径,可不动自动恢复逻辑直接修。
 
-### 尚未尝试 / 候选方向
-- **iframe 隔离注入**：把 Eruda 塞进独立 `<iframe>` 文档，主页面布局/APZ 不受其 DOM 影响。注意 Eruda 需
-  hook 主页面 console/network，跨 frame 可行性需先验证。
-- **彻底不在刷新后自动恢复**：刷新后只留一个**自绘的小 light-DOM 按钮**（非 Eruda 容器），用户点它才走
-  「手动开」路径（手动路径已知不触发 bug）。代价：刷新后控制台不自动回来，需点一下。
-- **原生侧重置 APZ resolution**：注入后由 Kotlin 侧调 GeckoView API 强制把 resolution 重算回 1.0。
-  公开 API 是否存在待查（`PanZoomController` 未暴露 setResolution）。
-- **复现最小化**：先确认 bug 是否与 MITM 代理无关（应无关，密度结论里提过「代理不开也这样」）、是否所有站点都复现。
-
-### 新增根因候选（待真机验证）：Eruda 移动端 autoScale
+### 历史误判：Eruda 移动端 autoScale
 
 Eruda v3.4.3 的 `init()` 默认 `autoScale=true`；移动端会读取 `<meta name="viewport">` 的
 `initial-scale`，再执行 `scale(1 / initialScale)`。这个 scale 不只是 transform，而是 Eruda 内部 CSS
-管理器把所有注入样式里的 `px` 统一乘以该倍数。若 GeckoView 自动恢复路径下读到/等效得到 `0.85`，
-数值正好是症状里的 `1 / 0.85 ≈ 1.176`。这也是之前所有“时机 / meta / reflow / useShadowDom”尝试都
-可能无效的原因：真正触发点可能是 Eruda 自己的移动端缩放适配，而不是页面缩放 API。
-
-本轮补丁：
-- `core/utils.js`：两处 `eruda.init` 都加 `autoScale:false`，并在 init 后强制 `eruda.scale(1)`。
-- `content.js`：撤掉“刷新后不自动恢复 Eruda UI”的规避，恢复 load 后自动 `toggle()`，用来验证
-  `autoScale:false` 是否真正切断放大/错位。
-
-真机判定：
-- `autoScale:false` 单独已真机失败：刷新自动恢复仍放大。
-- `viewportNudge` 单独已真机失败：刷新自动恢复仍放大且不回拉。
-- 当前真正待验的是 **自动恢复也走 native -> content toggle round-trip**。若这次能回拉，根因就是
-  直接 JS toggle 绕过了手动路径里的 GeckoView 原生消息调度/viewport 收敛点。
+管理器把所有注入样式里的 `px` 统一乘以该倍数。这个机制一度看起来能解释 `1 / 0.85 ≈ 1.176`，
+但真机已证伪：`autoScale:false` 后自动恢复仍放大。保留该低风险设置即可，**不要再把它当根因**。
 
 ### 给新对话的研判提示
-- 别再赌「时机/viewport/滚动/密度」——这四条都已真机证伪。
-- 核心矛盾点已更新：**手动开也会瞬时触发放大，但能马上回拉；自动恢复不会回拉**。优先对齐手动路径
-  的 native/content 调度，再考虑 iframe 隔离或只恢复小按钮。
-- 验证任何新猜想前，先想清楚「它能否解释 DOM 测不到的原生 APZ 跳变」，否则大概率又是一次无效构建。
+- 别再赌「时机/viewport/滚动/密度/useShadowDom/autoScale/viewportNudge」。
+- 绝对不要把 `restoreUiSoon()` 改回直接 `toggle()`；自动恢复必须走 `restoreToggle -> sendToggle()`。
+- 以后若重构 `DevToolsHelper` 或 content native port，必须保留这条 round-trip，否则刷新恢复放大 bug 会回归。
+- 若未来这块又坏，第一检查项是：content 自动恢复有没有绕过 `DevToolsHelper.sendToggle(engineSession)`。
+
+## Codex Termux 0.140.0 源码分析与浏览器 Agent 计划
+
+> 记录时间：2026-06-20。目标不是把完整 Codex/Linux 容器塞进手机浏览器，而是借 Codex 的交互模型、
+> 事件协议、工具调度和审批机制，做一个真正进入 BrowserHelper 工作层的网页 Agent。
+
+### 源码与版本事实
+
+- 当前本机 `codex`：`codex-cli 0.140.0`，全局包为
+  `/data/data/com.termux/files/usr/lib/node_modules/@mmmbuto/codex-cli-termux`。
+- 该包不是 JS 源码实现，而是 npm wrapper + 原生 Rust ELF：
+  `bin/codex.js` / `bin/codex-exec.js` 包装 `bin/codex.bin` / `bin/codex-exec.bin`。
+  wrapper 主要负责 `CODEX_SELF_EXE`、`LD_LIBRARY_PATH`、以及把未知首参补成 `exec`。
+- 已下载并分析匹配当前版本的 Termux 定制源码：
+  `/data/data/com.termux/files/usr/tmp/codex-termux-v0.140.0`，
+  tag `v0.140.0`，commit `82ddfe61e663c68cb111ad8eeabfe96cd2a85b71`。
+- 源码仓库来自 `https://github.com/DioNanos/codex-termux`，Cargo workspace version 为 `0.140.0`。
+- `/data/data/com.termux/files/usr/lib/node_modules/codex-monorepo` 是旧的 `0.72.0` 源码树，只能作历史结构参考，
+  不能当当前 Codex Termux 版本分析依据。
+
+### Codex 架构结论
+
+- Codex 本体是 Rust core，不是一个可直接搬进浏览器的 JS 应用。真正核心在 `codex-rs/core`；
+  `cli`、`tui`、`exec`、`app-server` 都只是 core 外面的不同外壳。
+- CLI 入口：`codex-rs/cli/src/main.rs`。无子命令进入 `codex_tui::run_main(...)`；
+  `exec` / `review` 进入 `codex_exec::run_main(...)`；另有 `mcp-server`、`app-server`、
+  `remote-control`、`login/logout`、`sandbox` 等子命令。
+- 协议主干：`codex-rs/protocol/src/protocol.rs`。
+  客户端向 core 发 `Submission { id, op, ... }`，`Op` 包括 `UserInput`、`ThreadSettings`、
+  `ExecApproval`、`PatchApproval`、`RequestPermissionsResponse`、`Interrupt` 等。
+  core 向 UI 发 `EventMsg`，包括 `TurnStarted`、`TurnComplete`、`AgentMessage`、
+  `ExecCommandBegin/OutputDelta/End`、`ExecApprovalRequest`、`ApplyPatchApprovalRequest`、
+  `RequestUserInput`、`McpToolCallBegin/End` 等。
+- 审批是一等协议对象，不是 UI 临时弹窗。`protocol/src/approvals.rs` 里的
+  `ExecApprovalRequestEvent` 带 `call_id`、`approval_id`、`command`、`cwd`、`reason`、
+  `available_decisions`、`parsed_cmd` 等；`ReviewDecision` 明确区分 approve/deny/session/amendment/timeout。
+- Agent 循环在 `codex-rs/core/src/session/turn.rs`：收用户输入 → 构建 prompt/tools →
+  streaming 调模型 → 遇到 tool call 就交给 tool router 执行 → 把 tool output 写回 conversation history →
+  需要 follow-up 时继续下一轮采样。这是可复用的核心模式。
+- 工具系统在 `codex-rs/core/src/tools/*`：
+  `spec_plan.rs` 组装 shell/MCP/core/dynamic/extension/hosted tools；
+  `router.rs` 把模型函数调用转成内部 `ToolCall`；
+  `registry.rs` 调 handler；
+  `parallel.rs` 用读写锁控制可并行工具与互斥工具。
+- `code-mode` 在 Termux 版已经是真实 V8 runtime（不是 Android stub），提供 `execute/wait/terminate`
+  这种长任务 cell 语义。但浏览器本来就有 JS runtime，未来浏览器 Agent 应借它的“cell + wait + 嵌套工具”
+  语义，不要把 rusty_v8 或 native code-mode 搬进页面。
+- `login` / `AuthManager` 支持 API key、ChatGPT OAuth token、PAT 等，ChatGPT 后端基址在代码里是
+  `https://chatgpt.com/backend-api`，刷新 token 走 `https://auth.openai.com/oauth/token`。
+  这说明账号态是 native/CLI 侧 token 管理，不应把 token 暴露给页面 JS，也不应在网页 Agent 里伪造私有客户端请求。
+- `app-server` / `app-server-protocol` 比 Ratatui TUI 更适合作为 Web UI 参考：它已经把 thread/turn、
+  approval、auth status、tool request 等抽成 JSON-RPC 式协议。做浏览器工作台时优先参考 app-server protocol，
+  而不是照搬 terminal UI 代码。
+
+### Termux 定制版的关键差异
+
+- Android 登录用 `termux-open-url` 打开授权页。
+- npm launcher 做 `LD_LIBRARY_PATH` / `CODEX_SELF_EXE` 修正，ELF 侧做 `$ORIGIN` RUNPATH hardening。
+- Android 上恢复真实 code-mode / V8，`exec`/`wait` 可用。
+- 处理 Android/Termux 的 `flock`、`openpty`、OpenSSL、TLS roots 等运行时问题。
+- 这些 patch 解决的是“Codex 在 Termux CLI 跑起来”，不是“Codex 在浏览器页面里跑起来”。浏览器方案应复用协议和调度思想，
+  不是复用 Termux native 运行时。
+
+### BrowserHelper 现有工作层映射
+
+- `app/src/main/java/org/mozilla/reference/browser/devtools/BrowserBridge.kt` 已经是本项目的本地 MCP/Agent 网关：
+  提供 `page_index`、`page_search`、`page_query`、`page_exec`、`network_*`、`intercept_*`、
+  `cookie_reveal` 等工具，并通过 bearer token 暴露给外部 Codex/MCP。
+- `app/src/main/java/org/mozilla/reference/browser/devtools/PageChannel.kt` 是 native worker thread 到当前页面 content script
+  的异步桥，负责 timeout/fail-safe，适合承接浏览器 Agent 的 page tool 调用。
+- `app/src/main/assets/extensions/devtools_injector/agent.js` 已有 `bhHandleAgentCmd(msg)`：
+  `getSource` 只返回页面元信息并缓存 512KB source，`searchSource` 返回 snippet，
+  `queryDOM` 查 live DOM，`evalJS` 在 page world 执行 JS。
+- `app/src/main/java/org/mozilla/reference/browser/devtools/AgentConfirm.kt` 是 L3 敏感工具的 native 审批闸：
+  `cookie_reveal`、`page_exec` 必须由原生 UI 确认，模型/Termux 侧不能传 `confirmed=true` 绕过。
+- 这套基础已经比“从零把 Codex 塞进浏览器”更现实：现有 APK 负责页面能力、网络能力、敏感审批；
+  Agent 只需要接上事件循环、模型循环和 UI。
+
+### 可借用 / 不要搬运
+
+**可借用：**
+- Codex 的 thread/turn 生命周期：`TurnStarted` → reasoning/tool/agent events → `TurnComplete`。
+- `Op/EventMsg` 双向事件模型，把 UI、模型 loop、工具执行彻底解耦。
+- 审批对象结构：每次敏感调用有 `call_id`、理由、可选决策、超时/拒绝/本轮允许等状态。
+- Tool router/registry 思路：工具声明、参数 schema、risk level、并行/互斥能力分开。
+- Code-mode 的 cell 语义：长任务返回 session id，后续 `wait` 拉增量结果。
+- app-server protocol 的 web-friendly 方法形状。
+
+**不要搬运：**
+- 不要搬 Ratatui terminal UI；浏览器里只复刻交互模式：timeline、tool cell、审批弹窗、命令/工具状态。
+- 不要搬 shell/fs/git/sandbox/unified exec；本项目 Agent 的工具应是浏览器/页面/网络工具。
+- 不要为手机浏览器造 Linux 容器来跑完整 Codex；性能和维护成本都不合适。
+- 不要把 rusty_v8/native code-mode 塞进页面；浏览器已有 JS runtime。
+- 不要把 ChatGPT/Codex 私有后端请求伪造成网页 Agent 客户端；账号 token 不进 content script。
+
+### 落地计划
+
+1. **先做 Browser Agent UI shell**：在工作层里做 Codex 风格的 conversation timeline、底部输入框、
+   tool call cell、approval modal、tool output 折叠块。先接本地 mock event bus，不急着接模型。
+2. **定义 Browser Agent 协议**：参考 Codex `Op/EventMsg`，但工具域换成浏览器能力：
+   `page_index/search/query/exec`、`network_list/get`、`intercept_set/pending/resolve`、
+   `storage/cookie` 等。thread/turn 可先存 IndexedDB 或 native SharedPreferences/db。
+3. **实现工具注册表**：在 JS/TS 或 Kotlin 侧做 tool registry/router，工具声明包含 schema、risk level、
+   是否可并行、timeout、输出裁剪策略。L1 只读，L2 改页面/网络配置，L3 读 cookie/auth 或执行任意 JS。
+4. **保留原生 L3 审批铁律**：`page_exec`、`cookie_reveal`、后续 auth/storage 高危工具必须走
+   `AgentConfirm` 原生弹窗。审批结果只能由 native 产生，不能由模型消息或页面 JS 伪造。
+5. **模型循环分两条路**：
+   - 外部 Codex/MCP 路线：继续用 `BrowserBridge.kt` 暴露 MCP，让现有 Codex Termux 调浏览器工具。
+   - 内置 Agent 路线：在允许的 API/auth 边界内调用模型，复用 Codex 的 event/tool/approval 模式；
+     不模拟私有 ChatGPT/Codex 内部请求，不把 refresh/access token 下放页面。
+6. **把占位插件升级为真实入口**：`extensions/presets/index.js` 里的“网页 Agent”从占位 log 变成工作台按钮/面板，
+   插件 loader 只负责启停和配置，真正执行仍走 BrowserBridge/PageChannel/AgentConfirm。
+7. **测试与验证**：
+   - 单测协议 reducer、tool schema、risk level gating。
+   - 集成测 `PageChannel` timeout/fail-safe、`AgentConfirm` deny/timeout fail-closed。
+   - 用本地测试页做 `page_query` / `page_exec` / network/intercept e2e。
+   - 验证模型 transcript 不出现原始 cookie/auth header；只能出现占位符或用户明确批准后的最小结果。
+
+### 硬边界
+
+- L3 审批只能来自 native UI；模型、页面、Termux 端都不能自证已批准。
+- 原始 cookie/auth/header 不进模型上下文；继续用 APK 内部占位符解析，例如 `{{cookie:<flowId>}}`。
+- 页面源码仍保持“缓存 + 搜索 snippet + DOM query”，不要把整页 HTML 默认塞进模型。
+- Agent transport 尽量独立于 Eruda 注入生命周期；早期可以复用 DevTools content port，但最终工作台应避免
+  因 Eruda toggle/refresh 恢复影响 Agent 通道。
+- 任何“魔改 Codex”只应借开源架构和 UI/协议思想；OAuth/token 管理边界不碰，不做绕过认证或伪装私有客户端的实现。
 
 ## 持久化
 
@@ -344,6 +456,8 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 
 ### 3. Current Stable State
 - ✅ 真机验证：请求抓包、响应抓包、请求体、响应体（含 chunked+gzip/deflate/br）、请求拦截、响应拦截、过滤、字符替换、插件框架（截流 v0.1）。
+- ✅ 真机验证：Eruda 刷新自动恢复放大/错位已修。最终有效点是自动恢复走
+  `restoreToggle -> DevToolsHelper.sendToggle(engineSession) -> content action:"toggle"`，不要改回直接 JS `toggle()`。
 - 🟡 已实现 CI 绿、待真机：按类拦截拆分（遥测/噪音/cookie 三独立开关）、原生 Mock、原生弱网、冷启动自动续开代理、改名。
 
 ### 4. Remaining Work
@@ -360,9 +474,7 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 - **插件**：插件=配置下发方，原生=唯一执行方。
 
 ### 6. Known Bugs
-- **🔴 未解决：开 Eruda 后刷新页面 → 整页放大一圈 + 按钮错位 + 控制台点不开 + 缩放失效。** 多次尝试未修，
-  完整排查记录（症状/已证伪假设/当前状态/候选方向）见上文「## ⚠️ 未解决 Bug：开 Eruda 后刷新页面」一节。
-  要点：跳变在原生 APZ 合成器层（DOM 测不到），密度/时机/viewport/滚动/useShadowDom 均已真机证伪。
+- 开 Eruda 后刷新页面放大/错位：**已解决**，历史排查和防回退说明见上文「## ✅ 已解决 Bug：开 Eruda 后刷新页面」。
 - 多 tab 归属粗糙（MITM 不知发起 tab；「只看本页」靠 host+Origin/Referer 启发式）。
 - chunked 替换降级时关连接重载。
 - 新特性未真机。
@@ -370,6 +482,9 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 
 ### 7. Historical Pitfalls
 - **坑#4（最重要）**：MITM 不要做完整 HTTP/1.1 解析/整体缓冲。问题=把盲转发换成按 Content-Length/chunked 整体重组 + 强制 identity；原因=真实流量(keep-alive/chunked/流式/WebSocket/h2-tunnel)错帧或阻塞；结论=开代理后页面加载不出来+Eruda 打不开，只能用「解密后双向 pump」，新功能旁路增量加。
+- **坑#5（Eruda 刷新恢复最重要）**：刷新自动恢复 Eruda **不能**在 content script 里直接 `toggle()`。
+  必须走 `requestRestoreToggleViaNative()` → native `restoreToggle` → `DevToolsHelper.sendToggle(engineSession)` →
+  content 收 `{action:"toggle"}`。直接 JS toggle 会让页面放大后不回拉；native round-trip 真机恢复。
 - **Accept-Encoding 修改风险**：强制 identity 请求头触发错帧，不改。
 - **整体缓冲卡死**：流式/SSE/无 CL 缓冲会卡死，只允许小/有界/文档型缓冲。
 - **reimportEnterpriseRoots 争议**：曾误判页面打不开是删了它，真凶是完整 HTTP 解析；它只影响能否解密/信任，不影响页面加载；每次开代理 false→true 重抓系统 CA，**勿删**。
@@ -399,14 +514,15 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 ### 10. Current Branch Status
 - 分支 `main`（PR→`master`），CI 仓库 `haoyangtu09-art/BrowserHelper-Gecko`。
 - 正在开发：按类拦截拆分 + 原生 Mock + 原生弱网 + 冷启动续开 + 改名（收尾）。
-- 最近成功：核心功能真机验证；最新两 commit CI 绿，APK `BrowserHelper-Gecko-07fbd65a-arm64.apk` 已下载。
+- 最近成功：核心功能真机验证；Eruda 刷新自动恢复放大/错位已由 `9e6a8c15`
+  `Restore Eruda through native toggle path` 真机恢复，APK `BrowserHelper-Gecko-9e6a8c15-arm64.apk` 已下载。
 - 最近失败：无构建失败；唯一未完成=新特性待真机。
 - 最值得推进：① 真机验证 5 项新特性；② 验证后 mock/弱网做成插件预设；③ 落地占位插件。
 
 ## B. 精简版 Handoff
 > 核心模型：`ProxyProbe.kt`(Kotlin object) = 本地 TLS 终止 MITM，解密+双向盲转发，绝不完整 HTTP 解析/整体缓冲（坑#4：页面加载不出来+Eruda 打不开）。功能在 pump 上旁路 tee/受控有界缓冲/fail-open 暂停增量加。数据流：请求 `Browser→MITM→ProxyProbe→DevToolsHelper→proxy-feed→panel`；响应 `Server→MITM→ProxyProbe→proxy-feed→panel`。page-world 拦截器已删，原生代理唯一数据源。
 > 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流。已实现待真机：按类拦截(遥测/噪音/cookie 三开关 gating `isLowValueUrl`)、原生 Mock(`matchMock`+`buildMockResponse`+`Connection:close`，仅有界)、原生弱网(`ThrottledOutputStream` write-through+逐响应延迟)、冷启动续开(`proxy_enabled`+新端口)、改名。
-> 铁律：①不碰 pump 模型 ②不改请求 Accept-Encoding ③流式/SSE/WS/无 CL 一律放行不缓冲 ④叶子 issuer 用根 subject 精确 DER ⑤`reimportEnterpriseRoots` 勿删（与页面加载无关）⑥冷启动续开新端口勿改回直连 ⑦面板编辑走 light-DOM `openEditOverlay`。
+> 铁律：①不碰 pump 模型 ②不改请求 Accept-Encoding ③流式/SSE/WS/无 CL 一律放行不缓冲 ④叶子 issuer 用根 subject 精确 DER ⑤`reimportEnterpriseRoots` 勿删（与页面加载无关）⑥冷启动续开新端口勿改回直连 ⑦面板编辑走 light-DOM `openEditOverlay` ⑧Eruda 刷新自动恢复必须走 native `restoreToggle -> sendToggle`，勿改回 content 直接 `toggle()`。
 > 持久化：面板 `storage.local:bhNetConfig/bhNetReplaceRules/bhNetInterceptRules`；原生 `SharedPreferences("bh_devtools")`:`replace_config/intercept_config/sse_hold_config/mock_config/throttle_config/proxy_enabled`。
 > 验证：JS 跑 `node --check` 每文件 + manifest 顺序拼接；Kotlin 仅 CI 编译(allWarningsAsErrors)；APK 名带 commit SHA。下一步：真机验证 5 项新特性。
 
@@ -426,6 +542,7 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 
 【当前状态】
 - 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流插件。
+- 已稳定(真机)：Eruda 刷新自动恢复放大/错位已修，靠 native `restoreToggle -> sendToggle` 往返。
 - 已实现待真机(77545f35/07fbd65a,CI 绿)：按类拦截拆分、原生 Mock、原生弱网、
   冷启动自动续开代理、改名。首要任务通常是协助真机验证这 5 项，而非新开特性。
 
@@ -440,6 +557,8 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 · 不删 reimportEnterpriseRoots（信任链必需），但页面加载卡死先查 pump，别先怀疑证书。
 · 冷启动保持「按 proxy_enabled 意图续开新端口」，绝不改回一律直连。
 · 面板可编辑控件走 light-DOM openEditOverlay()，勿放 Eruda shadow root（IME 丢焦）。
+· Eruda 刷新自动恢复绝不直接 content `toggle()`；必须走
+  `requestRestoreToggleViaNative()` → native `restoreToggle` → `DevToolsHelper.sendToggle(engineSession)`。
 · DevTools 是 MV2 普通 content script（非 ES module），17 个 JS manifest 顺序拼接
   共享全局，content.js 必须最后，新增模块同步改 manifest。
 

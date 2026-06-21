@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -42,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -50,6 +52,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.R
+import org.mozilla.reference.browser.agent.ui.theme.AgentColors
+import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 
 /**
  * Floating Agent UI: a pure-white draggable ball (snaps to the nearest edge with an
@@ -63,12 +67,15 @@ fun OverlayRoot(
     expanded: Boolean,
     anchorRight: Boolean,
     dimmed: Boolean,
+    panelWidthDp: Float,
+    panelHeightDp: Float,
     onExpand: () -> Unit,
     onCollapse: () -> Unit,
     onWake: () -> Unit,
     onBallDrag: (Float, Float) -> Unit,
     onBallDragEnd: () -> Unit,
     onPanelDrag: (Float, Float) -> Unit,
+    onPanelResize: (Float, Float) -> Unit,
 ) {
     AnimatedContent(
         targetState = expanded,
@@ -90,7 +97,13 @@ fun OverlayRoot(
         label = "overlay",
     ) { isExpanded ->
         if (isExpanded) {
-            AgentPanel(onCollapse = onCollapse, onPanelDrag = onPanelDrag)
+            AgentPanel(
+                widthDp = panelWidthDp,
+                heightDp = panelHeightDp,
+                onCollapse = onCollapse,
+                onPanelDrag = onPanelDrag,
+                onPanelResize = onPanelResize,
+            )
         } else {
             AgentBall(
                 dimmed = dimmed,
@@ -117,7 +130,7 @@ private fun AgentBall(
     Box(
         modifier = Modifier
             .padding(6.dp)
-            .size(42.dp)
+            .size(49.dp)
             .graphicsLayer { alpha = ballAlpha }
             // A non-consuming down observer so even a parked/dimmed ball wakes the
             // instant it is touched, before the tap/drag detectors below decide.
@@ -142,12 +155,13 @@ private fun AgentBall(
         contentAlignment = Alignment.Center,
     ) {
         // Inner solid white disc carrying the agent glyph; sized to meet the ring's
-        // inner edge (ring 42 − 2×5 border) so there is no gap and the ring's stroke
-        // still shows outside the disc against the page behind it.
+        // inner edge (ring 49 − 2×5 border) so there is no gap and the ring's stroke
+        // still shows outside the disc against the page behind it. A large-radius
+        // squircle (not a perfect circle) per the requested ball outline.
         Box(
             modifier = Modifier
-                .size(32.dp)
-                .clip(CircleShape)
+                .size(39.dp)
+                .clip(AgentShapes.Squircle)
                 .background(Color.White),
             contentAlignment = Alignment.Center,
         ) {
@@ -157,30 +171,37 @@ private fun AgentBall(
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .padding(5.dp)
-                    .size(22.dp),
+                    .size(26.dp),
             )
         }
-        // Outer semi-transparent white ring (stroke only), thick and hugging the ball.
+        // Outer semi-transparent white ring (stroke only); width/color unchanged per
+        // request ("最外层那条线不要动"), but follows the squircle outline now.
         Box(
             modifier = Modifier
-                .size(42.dp)
-                .border(width = 5.dp, color = Color(0x80FFFFFF), shape = CircleShape),
+                .size(49.dp)
+                .border(width = 5.dp, color = Color(0x80FFFFFF), shape = AgentShapes.Squircle),
         )
     }
 }
 
 @Composable
 private fun AgentPanel(
+    widthDp: Float,
+    heightDp: Float,
     onCollapse: () -> Unit,
     onPanelDrag: (Float, Float) -> Unit,
+    onPanelResize: (Float, Float) -> Unit,
 ) {
+    val shape = RoundedCornerShape(28.dp)
     Box(
         modifier = Modifier
             .padding(8.dp)
-            .clip(RoundedCornerShape(28.dp))
+            .width(widthDp.dp)
+            .height(heightDp.dp)
+            .clip(shape)
             .background(Color.White)
-            .width(320.dp)
-            .height(520.dp),
+            // Faint gray inset stroke hugging the rounded edge.
+            .border(1.dp, AgentColors.HairlineFaint, shape),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Window chrome zone: blue drag handle (center) + collapse minus (end).
@@ -257,6 +278,44 @@ private fun AgentPanel(
 
             // Chat surface + internal navigation (drawer / settings / model selector).
             AgentPanelHost(modifier = Modifier.weight(1f))
+        }
+        // Bottom-right resize grip: drag to change panel width/height (handled natively).
+        ResizeHandle(
+            modifier = Modifier.align(Alignment.BottomEnd),
+            onResize = onPanelResize,
+        )
+    }
+}
+
+/** A small diagonal grip in the panel's bottom-right corner; dragging resizes the window. */
+@Composable
+private fun ResizeHandle(modifier: Modifier, onResize: (Float, Float) -> Unit) {
+    Box(
+        modifier = modifier
+            .padding(4.dp)
+            .size(24.dp)
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    onResize(dragAmount.x, dragAmount.y)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(14.dp)) {
+            val sw = size.minDimension * 0.10f
+            drawLine(
+                AgentColors.Hairline,
+                Offset(size.width, size.height * 0.32f),
+                Offset(size.width * 0.32f, size.height),
+                sw, StrokeCap.Round,
+            )
+            drawLine(
+                AgentColors.Hairline,
+                Offset(size.width, size.height * 0.7f),
+                Offset(size.width * 0.7f, size.height),
+                sw, StrokeCap.Round,
+            )
         }
     }
 }

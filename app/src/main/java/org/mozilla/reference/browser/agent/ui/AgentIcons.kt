@@ -59,19 +59,34 @@ fun ChatBubbleIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color
 @Composable
 fun PenSquareIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color = Color(0xFF111111)) {
     Canvas(modifier.size(size)) {
-        val sw = this.size.minDimension * 0.09f
         val w = this.size.width
         val h = this.size.height
-        // Open square (bottom-left bracket) + a pen diagonal across the top-right.
-        val square = Path().apply {
-            moveTo(w * 0.78f, h * 0.20f)
-            lineTo(w * 0.20f, h * 0.20f)
-            lineTo(w * 0.20f, h * 0.80f)
-            lineTo(w * 0.80f, h * 0.80f)
-            lineTo(w * 0.80f, h * 0.46f)
+        val sw = this.size.minDimension * 0.085f
+        // Feather "square-pen": map the 0..24 viewBox onto the canvas.
+        fun p(x: Float, y: Float) = Offset(x / 24f * w, y / 24f * h)
+        // Open rounded frame (top-right corner left open for the pen):
+        // M11 4 H4 a2 2 0 0 0 -2 2 V20 a2 2 0 0 0 2 2 H18 a2 2 0 0 0 2 -2 V13
+        val frame = Path().apply {
+            moveTo(p(11f, 4f).x, p(11f, 4f).y)
+            lineTo(p(6f, 4f).x, p(6f, 4f).y)
+            quadraticBezierTo(p(4f, 4f).x, p(4f, 4f).y, p(4f, 6f).x, p(4f, 6f).y)
+            lineTo(p(4f, 18f).x, p(4f, 18f).y)
+            quadraticBezierTo(p(4f, 20f).x, p(4f, 20f).y, p(6f, 20f).x, p(6f, 20f).y)
+            lineTo(p(18f, 20f).x, p(18f, 20f).y)
+            quadraticBezierTo(p(20f, 20f).x, p(20f, 20f).y, p(20f, 18f).x, p(20f, 18f).y)
+            lineTo(p(20f, 13f).x, p(20f, 13f).y)
         }
-        drawPath(square, color, style = Stroke(width = sw, cap = StrokeCap.Round))
-        drawLine(color, Offset(w * 0.52f, h * 0.50f), Offset(w * 0.86f, h * 0.16f), sw, StrokeCap.Round)
+        drawPath(frame, color, style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+        // Pen quill: M18.5 2.5 a2.12 2.12 0 0 1 3 3 L12 15 l-4 1 1-4 Z
+        val pen = Path().apply {
+            moveTo(p(18.5f, 2.5f).x, p(18.5f, 2.5f).y)
+            quadraticBezierTo(p(21.5f, 2.5f).x, p(21.5f, 2.5f).y, p(21.5f, 5.5f).x, p(21.5f, 5.5f).y)
+            lineTo(p(12f, 15f).x, p(12f, 15f).y)
+            lineTo(p(8f, 16f).x, p(8f, 16f).y)
+            lineTo(p(9f, 12f).x, p(9f, 12f).y)
+            close()
+        }
+        drawPath(pen, color, style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
     }
 }
 
