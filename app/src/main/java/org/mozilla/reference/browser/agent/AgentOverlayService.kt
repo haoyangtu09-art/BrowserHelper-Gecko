@@ -4,6 +4,7 @@
 
 package org.mozilla.reference.browser.agent
 
+import android.animation.ValueAnimator
 import android.app.Service
 import android.content.ContentValues
 import android.content.Context
@@ -14,6 +15,7 @@ import android.os.IBinder
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import java.io.File
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +25,9 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import org.mozilla.reference.browser.agent.ui.OverlayRoot
 import kotlin.math.roundToInt
+
+// Panel composable total width: 320dp content + 8dp outer padding on each side.
+private const val PANEL_TOTAL_DP = 336f
 
 /**
  * Hosts the floating Agent UI in a single WindowManager overlay window.
@@ -41,6 +46,8 @@ class AgentOverlayService : Service() {
     private var lifecycleOwner: OverlayLifecycleOwner? = null
 
     private val expandedState = mutableStateOf(false)
+    private val anchorRightState = mutableStateOf(false)
+    private var snapAnimator: ValueAnimator? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -106,11 +113,12 @@ class AgentOverlayService : Service() {
             setContent {
                 OverlayRoot(
                     expanded = expandedState.value,
+                    anchorRight = anchorRightState.value,
                     onExpand = { setExpanded(true) },
                     onCollapse = { setExpanded(false) },
-                    onDrag = { dx, dy -> moveBy(dx, dy) },
-                    onDragEnd = { snapToEdge() },
-                    onClose = { stopSelf() },
+                    onBallDrag = { dx, dy -> moveBy(dx, dy) },
+                    onBallDragEnd = { snapToEdge() },
+                    onPanelDrag = { dx, dy -> movePanelBy(dx, dy) },
                 )
             }
         }
@@ -156,24 +164,57 @@ class AgentOverlayService : Service() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
 
     private fun setExpanded(expanded: Boolean) {
-        expandedState.value = expanded
         val lp = params ?: return
-        lp.flags = if (expanded) expandedFlags() else collapsedFlags()
         if (expanded) {
-            // Anchor the panel near the top so it stays fully on screen.
-            lp.x = 0
+            cancelSnap()
+            val screenW = resources.displayMetrics.widthPixels
+            val ballCenter = lp.x + (root?.width ?: 0) / 2
+            val toRight = ballCenter >= screenW / 2
+            anchorRightState.value = toRight
+            expandedState.value = true
+            lp.flags = expandedFlags()
+            // Open on the side the ball sits on, anchored near the top so it stays fully on screen.
+            val panelW = (PANEL_TOTAL_DP * resources.displayMetrics.density).roundToInt()
+            lp.x = if (toRight) (screenW - panelW).coerceAtLeast(0) else 0
             lp.y = (resources.displayMetrics.heightPixels * 0.12f).roundToInt()
+            safeUpdate()
+        } else {
+            expandedState.value = false
+            lp.flags = collapsedFlags()
+            safeUpdate()
+            // Let the collapse animation finish (so the window has shrunk back to the
+            // ball) before sliding the ball onto the edge it was anchored to. Snapping by
+            // measured center would pick the wrong edge for a right-anchored panel, so use
+            // the stored anchor side directly.
+            val toRight = anchorRightState.value
+            root?.postDelayed({
+                if (expandedState.value) return@postDelayed
+                val screenW = resources.displayMetrics.widthPixels
+                val ballW = root?.width ?: 0
+                val target = if (toRight) (screenW - ballW).coerceAtLeast(0) else 0
+                animateBallX(params?.x ?: 0, target)
+            }, 200L)
         }
-        safeUpdate()
     }
 
     private fun moveBy(dx: Float, dy: Float) {
         if (expandedState.value) return
+        cancelSnap()
+        moveWindowBy(dx, dy)
+    }
+
+    /** Drag the expanded panel freely (no edge snapping). */
+    private fun movePanelBy(dx: Float, dy: Float) {
+        if (!expandedState.value) return
+        moveWindowBy(dx, dy)
+    }
+
+    private fun moveWindowBy(dx: Float, dy: Float) {
         val lp = params ?: return
         lp.x += dx.roundToInt()
         lp.y += dy.roundToInt()
-        val maxX = resources.displayMetrics.widthPixels
-        val maxY = resources.displayMetrics.heightPixels
+        val maxX = (resources.displayMetrics.widthPixels - (root?.width ?: 0)).coerceAtLeast(0)
+        val maxY = (resources.displayMetrics.heightPixels - (root?.height ?: 0)).coerceAtLeast(0)
         lp.x = lp.x.coerceIn(0, maxX)
         lp.y = lp.y.coerceIn(0, maxY)
         safeUpdate()
@@ -184,8 +225,34 @@ class AgentOverlayService : Service() {
         val lp = params ?: return
         val screenW = resources.displayMetrics.widthPixels
         val viewW = root?.width ?: 0
-        lp.x = if (lp.x + viewW / 2 < screenW / 2) 0 else (screenW - viewW)
-        safeUpdate()
+        val target = if (lp.x + viewW / 2 < screenW / 2) 0 else (screenW - viewW).coerceAtLeast(0)
+        animateBallX(lp.x, target)
+    }
+
+    /** Animate the collapsed ball window's x to the snapped edge. */
+    private fun animateBallX(from: Int, to: Int) {
+        cancelSnap()
+        if (from == to) return
+        val anim = ValueAnimator.ofInt(from, to).apply {
+            duration = 240
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { a ->
+                if (expandedState.value) {
+                    cancel()
+                    return@addUpdateListener
+                }
+                val lp = params ?: return@addUpdateListener
+                lp.x = a.animatedValue as Int
+                safeUpdate()
+            }
+        }
+        snapAnimator = anim
+        anim.start()
+    }
+
+    private fun cancelSnap() {
+        snapAnimator?.cancel()
+        snapAnimator = null
     }
 
     private fun safeUpdate() {
@@ -199,6 +266,7 @@ class AgentOverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cancelSnap()
         root?.let { container ->
             try {
                 windowManager.removeView(container)
