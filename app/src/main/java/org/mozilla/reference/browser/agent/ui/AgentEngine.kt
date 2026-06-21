@@ -462,7 +462,7 @@ class AgentEngine(context: Context) {
                 val reply = ChatBackend.of(config.format).complete(config.copy(maxTokens = 180), msgs, emptyList(), null)
                 val summary = cleanGeneratedText(reply.content).take(4000)
                 if (summary.isNotBlank()) {
-                    state.setMemorySummary(summary)
+                    state.updateMemorySummary(summary)
                 } else {
                     state.memorySummaryError = "模型没有返回摘要。"
                 }

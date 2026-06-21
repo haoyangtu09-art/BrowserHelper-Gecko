@@ -530,7 +530,7 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
                 ) {
                     BasicTextField(
                         value = state.memorySummary,
-                        onValueChange = { state.setMemorySummary(it) },
+                        onValueChange = { state.updateMemorySummary(it) },
                         singleLine = false,
                         textStyle = AgentText.Body,
                         cursorBrush = SolidColor(AgentColors.Accent),
@@ -752,7 +752,7 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BasicText("智能", style = AgentText.Title)
                 Spacer(Modifier.weight(1f))
-                PermissionSlider(state.permTier) { state.setPermTier(it) }
+                PermissionSlider(state.permTier) { state.selectPermTier(it) }
             }
             Spacer(Modifier.height(10.dp))
             ReasonTier.values().forEach { tier ->

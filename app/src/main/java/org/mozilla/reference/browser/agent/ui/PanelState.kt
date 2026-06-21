@@ -174,7 +174,7 @@ class PanelState {
         onPersist?.invoke()
     }
 
-    fun setMemorySummary(value: String) {
+    fun updateMemorySummary(value: String) {
         memorySummary = value.take(4000)
         memorySummaryError = ""
         persist()
@@ -222,7 +222,7 @@ class PanelState {
      * but if a conversation is already underway we also drop an explicit note into the
      * transcript so the model sees the change without needing a fresh conversation.
      */
-    fun setPermTier(tier: PermTier) {
+    fun selectPermTier(tier: PermTier) {
         if (permTier == tier) {
             persist()
             return
