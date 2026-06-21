@@ -29,11 +29,13 @@ import kotlin.math.roundToInt
 // Outer padding around the panel composable (8dp each side → 16dp total).
 private const val PANEL_PADDING_DP = 16f
 
-// Default / minimum panel content size (resize is clamped to these and the screen).
-private const val DEFAULT_PANEL_W_DP = 320f
-private const val DEFAULT_PANEL_H_DP = 520f
-private const val MIN_PANEL_W_DP = 260f
-private const val MIN_PANEL_H_DP = 360f
+// Base (scale = 1f) panel content size in dp; must match OverlayRoot's PANEL_BASE_*_DP.
+// The panel is laid out at this size and uniformly scaled, so one factor resizes the
+// whole UI. Resize is clamped between MIN/MAX scale and the screen bounds.
+private const val PANEL_BASE_W_DP = 320f
+private const val PANEL_BASE_H_DP = 520f
+private const val MIN_PANEL_SCALE = 0.75f
+private const val MAX_PANEL_SCALE = 1.6f
 
 // Ball composable total width: 49dp disc + 6dp outer padding on each side.
 private const val BALL_TOTAL_DP = 61f
@@ -60,8 +62,7 @@ class AgentOverlayService : Service() {
     private val expandedState = mutableStateOf(false)
     private val anchorRightState = mutableStateOf(false)
     private val dimmedState = mutableStateOf(false)
-    private val panelWidthState = mutableStateOf(DEFAULT_PANEL_W_DP)
-    private val panelHeightState = mutableStateOf(DEFAULT_PANEL_H_DP)
+    private val panelScaleState = mutableStateOf(1f)
     private var snapAnimator: ValueAnimator? = null
     private var idleHidden = false
     private val idleRunnable = Runnable { enterIdle() }
@@ -132,8 +133,7 @@ class AgentOverlayService : Service() {
                     expanded = expandedState.value,
                     anchorRight = anchorRightState.value,
                     dimmed = dimmedState.value,
-                    panelWidthDp = panelWidthState.value,
-                    panelHeightDp = panelHeightState.value,
+                    panelScale = panelScaleState.value,
                     onExpand = { setExpanded(true) },
                     onCollapse = { setExpanded(false) },
                     onWake = { wake() },
@@ -200,7 +200,7 @@ class AgentOverlayService : Service() {
             expandedState.value = true
             lp.flags = expandedFlags()
             // Open on the side the ball sits on, anchored near the top so it stays fully on screen.
-            val panelW = ((panelWidthState.value + PANEL_PADDING_DP) * resources.displayMetrics.density).roundToInt()
+            val panelW = ((PANEL_BASE_W_DP * panelScaleState.value + PANEL_PADDING_DP) * resources.displayMetrics.density).roundToInt()
             lp.x = if (toRight) (screenW - panelW).coerceAtLeast(0) else 0
             lp.y = (resources.displayMetrics.heightPixels * 0.12f).roundToInt()
             safeUpdate()
@@ -285,25 +285,27 @@ class AgentOverlayService : Service() {
     }
 
     /**
-     * Resize the expanded panel from its bottom-right grip. Width/height are kept in dp
-     * state (the WRAP_CONTENT window follows the composable's measured size). For a
-     * right-anchored panel the window's left edge is shifted so the right edge stays
-     * pinned to where the panel opened.
+     * Resize the expanded panel from its bottom-right grip with a single uniform scale
+     * factor, so the whole UI (floating buttons, text, input) grows/shrinks together.
+     * The diagonal drag amount drives the scale; it is clamped to MIN/MAX and the screen
+     * bounds. For a right-anchored panel the window's left edge is shifted so the right
+     * edge stays pinned to where the panel opened.
      */
     private fun resizePanelBy(dx: Float, dy: Float) {
         if (!expandedState.value) return
         val density = resources.displayMetrics.density
         val screenW = resources.displayMetrics.widthPixels / density
         val screenH = resources.displayMetrics.heightPixels / density
-        val maxW = (screenW - PANEL_PADDING_DP).coerceAtLeast(MIN_PANEL_W_DP)
-        val maxH = (screenH - PANEL_PADDING_DP).coerceAtLeast(MIN_PANEL_H_DP)
-        val oldW = panelWidthState.value
-        val newW = (oldW + dx / density).coerceIn(MIN_PANEL_W_DP, maxW)
-        val newH = (panelHeightState.value + dy / density).coerceIn(MIN_PANEL_H_DP, maxH)
-        panelWidthState.value = newW
-        panelHeightState.value = newH
+        val maxScaleW = (screenW - PANEL_PADDING_DP) / PANEL_BASE_W_DP
+        val maxScaleH = (screenH - PANEL_PADDING_DP) / PANEL_BASE_H_DP
+        val maxScale = minOf(MAX_PANEL_SCALE, maxScaleW, maxScaleH).coerceAtLeast(MIN_PANEL_SCALE)
+        val oldScale = panelScaleState.value
+        // Use the dominant drag axis (average) over the base width to derive a scale delta.
+        val deltaScale = ((dx + dy) / 2f / density) / PANEL_BASE_W_DP
+        val newScale = (oldScale + deltaScale).coerceIn(MIN_PANEL_SCALE, maxScale)
+        panelScaleState.value = newScale
         if (anchorRightState.value) {
-            val deltaPx = ((newW - oldW) * density).roundToInt()
+            val deltaPx = (PANEL_BASE_W_DP * (newScale - oldScale) * density).roundToInt()
             val lp = params ?: return
             lp.x = (lp.x - deltaPx).coerceAtLeast(0)
             safeUpdate()

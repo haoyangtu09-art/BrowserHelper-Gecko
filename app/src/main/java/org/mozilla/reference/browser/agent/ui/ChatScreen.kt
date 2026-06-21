@@ -4,13 +4,22 @@
 
 package org.mozilla.reference.browser.agent.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,14 +47,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
-import org.mozilla.reference.browser.agent.ui.theme.AgentElevation
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 import org.mozilla.reference.browser.agent.ui.theme.AgentText
 
@@ -64,7 +71,9 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    Column(modifier.fillMaxSize()) {
+    var showUpload by remember { mutableStateOf(false) }
+    Box(modifier.fillMaxSize()) {
+      Column(Modifier.fillMaxSize()) {
         // Conversation fills the area; the top bar floats above it as white buttons, so
         // messages scroll underneath and only the buttons occlude the context.
         Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -103,7 +112,20 @@ fun ChatScreen(
                 )
             }
         }
-        InputBar(state)
+        InputBar(state, onPlusClick = { showUpload = !showUpload })
+      }
+      // Plus opens a floating sheet that slides up from the bottom (camera/photo/file/plugin).
+      if (showUpload) {
+          Box(Modifier.fillMaxSize().clickable { showUpload = false })
+      }
+      AnimatedVisibility(
+          visible = showUpload,
+          enter = slideInVertically { it } + fadeIn(),
+          exit = slideOutVertically { it } + fadeOut(),
+          modifier = Modifier.align(Alignment.BottomCenter),
+      ) {
+          UploadSheet(onPick = { showUpload = false })
+      }
     }
 }
 
@@ -117,19 +139,19 @@ private fun ChatTopBar(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+        modifier = modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Left: hamburger menu, then the "Agent" capsule right beside it — both white
         // floating buttons hovering over the conversation.
-        FloatingCircleButton(onClick = onOpenDrawer) { MenuLinesIcon(color = AgentColors.TextPrimary) }
+        FloatingCircleButton(onClick = onOpenDrawer) { MenuLinesIcon(color = AgentColors.TextPrimary, size = 18.dp) }
         Spacer(Modifier.width(8.dp))
         FloatingPill(onClick = onOpenModels) { BasicText("Agent", style = AgentText.Title) }
         Spacer(Modifier.weight(1f))
         if (state.messages.isEmpty()) {
             FloatingCircleButton(onClick = { state.tempChat = !state.tempChat }) {
                 Box(contentAlignment = Alignment.Center) {
-                    ChatBubbleIcon(color = AgentColors.TextPrimary)
+                    ChatBubbleIcon(color = AgentColors.TextPrimary, size = 18.dp)
                     if (state.tempChat) {
                         Box(
                             Modifier.size(12.dp).clip(CircleShape).background(AgentColors.Accent),
@@ -148,13 +170,13 @@ private fun ChatTopBar(
     }
 }
 
-/** White circular button with a soft drop shadow so it reads as floating over content. */
+/** White circular button. No shadow — it reads as floating purely by being whiter than
+ *  the off-white Surface behind it. */
 @Composable
 private fun FloatingCircleButton(onClick: () -> Unit, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
-            .size(40.dp)
-            .shadow(AgentElevation.Floating, CircleShape)
+            .size(34.dp)
             .clip(CircleShape)
             .background(Color.White)
             .clickable { onClick() },
@@ -162,13 +184,12 @@ private fun FloatingCircleButton(onClick: () -> Unit, content: @Composable () ->
     ) { content() }
 }
 
-/** White pill button with the same floating shadow (the "Agent" capsule). */
+/** White pill button (the "Agent" capsule). Floating feel via color contrast, no shadow. */
 @Composable
 private fun FloatingPill(onClick: () -> Unit, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
-            .height(40.dp)
-            .shadow(AgentElevation.Floating, AgentShapes.Pill)
+            .height(32.dp)
             .clip(AgentShapes.Pill)
             .background(Color.White)
             .clickable { onClick() }
@@ -182,8 +203,7 @@ private fun FloatingPill(onClick: () -> Unit, content: @Composable () -> Unit) {
 private fun FloatingDualPill(onNew: () -> Unit, onMore: () -> Unit) {
     Row(
         modifier = Modifier
-            .height(40.dp)
-            .shadow(AgentElevation.Floating, AgentShapes.Pill)
+            .height(32.dp)
             .clip(AgentShapes.Pill)
             .background(Color.White),
         verticalAlignment = Alignment.CenterVertically,
@@ -191,12 +211,12 @@ private fun FloatingDualPill(onNew: () -> Unit, onMore: () -> Unit) {
         Box(
             Modifier.fillMaxHeight().clickable { onNew() }.padding(start = 14.dp, end = 10.dp),
             contentAlignment = Alignment.Center,
-        ) { PenSquareIcon(color = AgentColors.TextPrimary, size = 20.dp) }
-        Box(Modifier.width(1.dp).height(20.dp).background(AgentColors.HairlineFaint))
+        ) { PenSquareIcon(color = AgentColors.TextPrimary, size = 17.dp) }
+        Box(Modifier.width(1.dp).height(18.dp).background(AgentColors.HairlineFaint))
         Box(
             Modifier.fillMaxHeight().clickable { onMore() }.padding(start = 10.dp, end = 14.dp),
             contentAlignment = Alignment.Center,
-        ) { MoreDotsIcon(color = AgentColors.TextPrimary, size = 20.dp) }
+        ) { MoreDotsIcon(color = AgentColors.TextPrimary, size = 17.dp) }
     }
 }
 
@@ -205,9 +225,9 @@ private fun OverflowMenu(onShare: () -> Unit, onDelete: () -> Unit, modifier: Mo
     Column(
         modifier = modifier
             .width(140.dp)
-            .shadow(AgentElevation.Floating, AgentShapes.Sheet)
             .clip(AgentShapes.Sheet)
-            .background(AgentColors.Panel),
+            .background(Color.White)
+            .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet),
     ) {
         MenuRow("分享") { onShare() }
         MenuRow("删除") { onDelete() }
@@ -231,7 +251,7 @@ private fun MessageList(state: PanelState) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         // Clear the floating top bar so the first message isn't hidden beneath it.
-        Spacer(Modifier.height(56.dp))
+        Spacer(Modifier.height(40.dp))
         state.messages.forEach { msg ->
             if (msg.fromUser) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -291,50 +311,64 @@ private fun BlinkingDot(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun InputBar(state: PanelState) {
-    var showUpload by remember { mutableStateOf(false) }
-    Column {
-        if (showUpload) UploadMenu { showUpload = false }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {
+    // Plus + text field + send all wrapped in ONE flattened white ellipse (no shadow,
+    // a faint border for the floating feel).
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clip(AgentShapes.Pill)
+            .background(Color.White)
+            .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Pill)
+            .padding(horizontal = 6.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PlusButton(onClick = onPlusClick)
+        Spacer(Modifier.width(4.dp))
+        Box(
+            modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+            contentAlignment = Alignment.CenterStart,
         ) {
-            IconButton(onClick = { showUpload = !showUpload }) { PlusIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.width(4.dp))
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(AgentShapes.Field)
-                    .background(AgentColors.Bg)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                if (state.input.isEmpty()) BasicText("问问…", style = AgentText.Hint)
-                BasicTextField(
-                    value = state.input,
-                    onValueChange = { state.input = it },
-                    textStyle = AgentText.Body,
-                    cursorBrush = SolidColor(AgentColors.Accent),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Spacer(Modifier.width(6.dp))
-            SendStopButton(
-                generating = state.generating,
-                onSend = { state.send() },
-                onStop = { state.stop() },
+            if (state.input.isEmpty()) BasicText("问问…", style = AgentText.Hint)
+            BasicTextField(
+                value = state.input,
+                onValueChange = { state.input = it },
+                textStyle = AgentText.Body,
+                cursorBrush = SolidColor(AgentColors.Accent),
+                modifier = Modifier.fillMaxWidth(),
             )
         }
+        Spacer(Modifier.width(6.dp))
+        SendStopButton(
+            generating = state.generating,
+            onSend = { state.send() },
+            onStop = { state.stop() },
+        )
     }
+}
+
+/** Plus button with a press-scale touch animation (shrinks to 0.86 while held). */
+@Composable
+private fun PlusButton(onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.86f else 1f, label = "plusScale")
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(CircleShape)
+            .clickable(interactionSource = interaction, indication = null) { onClick() },
+        contentAlignment = Alignment.Center,
+    ) { PlusIcon(color = AgentColors.TextPrimary, size = 20.dp) }
 }
 
 @Composable
 private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(34.dp)
+            .size(30.dp)
             .clip(CircleShape)
             .background(if (generating) AgentColors.Stop else AgentColors.Accent)
             .clickable { if (generating) onStop() else onSend() },
@@ -342,39 +376,35 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
     ) {
         if (generating) {
             // Rounded square = stop.
-            Box(Modifier.size(11.dp).clip(RoundedCornerShape(4.dp)).background(Color.White))
+            Box(Modifier.size(10.dp).clip(RoundedCornerShape(4.dp)).background(Color.White))
         } else {
-            SendArrowIcon(size = 19.dp, color = Color.White)
+            SendArrowIcon(size = 16.dp, color = Color.White)
         }
     }
 }
 
+/** Bottom sheet that slides up when the plus is tapped: a white rounded card listing the
+ *  four upload sources as full-width rows. */
 @Composable
-private fun UploadMenu(onPick: () -> Unit) {
-    Row(
+private fun UploadSheet(onPick: () -> Unit) {
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .clip(AgentShapes.Sheet)
+            .background(Color.White)
+            .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
+            .padding(vertical = 4.dp),
     ) {
         listOf("相机", "照片", "文件", "插件").forEach { label ->
-            Box(
+            BasicText(
+                label,
+                style = AgentText.Body,
                 modifier = Modifier
-                    .weight(1f)
-                    .clip(AgentShapes.Upload)
-                    .background(AgentColors.Bg)
+                    .fillMaxWidth()
                     .clickable { onPick() }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center,
-            ) { BasicText(label, style = AgentText.Secondary) }
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+            )
         }
     }
-}
-
-@Composable
-fun IconButton(onClick: () -> Unit, content: @Composable () -> Unit) {
-    Box(
-        modifier = Modifier.size(40.dp).clip(CircleShape).clickable { onClick() },
-        contentAlignment = Alignment.Center,
-    ) { content() }
 }

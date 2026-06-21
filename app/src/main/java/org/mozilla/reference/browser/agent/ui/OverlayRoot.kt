@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -55,6 +54,12 @@ import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 
+// Base (scale = 1f) panel content size in dp. The panel is always laid out at this size
+// and uniformly scaled, so resizing grows/shrinks the whole UI together. Must match the
+// BASE_*_DP constants the service uses to size the WRAP_CONTENT window.
+private const val PANEL_BASE_W_DP = 320f
+private const val PANEL_BASE_H_DP = 520f
+
 /**
  * Floating Agent UI: a pure-white draggable ball (snaps to the nearest edge with an
  * animation handled natively) that expands — animated, growing from the side the ball
@@ -67,8 +72,7 @@ fun OverlayRoot(
     expanded: Boolean,
     anchorRight: Boolean,
     dimmed: Boolean,
-    panelWidthDp: Float,
-    panelHeightDp: Float,
+    panelScale: Float,
     onExpand: () -> Unit,
     onCollapse: () -> Unit,
     onWake: () -> Unit,
@@ -98,8 +102,7 @@ fun OverlayRoot(
     ) { isExpanded ->
         if (isExpanded) {
             AgentPanel(
-                widthDp = panelWidthDp,
-                heightDp = panelHeightDp,
+                scale = panelScale,
                 onCollapse = onCollapse,
                 onPanelDrag = onPanelDrag,
                 onPanelResize = onPanelResize,
@@ -186,100 +189,111 @@ private fun AgentBall(
 
 @Composable
 private fun AgentPanel(
-    widthDp: Float,
-    heightDp: Float,
+    scale: Float,
     onCollapse: () -> Unit,
     onPanelDrag: (Float, Float) -> Unit,
     onPanelResize: (Float, Float) -> Unit,
 ) {
-    val shape = RoundedCornerShape(28.dp)
+    val shape = RoundedCornerShape(20.dp)
+    // The panel content is always laid out at its base size and uniformly scaled, so the
+    // whole UI (floating buttons, text, input) grows/shrinks together when resized.
     Box(
         modifier = Modifier
             .padding(8.dp)
-            .width(widthDp.dp)
-            .height(heightDp.dp)
-            .clip(shape)
-            .background(Color.White)
-            // Faint gray inset stroke hugging the rounded edge.
-            .border(1.dp, AgentColors.HairlineFaint, shape),
+            .size((PANEL_BASE_W_DP * scale).dp, (PANEL_BASE_H_DP * scale).dp),
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Window chrome zone: blue drag handle (center) + collapse minus (end).
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(40.dp),
-            ) {
-                // Blue drag handle near the top-center; a gray ellipse stays visible the
-                // whole time the bar is held (touch-down through drag to release). A single
-                // gesture loop drives both the press feedback and the drag so the ellipse
-                // doesn't vanish once dragging starts.
-                var pressed by remember { mutableStateOf(false) }
-                val ellipseAlpha by animateFloatAsState(if (pressed) 1f else 0f, label = "ellipse")
+        Box(
+            modifier = Modifier
+                .size(PANEL_BASE_W_DP.dp, PANEL_BASE_H_DP.dp)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    transformOrigin = TransformOrigin(0f, 0f)
+                }
+                .clip(shape)
+                // Slightly off-white surface so white buttons/popups read as hovering.
+                .background(AgentColors.Surface)
+                // Faint gray inset stroke hugging the rounded edge.
+                .border(1.dp, AgentColors.HairlineFaint, shape),
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Window chrome zone: blue drag handle (center) + collapse minus (end).
                 Box(
                     modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 12.dp)
-                        .pointerInput(Unit) {
-                            awaitEachGesture {
-                                awaitFirstDown(requireUnconsumed = false)
-                                pressed = true
-                                var down = true
-                                while (down) {
-                                    val event = awaitPointerEvent()
-                                    event.changes.forEach { change ->
-                                        val delta = change.positionChange()
-                                        if (delta != Offset.Zero) {
-                                            onPanelDrag(delta.x, delta.y)
-                                            change.consume()
+                        .fillMaxWidth()
+                        .height(26.dp),
+                ) {
+                    // Blue drag handle near the top-center; a gray ellipse stays visible the
+                    // whole time the bar is held (touch-down through drag to release). A single
+                    // gesture loop drives both the press feedback and the drag so the ellipse
+                    // doesn't vanish once dragging starts.
+                    var pressed by remember { mutableStateOf(false) }
+                    val ellipseAlpha by animateFloatAsState(if (pressed) 1f else 0f, label = "ellipse")
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 6.dp)
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    pressed = true
+                                    var down = true
+                                    while (down) {
+                                        val event = awaitPointerEvent()
+                                        event.changes.forEach { change ->
+                                            val delta = change.positionChange()
+                                            if (delta != Offset.Zero) {
+                                                onPanelDrag(delta.x, delta.y)
+                                                change.consume()
+                                            }
                                         }
+                                        down = event.changes.any { it.pressed }
                                     }
-                                    down = event.changes.any { it.pressed }
+                                    pressed = false
                                 }
-                                pressed = false
-                            }
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .graphicsLayer { alpha = ellipseAlpha }
+                                .size(width = 60.dp, height = 22.dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(Color(0xFFDADADA)),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(width = 42.dp, height = 3.dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(Color(0xFF4285F4)),
+                        )
+                    }
+
+                    // Single collapse control: a minus inside a small gray ball, top-right.
                     Box(
                         modifier = Modifier
-                            .graphicsLayer { alpha = ellipseAlpha }
-                            .size(width = 60.dp, height = 24.dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .background(Color(0xFFDADADA)),
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(width = 42.dp, height = 3.dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .background(Color(0xFF4285F4)),
-                    )
+                            .align(Alignment.TopEnd)
+                            .padding(top = 6.dp, end = 10.dp)
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFEAEAEA))
+                            .clickable { onCollapse() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 8.dp, height = 2.dp)
+                                .clip(RoundedCornerShape(percent = 50))
+                                .background(Color(0xFF666666)),
+                        )
+                    }
                 }
 
-                // Single collapse control: a minus inside a small gray ball, top-right.
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(12.dp)
-                        .size(14.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFEAEAEA))
-                        .clickable { onCollapse() },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(width = 8.dp, height = 2.dp)
-                            .clip(RoundedCornerShape(percent = 50))
-                            .background(Color(0xFF666666)),
-                    )
-                }
+                // Chat surface + internal navigation (drawer / settings / model selector).
+                AgentPanelHost(modifier = Modifier.weight(1f))
             }
-
-            // Chat surface + internal navigation (drawer / settings / model selector).
-            AgentPanelHost(modifier = Modifier.weight(1f))
         }
-        // Bottom-right resize grip: drag to change panel width/height (handled natively).
+        // Bottom-right resize grip: drag to uniformly scale the panel (handled natively).
         ResizeHandle(
             modifier = Modifier.align(Alignment.BottomEnd),
             onResize = onPanelResize,

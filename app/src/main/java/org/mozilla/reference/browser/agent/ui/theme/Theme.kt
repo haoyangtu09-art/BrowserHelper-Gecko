@@ -20,6 +20,9 @@ import androidx.compose.ui.unit.sp
 object AgentColors {
     val Bg = Color(0xFFF8F8F8)
     val Panel = Color(0xFFFFFFFF)
+    // Panel surface sits a touch below pure white so the white floating buttons /
+    // popups read as hovering above it purely by tone (no drop shadow needed).
+    val Surface = Color(0xFFF1F2F4)
     val TextPrimary = Color(0xFF111111)
     val TextSecondary = Color(0xFF666666)
     val TextTertiary = Color(0xFF999999)
@@ -37,10 +40,10 @@ object AgentColors {
 
 object AgentShapes {
     val Pill = RoundedCornerShape(percent = 50)
-    val Panel = RoundedCornerShape(28.dp)
-    val Upload = RoundedCornerShape(32.dp)
+    val Panel = RoundedCornerShape(20.dp)
+    val Upload = RoundedCornerShape(20.dp)
     val Field = RoundedCornerShape(24.dp)
-    val Sheet = RoundedCornerShape(20.dp)
+    val Sheet = RoundedCornerShape(14.dp)
     // Ball squircle: a rounded square so large it nearly reads as a circle, yet on close
     // inspection keeps a square-ish outline (per the ChatGPT-style floating ball).
     val Squircle = RoundedCornerShape(percent = 38)

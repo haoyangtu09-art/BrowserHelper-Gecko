@@ -6,13 +6,16 @@ package org.mozilla.reference.browser.agent.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,7 +40,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
@@ -69,6 +71,7 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
             exit = slideOutHorizontally(tween(220)) { -it } + fadeOut(tween(200)),
         ) {
             DrawerSheet(
+                state = state,
                 onClose = { state.nav = PanelNav.Chat },
                 onSettings = { state.nav = PanelNav.Settings },
             )
@@ -79,6 +82,20 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
             exit = slideOutHorizontally(tween(220)) { it } + fadeOut(tween(200)),
         ) {
             SettingsScreen(state, onBack = { state.nav = PanelNav.Drawer })
+        }
+        AnimatedVisibility(
+            visible = state.nav == PanelNav.Personalization,
+            enter = slideInHorizontally(tween(240)) { it } + fadeIn(tween(240)),
+            exit = slideOutHorizontally(tween(220)) { it } + fadeOut(tween(200)),
+        ) {
+            PersonalizationScreen(state, onBack = { state.nav = PanelNav.Settings })
+        }
+        AnimatedVisibility(
+            visible = state.nav == PanelNav.Memory,
+            enter = slideInHorizontally(tween(240)) { it } + fadeIn(tween(240)),
+            exit = slideOutHorizontally(tween(220)) { it } + fadeOut(tween(200)),
+        ) {
+            MemoryScreen(state, onBack = { state.nav = PanelNav.Settings })
         }
         AnimatedVisibility(
             visible = state.nav == PanelNav.ModelSelector,
@@ -98,13 +115,15 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
     }
 }
 
+// Transparent dismiss layer: catches outside taps to close, but no gray tint — the
+// floating feel comes from color contrast, not a scrim.
 @Composable
 private fun Scrim(onClose: () -> Unit) {
-    Box(Modifier.fillMaxSize().background(Color(0x33000000)).clickable { onClose() })
+    Box(Modifier.fillMaxSize().clickable { onClose() })
 }
 
 @Composable
-private fun DrawerSheet(onClose: () -> Unit, onSettings: () -> Unit) {
+private fun DrawerSheet(state: PanelState, onClose: () -> Unit, onSettings: () -> Unit) {
     Box(Modifier.fillMaxSize()) {
         Scrim(onClose)
         Column(
@@ -116,7 +135,7 @@ private fun DrawerSheet(onClose: () -> Unit, onSettings: () -> Unit) {
         ) {
             // Header: title on the left, settings gear pinned to the top-right.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                BasicText("记忆", style = AgentText.Title)
+                BasicText("HTTP Agent", style = AgentText.Title)
                 Spacer(Modifier.weight(1f))
                 Box(
                     modifier = Modifier.size(40.dp).clip(CircleShape).background(AgentColors.Bg)
@@ -124,13 +143,15 @@ private fun DrawerSheet(onClose: () -> Unit, onSettings: () -> Unit) {
                     contentAlignment = Alignment.Center,
                 ) { GearIcon(color = AgentColors.TextPrimary) }
             }
-            Spacer(Modifier.height(12.dp))
-            listOf("偏好与习惯", "项目上下文", "最近会话").forEach {
+            Spacer(Modifier.height(16.dp))
+            BasicText("最近", style = AgentText.Label)
+            Spacer(Modifier.height(6.dp))
+            // Created conversations live here; empty this round → only the "最近" label shows.
+            state.recentChats.forEach { title ->
                 Box(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                        .clip(AgentShapes.Sheet).background(AgentColors.Bg)
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                ) { BasicText(it, style = AgentText.Body) }
+                    Modifier.fillMaxWidth().clickable { }
+                        .padding(horizontal = 4.dp, vertical = 12.dp),
+                ) { BasicText(title, style = AgentText.Body) }
             }
         }
     }
@@ -159,6 +180,103 @@ private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
             FormatOption("OpenAI", !state.anthropicFormat) { state.anthropicFormat = false }
             FormatOption("Anthropic", state.anthropicFormat) { state.anthropicFormat = true }
         }
+        Spacer(Modifier.height(18.dp))
+        BasicText("我的 Agent", style = AgentText.Label)
+        Spacer(Modifier.height(8.dp))
+        EntryRow("个性化", onClick = { state.nav = PanelNav.Personalization }) {
+            FaceMouthIcon(color = AgentColors.TextPrimary, size = 22.dp)
+        }
+        EntryRow("记忆", onClick = { state.nav = PanelNav.Memory }) {
+            OpenBookIcon(color = AgentColors.TextPrimary, size = 22.dp)
+        }
+    }
+}
+
+/** A settings list row: a left leading icon + label, tappable to open a sub-screen. */
+@Composable
+private fun EntryRow(label: String, onClick: () -> Unit, icon: @Composable () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) { icon() }
+        Spacer(Modifier.width(12.dp))
+        BasicText(label, style = AgentText.Body)
+    }
+}
+
+@Composable
+private fun PersonalizationScreen(state: PanelState, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(36.dp).clip(CircleShape).clickable { onBack() },
+                contentAlignment = Alignment.Center,
+            ) { BackIcon(color = AgentColors.TextPrimary) }
+            Spacer(Modifier.width(8.dp))
+            BasicText("个性化", style = AgentText.Title)
+        }
+        Spacer(Modifier.height(14.dp))
+        listOf("理性", "平衡", "感性").forEach { option ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { state.persona = option }
+                    .padding(vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                    if (state.persona == option) CheckIcon(size = 14.dp, color = AgentColors.Accent)
+                }
+                Spacer(Modifier.width(10.dp))
+                BasicText(option, style = AgentText.Body)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(36.dp).clip(CircleShape).clickable { onBack() },
+                contentAlignment = Alignment.Center,
+            ) { BackIcon(color = AgentColors.TextPrimary) }
+            Spacer(Modifier.width(8.dp))
+            BasicText("记忆", style = AgentText.Title)
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BasicText("启用记忆", style = AgentText.Body)
+            Spacer(Modifier.weight(1f))
+            ToggleSwitch(state.memoryEnabled) { state.memoryEnabled = !state.memoryEnabled }
+        }
+        Box(
+            Modifier.fillMaxWidth().clickable { }.padding(vertical = 12.dp),
+        ) { BasicText("记忆摘要", style = AgentText.Body) }
+    }
+}
+
+/** Minimal pill toggle (no Material): a track + a sliding knob. */
+@Composable
+private fun ToggleSwitch(on: Boolean, onToggle: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(width = 44.dp, height = 26.dp)
+            .clip(AgentShapes.Pill)
+            .background(if (on) AgentColors.Accent else AgentColors.Control)
+            .clickable { onToggle() }
+            .padding(3.dp),
+        contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
+        Box(Modifier.size(20.dp).clip(CircleShape).background(Color.White))
     }
 }
 
@@ -208,15 +326,16 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
     var showModels by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize()) {
         Scrim { showModels = false; onClose() }
-        // Layer 1: reasoning tier + current model, anchored below the Agent button.
+        // A single narrow white card anchored below the Agent button. The model list is an
+        // inline accordion that expands BELOW the 模型 row (not a separate floating card).
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 10.dp, top = 56.dp)
-                .width(220.dp)
-                .shadow(8.dp, AgentShapes.Sheet)
+                .padding(start = 10.dp, top = 44.dp)
+                .width(180.dp)
                 .clip(AgentShapes.Sheet)
-                .background(AgentColors.Panel)
+                .background(Color.White)
+                .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
                 .padding(14.dp),
         ) {
             BasicText("智能", style = AgentText.Title)
@@ -230,7 +349,7 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
             Spacer(Modifier.height(10.dp))
             Box(
                 modifier = Modifier.fillMaxWidth().clip(AgentShapes.Sheet)
-                    .clickable { showModels = true }
+                    .clickable { showModels = !showModels }
                     .padding(horizontal = 6.dp, vertical = 10.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -239,56 +358,30 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
                     BasicText(state.selectedModel ?: "选择模型", style = AgentText.Body)
                 }
             }
-        }
-        // Layer 2: the model list, scaling out of the same anchor on top of layer 1.
-        AnimatedVisibility(
-            visible = showModels,
-            enter = scaleIn(
-                tween(180),
-                initialScale = 0.92f,
-                transformOrigin = TransformOrigin(0f, 0f),
-            ) + fadeIn(tween(180)),
-            exit = scaleOut(
-                tween(160),
-                targetScale = 0.92f,
-                transformOrigin = TransformOrigin(0f, 0f),
-            ) + fadeOut(tween(140)),
-            modifier = Modifier.align(Alignment.TopStart),
-        ) {
-            Column(
-                modifier = Modifier
-                    .padding(start = 10.dp, top = 56.dp)
-                    .width(220.dp)
-                    .shadow(8.dp, AgentShapes.Sheet)
-                    .clip(AgentShapes.Sheet)
-                    .background(AgentColors.Panel)
-                    .padding(14.dp),
+            // Inline accordion: the model list expands vertically right below the 模型 row.
+            AnimatedVisibility(
+                visible = showModels,
+                enter = expandVertically(tween(200)) + fadeIn(tween(200)),
+                exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.size(28.dp).clip(CircleShape).clickable { showModels = false },
-                        contentAlignment = Alignment.Center,
-                    ) { BackIcon(color = AgentColors.TextPrimary, size = 18.dp) }
-                    Spacer(Modifier.width(6.dp))
-                    BasicText("模型", style = AgentText.Title)
-                }
-                Spacer(Modifier.height(10.dp))
-                if (state.models.isEmpty()) {
-                    Box(
-                        Modifier.fillMaxWidth().clip(AgentShapes.Sheet).background(AgentColors.Bg)
-                            .padding(vertical = 20.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { BasicText("暂无模型", style = AgentText.Secondary) }
-                } else {
-                    state.models.forEach { m ->
-                        val sel = state.selectedModel == m
+                Column {
+                    if (state.models.isEmpty()) {
                         Box(
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                .clip(AgentShapes.Sheet)
-                                .background(if (sel) AgentColors.Control else AgentColors.Bg)
-                                .clickable { state.selectedModel = m; showModels = false }
-                                .padding(horizontal = 14.dp, vertical = 13.dp),
-                        ) { BasicText(m, style = AgentText.Body) }
+                            Modifier.fillMaxWidth().clip(AgentShapes.Sheet).background(AgentColors.Bg)
+                                .padding(vertical = 16.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { BasicText("暂无模型", style = AgentText.Secondary) }
+                    } else {
+                        state.models.forEach { m ->
+                            val sel = state.selectedModel == m
+                            Box(
+                                Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                    .clip(AgentShapes.Sheet)
+                                    .background(if (sel) AgentColors.Control else AgentColors.Bg)
+                                    .clickable { state.selectedModel = m; showModels = false }
+                                    .padding(horizontal = 14.dp, vertical = 13.dp),
+                            ) { BasicText(m, style = AgentText.Body) }
+                        }
                     }
                 }
             }

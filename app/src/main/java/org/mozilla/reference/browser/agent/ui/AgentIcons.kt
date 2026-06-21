@@ -169,3 +169,61 @@ fun CheckIcon(modifier: Modifier = Modifier, size: Dp = 14.dp, color: Color = Co
         drawLine(color, Offset(w * 0.42f, h * 0.72f), Offset(w * 0.78f, h * 0.30f), sw, StrokeCap.Round)
     }
 }
+
+/** Round face carrying only a smile — no eyes — for the "个性化" entry. */
+@Composable
+fun FaceMouthIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color = Color(0xFF111111)) {
+    Canvas(modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val sw = this.size.minDimension * 0.08f
+        val cx = w / 2f
+        val cy = h / 2f
+        val r = this.size.minDimension * 0.40f
+        drawCircle(color, r, Offset(cx, cy), style = Stroke(width = sw))
+        // Upward-curving mouth in the lower half; eyes intentionally omitted.
+        val mouth = Path().apply {
+            moveTo(cx - r * 0.45f, cy + r * 0.18f)
+            quadraticTo(cx, cy + r * 0.62f, cx + r * 0.45f, cy + r * 0.18f)
+        }
+        drawPath(mouth, color, style = Stroke(width = sw, cap = StrokeCap.Round))
+    }
+}
+
+/** An open book (two splayed pages + center spine) for the "记忆" entry. */
+@Composable
+fun OpenBookIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color = Color(0xFF111111)) {
+    Canvas(modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val sw = this.size.minDimension * 0.08f
+        val cx = w / 2f
+        val top = h * 0.30f
+        val bot = h * 0.78f
+        val left = w * 0.12f
+        val right = w * 0.88f
+        drawLine(color, Offset(cx, top), Offset(cx, bot), sw, StrokeCap.Round)
+        val leftPage = Path().apply {
+            moveTo(cx, top)
+            quadraticTo(cx - (cx - left) * 0.5f, top - h * 0.04f, left, top + h * 0.04f)
+            lineTo(left, bot - h * 0.06f)
+            quadraticTo(cx - (cx - left) * 0.5f, bot - h * 0.12f, cx, bot)
+        }
+        drawPath(
+            leftPage,
+            color,
+            style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round),
+        )
+        val rightPage = Path().apply {
+            moveTo(cx, top)
+            quadraticTo(cx + (right - cx) * 0.5f, top - h * 0.04f, right, top + h * 0.04f)
+            lineTo(right, bot - h * 0.06f)
+            quadraticTo(cx + (right - cx) * 0.5f, bot - h * 0.12f, cx, bot)
+        }
+        drawPath(
+            rightPage,
+            color,
+            style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round),
+        )
+    }
+}

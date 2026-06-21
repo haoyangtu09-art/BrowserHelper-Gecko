@@ -4,7 +4,7 @@
 registerPlugin({
   id: 'web-agent',
   name: '网页 Agent',
-  version: '0.1',
+  version: '0.2',
   desc: '在浏览器上层显示一个可收展的原生悬浮窗 Agent（白色小球 → 点击展开聊天面板）。' +
     '开启后若未授予「悬浮窗 / 显示在其他应用上层」权限，会自动跳转到系统授权页，授权返回即出现小球。',
   onEnable: function (ctx) {

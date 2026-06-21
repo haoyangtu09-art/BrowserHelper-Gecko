@@ -11,7 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 
-enum class PanelNav { Chat, Drawer, Settings, ModelSelector }
+enum class PanelNav { Chat, Drawer, Settings, ModelSelector, Personalization, Memory }
 
 /** Reasoning effort tiers, mapped to a token budget (wired in a later round). */
 enum class ReasonTier { Low, Middle, High }
@@ -32,6 +32,13 @@ class PanelState {
     // Model list is driven by what the configured API key returns; empty → "暂无模型".
     val models = mutableStateListOf<String>()
     var selectedModel by mutableStateOf<String?>(null)
+
+    // Recent conversations shown in the drawer; empty this round → only the "最近" label.
+    val recentChats = mutableStateListOf<String>()
+
+    // "我的 Agent": personalization style + memory toggle (memory only this round).
+    var persona by mutableStateOf("平衡")
+    var memoryEnabled by mutableStateOf(true)
 
     // Settings (memory only this round).
     var apiKey by mutableStateOf("")
