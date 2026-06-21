@@ -70,7 +70,26 @@ import org.mozilla.reference.browser.agent.ui.theme.AgentColors
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 import org.mozilla.reference.browser.agent.ui.theme.AgentText
 
-data class ChatMsg(val fromUser: Boolean, val text: String)
+data class ChatMsg(
+    val fromUser: Boolean,
+    val text: String,
+    // When non-null this message renders as an agent-style tool card (status line + optional
+    // diff block) instead of plain prose. The model's full tool output is NOT shown here — it
+    // only goes back to the model — so the conversation stays clean.
+    val tool: ToolCard? = null,
+)
+
+/**
+ * Compact, agent-style summary of one tool call rendered in the transcript. [summary] is a
+ * one-liner (e.g. "wrote app/x.kt  +12 -3"); [diff] is optional unified-style text whose
+ * `+`/`-` leading lines are colored green/red inside a code frame.
+ */
+data class ToolCard(
+    val name: String,
+    val status: String,
+    val summary: String,
+    val diff: String = "",
+)
 
 /** Click with no ripple/indication, so transparent dismiss layers don't gray-flash on tap. */
 @Composable
@@ -296,6 +315,8 @@ private fun MessageList(state: PanelState) {
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) { BasicText(msg.text, style = AgentText.Body) }
                 }
+            } else if (msg.tool != null) {
+                ToolCardView(msg.tool)
             } else if (msg.text.isNotBlank()) {
                 // No avatar / no left indent: the assistant reply reads as plain text spanning
                 // the full width. The blank streaming placeholder is skipped so the wait state
@@ -331,7 +352,7 @@ private fun MessageList(state: PanelState) {
 @Composable
 private fun AssistantContent(text: String) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        parseSegments(text).forEach { (isCode, body) ->
+        parseSegments(unescapeText(text)).forEach { (isCode, body) ->
             if (isCode) {
                 CodeBlock(body)
             } else {
@@ -339,6 +360,32 @@ private fun AssistantContent(text: String) {
             }
         }
     }
+}
+
+/**
+ * Unescapes the common backslash escapes (`\n` `\t` `\r` `\"` `\\`) that some providers leak
+ * as literal two-character sequences into the assistant text, so they render as real newlines
+ * / tabs / quotes instead of visible `\n`. Fast-paths text with no backslashes.
+ */
+private fun unescapeText(s: String): String {
+    if (!s.contains('\\')) return s
+    val sb = StringBuilder(s.length)
+    var i = 0
+    while (i < s.length) {
+        val c = s[i]
+        if (c == '\\' && i + 1 < s.length) {
+            when (s[i + 1]) {
+                'n' -> { sb.append('\n'); i += 2; continue }
+                't' -> { sb.append('\t'); i += 2; continue }
+                'r' -> { i += 2; continue }
+                '"' -> { sb.append('"'); i += 2; continue }
+                '\\' -> { sb.append('\\'); i += 2; continue }
+            }
+        }
+        sb.append(c)
+        i++
+    }
+    return sb.toString()
 }
 
 /**
@@ -408,6 +455,89 @@ private fun CodeBlock(code: String) {
     }
 }
 
+/**
+ * Agent-style tool result: a one-line status (colored dot + summary like "wrote app/x.kt
+ * +12 -3"), optionally followed by a diff code frame. The model's full raw output is never
+ * shown here — it only flows back to the model — so the transcript stays compact.
+ */
+@Composable
+private fun ToolCardView(tool: ToolCard) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val dot = when (tool.status) {
+                "完成" -> Color(0xFF188038)
+                "失败" -> Color(0xFFB3261E)
+                else -> AgentColors.Accent
+            }
+            Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+            Spacer(Modifier.width(8.dp))
+            BasicText(
+                tool.summary.ifBlank { tool.name },
+                style = AgentText.Secondary.copy(color = AgentColors.TextPrimary),
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (tool.diff.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            DiffBlock(tool.diff)
+        }
+    }
+}
+
+/**
+ * A dark code frame rendering a unified-style diff: lines starting with `+` get a green tint
+ * and lines starting with `-` get a red tint (added / removed), everything else is neutral.
+ */
+@Composable
+private fun DiffBlock(diff: String) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF1E1E1E))
+            .padding(vertical = 8.dp),
+    ) {
+        diff.split('\n').forEach { line ->
+            val marker = diffMarker(line)
+            val added = marker == '+'
+            val removed = marker == '-'
+            val bg = when {
+                added -> Color(0x3328A745)
+                removed -> Color(0x33D73A49)
+                else -> Color.Transparent
+            }
+            val fg = when {
+                added -> Color(0xFF7EE787)
+                removed -> Color(0xFFFFA198)
+                else -> Color(0xFFE6E6E6)
+            }
+            BasicText(
+                line.ifEmpty { " " },
+                style = AgentText.Label.copy(color = fg),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(bg)
+                    .padding(horizontal = 12.dp, vertical = 1.dp),
+            )
+        }
+    }
+}
+
+private fun diffMarker(line: String): Char? {
+    if (line.startsWith("+")) return '+'
+    if (line.startsWith("-")) return '-'
+    val trimmed = line.trimStart()
+    var i = 0
+    while (i < trimmed.length && trimmed[i].isDigit()) i++
+    if (i == 0) return null
+    while (i < trimmed.length && trimmed[i].isWhitespace()) i++
+    return when (trimmed.getOrNull(i)) {
+        '+' -> '+'
+        '-' -> '-'
+        else -> null
+    }
+}
+
 /** A single black dot pulsing slowly to signal the model is generating. */
 @Composable
 private fun BlinkingDot(modifier: Modifier = Modifier) {
@@ -429,22 +559,25 @@ private fun BlinkingDot(modifier: Modifier = Modifier) {
 
 @Composable
 private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {
-    // Plus + text field + send all wrapped in ONE flattened white ellipse (no shadow,
-    // a faint border for the floating feel).
+    // Plus + text field + send wrapped in one white container with a FIXED rounded-rectangle
+    // shape. A 50%-pill shape would bulge into a "thick middle, thin ends" oval when the field
+    // wraps to multiple lines; a fixed 22dp radius grows straight down into a rounded box and
+    // keeps the plus/send buttons pinned to the bottom edge.
+    val shape = RoundedCornerShape(22.dp)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp)
-            .clip(AgentShapes.Pill)
+            .clip(shape)
             .background(Color.White)
-            .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Pill)
+            .border(1.dp, AgentColors.HairlineFaint, shape)
             .padding(horizontal = 5.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Bottom,
     ) {
         PlusButton(onClick = onPlusClick)
         Spacer(Modifier.width(4.dp))
         Box(
-            modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+            modifier = Modifier.weight(1f).padding(horizontal = 4.dp, vertical = 6.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             if (state.input.isEmpty()) BasicText("问问…", style = AgentText.Hint)
@@ -453,6 +586,7 @@ private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {
                 onValueChange = { state.input = it },
                 textStyle = AgentText.Body,
                 cursorBrush = SolidColor(AgentColors.Accent),
+                maxLines = 6,
                 modifier = Modifier.fillMaxWidth(),
             )
         }

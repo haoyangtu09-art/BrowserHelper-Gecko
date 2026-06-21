@@ -26,10 +26,14 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - `AnthropicBackend` 当前支持普通 Messages 对话和模型列表，内部工具只在 OpenAI 格式启用。
 - 设置持久化到 `SharedPreferences("bh_agent_overlay")`：API key/url、搜索 API、模型、S1/S2/S3 权限层、推理档、个性化、记忆。
 - 已用临时第三方 OpenAI-compatible 中转验证过 `/v1/models`、普通 `/v1/chat/completions`、强制 `tools` tool call；密钥没有写入源码。
+- 会话标题只生成一次：凑够前两句真实用户输入后做一次轻量命名，写入 `recentChats`，后续不实时更新，避免反复消耗 token。
+- 长期记忆已补齐闭环：`memorySummary` + `memories` 持久化；每次有效对话结束后后台只抽取新增长期记忆条目；记忆页「生成摘要」才会让模型把已保存记忆压缩成摘要，不把所有记忆原样塞进摘要。
+- 工具完整返回不再进入可见聊天：`Role.Tool` 仍把完整 `result.text` 回写给模型，UI `ToolCard` 只显示状态/安全摘要/diff。
 
 ### 权限层与审批
 - `AgentToolRegistry` 是 APK 内部工具层，原生悬浮窗不依赖外部 MCP；`BrowserBridge` 只保留给外部 bhcodex 兼容。
 - S1/S2/S3 分别生成独立工具注册表，模型在低权限层看不到高权限工具定义。
+- 每轮请求会在历史末尾追加不持久化的 runtime system 状态，包含当前 S1/S2/S3 和本轮可见工具清单；切换权限层后无需新开对话。
 - 悬浮窗二次确认在 `ApprovalSheet` 内完成，不用浏览器弹窗。
 - “一直允许”已恢复，但不是全局允许工具，而是按 `scopeKey` 记住同一范围：同一文件/同一组文件、同一 method+host、同一拦截 flow、同一 JS 片段 hash、同一网络规则等。
 - 新聊天会清空本会话授权 grant。
@@ -68,9 +72,12 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 ### UI 与交互修复
 - 设置和设置子页已统一为右侧全屏层，抽屉仍从左侧出；修复了设置/子页左右互换和底层闪一下的问题。
 - 设置/子页返回箭头左移。
-- 右下 resize 手柄锚在缩放后面板内部圆角，手柄自身 inverse scale，修复缩小时飞出悬浮窗外的问题。
+- 左右底角 resize 手柄锚在缩放后面板内部圆角，手柄自身 inverse scale；视觉改成细灰弧线，修复缩小时飞出悬浮窗外的问题。
 - assistant 消息复制按钮和代码块右上复制已接 Android `ClipboardManager`。
 - `pageFetch` 已加入 `agent.js`，从 page world 发请求；`page_exec` 注释已同步为“悬浮窗 S3 ApprovalSheet 或外部 BrowserBridge AgentConfirm”。
+- 审批 sheet 长详情会截断并提供「详情」全屏可滚动页，避免长命令把按钮挤出屏幕。
+- 记忆页现在支持直接编辑摘要、点击「生成摘要」、直接编辑每条记忆、新增空记忆、删除记忆；摘要/条目/开关都会立即持久化。
+- 拓展面板卡片改为三列紧凑正方形，HTTP Agent 版本更新到 `0.6`。
 
 ### 验证状态
 - DevTools 扩展 JS 单文件 `node --check` 通过。
@@ -95,8 +102,8 @@ DevTools「拓展」面板点「HTTP Agent」启用
 ```
 
 - 插件描述符在 `app/src/main/assets/extensions/devtools_injector/extensions/presets/index.js`，
-  id=`web-agent`，name=`HTTP Agent`，version=`0.3`，带 `detail`/`usage` 字段供详情弹窗读。
-- 卡片 UI 在 `extensions/index.js`（方形卡 + 详情弹窗），属于 DevTools 扩展那条线，非 Compose。
+  id=`web-agent`，name=`HTTP Agent`，version=`0.6`，带 `detail`/`usage` 字段供详情弹窗读。
+- 卡片 UI 在 `extensions/index.js`（三列紧凑方形卡 + 详情弹窗），属于 DevTools 扩展那条线，非 Compose。
 
 ---
 
@@ -188,7 +195,8 @@ tier: ReasonTier                         // 推理档（默认 Middle）
 models / selectedModel                   // 模型列表（空→「暂无模型」）
 recentChats                              // 抽屉「最近」（空→只剩标签）
 persona（默认"平衡"）/ memoryEnabled      // 我的 Agent：个性化 / 记忆开关
-memories: List<String>                   // 已保存记忆（增删，空→「还没有记忆」）
+memorySummary / memoryUpdating / memorySummaryError // 长期记忆摘要 / 后台整理中 / 摘要生成错误
+memories: List<String>                   // 已保存记忆（增删改，空→「还没有记忆」）
 toolChecks: Map<String, ToolCheckState>  // 高级页工具自检状态/原始失败文本
 toolsChecking                            // 全部自检运行中
 permTier（默认 S1）                       // 权限滑块选中档
@@ -218,10 +226,10 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 | R8 | 代码块圆角框+右上复制 | `ChatScreen.parseSegments/CodeBlock` | 按 ``` 三反引号拆段；CodeBlock `RoundedCornerShape(12)` 深底 `#1E1E1E`，右上 CopyIcon，已接 Android `ClipboardManager`。 |
 | R9 | 权限滑块 S1/S2/S3 | `AgentPanelHost.PermissionSlider` + `AgentToolRegistry` | 模型选择「智能」行右侧；`Pill` 椭圆轨 + `animateFloatAsState` knob 平移；segW=30dp；滑块决定模型可见工具清单。 |
 | R10 | 设置重排 | `AgentPanelHost.SettingsScreen` | 「我的 Agent」(个性化/记忆)置顶，API key/url/搜索/请求格式置底；加 verticalScroll |
-| R11 | 记忆 UI 做全 | `AgentPanelHost.MemoryScreen` | 启用开关 + 记忆摘要 + 「已保存的记忆」列表(增删 ×) + 空态「还没有记忆」+ PlusIcon 添加 |
+| R11 | 记忆 UI 做全 | `AgentPanelHost.MemoryScreen` + `AgentEngine.maybeExtractMemories/generateMemorySummary` | 启用开关 + 可编辑记忆摘要 +「生成摘要」按需模型压缩 + 可编辑「已保存的记忆」列表(增删 ×) + 自动长期记忆条目抽取/合并 + 空态「还没有记忆」 |
 | R12 | 改名 HTTP Agent | `presets/index.js` | `name:'网页 Agent'→'HTTP Agent'` |
-| R13 | 方形卡+版本+详情+0.3 | `extensions/index.js` + `presets/index.js` | `.bh-ext-card aspect-ratio:1/1`；版本占描述位；`showExtDetailDialog`；v0.3 + detail/usage |
-| R14 | 小尺寸 resize 手柄不消失/不飞出 | `OverlayRoot.ResizeHandle` + `AgentOverlayService.resizePanelBy` | 固定 26dp 触摸区 + 半透明底 `#33000000` + 白色双斜线；锚在缩放后面板的圆角内，使用 inverse scale 保持触摸尺寸，Service 每次 scale 变化后 `requestLayout()+updateViewLayout()`。 |
+| R13 | 三列方形卡+版本+详情+0.6 | `extensions/index.js` + `presets/index.js` | `.bh-ext-card aspect-ratio:1/1`；`#bh-ext-body` 三列 `repeat(3,minmax(0,1fr))`；版本占描述位；`showExtDetailDialog`；v0.6 + detail/usage |
+| R14 | 小尺寸 resize 手柄不消失/不飞出 | `OverlayRoot.ResizeHandle` + `AgentOverlayService.resizePanelBy` | 左右底角固定 30dp 隐形触摸区 + 细灰弧线；锚在缩放后面板的圆角内，使用 inverse scale 保持触摸尺寸，Service 每次 scale 变化后 `requestLayout()+updateViewLayout()`。 |
 
 > R6 Plan 卡片仍是手动入口/展示态；R5/R7/R8/R9 已接真实后端或系统能力。
 
@@ -249,8 +257,8 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
    `androidx.compose.animation.using`（会被判未用 → fail）。
 4. **缩放常量两处同步**：`PANEL_BASE_W_DP/H_DP` 在 `OverlayRoot.kt` 和 `AgentOverlayService.kt`
    各有一份，改一处必须改另一处，否则窗口像素与内容布局错位。
-5. **resize 手柄必须跟随缩放后圆角**：当前做法是放在缩放面板内部右下角，并给手柄本身做
-   inverse scale 保持 26dp 触摸区；`AgentOverlayService.resizePanelBy()` 每次 scale 变化后必须
+5. **resize 手柄必须跟随缩放后圆角**：当前做法是把左右底角手柄放在缩放面板内部，并给手柄本身做
+   inverse scale 保持 30dp 隐形触摸区；`AgentOverlayService.resizePanelBy()` 每次 scale 变化后必须
    `requestLayout()+updateViewLayout()`，否则缩小时手柄可能停在旧窗口尺寸外侧。
 6. **窗口焦点 flag**：收起=`FLAG_NOT_FOCUSABLE`（小球不抢焦点/返回键）；展开=清除该 flag
    （面板输入框才能收 IME）。这也是聊天 UI 用原生而非 Gecko shadow-DOM input 的原因。
@@ -308,13 +316,16 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 ### 本轮后端补齐（2026-06-21，未提交）
 - 原生悬浮窗接入 `AgentEngine`：OpenAI 兼容 Chat Completions 支持 tool calls，Anthropic 当前普通对话。
 - `AgentToolRegistry` 改为 APK 内部工具层；S1/S2/S3 各自生成工具注册表，低权限层看不到高权限工具。
+- 权限层实时性补强：`AgentEngine` 每轮在 `convo` 后追加不持久化的 runtime system 消息，声明当前权限层和本轮模型可见工具，覆盖旧历史里的 S1/S2 说法。
+- 工具结果展示修复：完整工具返回只进 `Role.Tool` 给模型，可见 `ToolCard` 默认不再摘 `result.text`；写/删/批量写/页面改写显示 Codex 风格 `Edited <path> (+N -M)`，代码框内按行号渲染 `+` 绿色、`-` 红色。
 - 二次确认改为 Codex 风格的按范围授权：文件按路径/路径组、网络按 method+host、拦截按 flow、JS 按片段 hash 记住；新聊天清空 grant。
 - 新增内部工具：`batch_edit_files`、`browser_request`、`page_fetch`、`container_serve_url`、`private_batch_edit_files`。
 - 新增全权限工具：`create_plan`、`update_plan`、`write_code_file`、`delete_code_from_file`；四个工具注册为 S1，因此 S1/S2/S3 都可见。代码文件写删只作用于 Agent 外部容器。
 - 设置页新增「高级」子页：展示所有内部工具、最低权限层和自检状态；点工具会用固定测试参数真实调用后端工具，OK 显示 OK，失败直接显示原始失败文本；支持「全部自检」。
+- 记忆持久化补齐：`AgentSettingsStore` 新增 `memory_summary`；`MemoryScreen` 支持摘要/条目编辑和「生成摘要」；`AgentEngine` 每轮结束后调用 `maybeExtractMemories()` 只提炼新增长期记忆条目，`generateMemorySummary()` 按需把已有记忆压缩进 `memorySummary` 并持久化。
 - Agent 容器改到外部 app-files `agent_container`，不再用 `/data/data` 下的容器目录；`container_serve_url` 启动 `127.0.0.1` 只读文件服务供网页加载容器资源。
 - 修复设置/设置子页 overlay 左右互换和露底闪一下的问题：抽屉仍从左出，设置与子页共用右侧全屏层；返回箭头左移。
-- 修复右下 resize 手柄缩小时飞出圆角：手柄锚在缩放后面板内部，手柄自身 inverse scale。
+- 修复 resize 手柄缩小时飞出圆角：左右底角手柄锚在缩放后面板内部，手柄自身 inverse scale，视觉改为细灰弧线。
 
 ### 第三轮 `3c79a488`（2026-06-21，CI 绿+真机待验）
 动画打磨 + 二次确认/Plan/代码块 + 权限滑块 + 设置重排 + 记忆 + 拓展方形卡。
@@ -366,7 +377,7 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 
 > 注：拓展插件框架本身（`81378531` 方块卡 + 生命周期、`f8fed3bf`「拓展」升为顶级 Eruda tool、
 > 截流插件 `2effaa19`/`8d1d4175`）属于 DevTools 扩展那条线，细节看 CLAUDE.md。本轮只把
-> 拓展卡片改方形 + 详情弹窗、把 web-agent 改名 HTTP Agent + v0.3。
+> 拓展卡片改三列紧凑方形 + 详情弹窗、把 web-agent 改名 HTTP Agent + v0.6。
 
 ---
 
@@ -502,3 +513,54 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 - `assets/extensions/devtools_injector/agent.js` — 页面侧 `bhHandleAgentCmd`：getSource/searchSource/queryDOM/evalJS。
 - `devtools/NetFlowStore` — 未脱敏 flow 内部库（network_*/cookie_reveal/占位符取真值）。
 - 详见 CLAUDE.md「BrowserHelper 现有工作层映射」「可借用/不要搬运」「硬边界」。
+
+---
+
+## 13. 本轮待办计划（UI/后端第三轮，2026-06-21，进行中未提交）
+
+> 用户连续三批反馈合并一次性做完（"一大堆都一次性做完 / 弄完"）。全部完成后单 commit 推 CI 出 APK 真机验。
+> 实现顺序按风险从低到高：先结构性修复（解锁其它项），再后端，再 UI 细节。
+
+### A. 已确诊的结构性 Bug
+
+- **#31 收起→展开对话丢失 + 无历史记录**
+  - 根因：`OverlayRoot.kt` 的 `AnimatedContent(targetState = expanded)` 在收起时销毁 `AgentPanel`→`AgentPanelHost`→`rememberPanelState()`，状态随之销毁。`ComposeView`/`OverlayRoot` 组合本身在收起时仍存活（只是 `expandedState` 翻转），所以把 `rememberPanelState()`（+ engine + scope + settings）**上提到 `OverlayRoot` 顶层**（`AnimatedContent` 之上），再把 `state` 透传进 `AgentPanel`→`AgentPanelHost(state=…)` 即可跨收起/展开存活。
+  - 历史记录：`recentChats` 一直空；新会话开始 / 收到首条回复后应生成一条记录（标题见 #34）。
+
+- **#26 工具完整返回污染对话**
+  - 根因：`AgentEngine.start()` 把 `result.text.take(900)` 通过 `appendAssistant(... toolStatus(call, "完成\n$shown"))` 写进**可见消息** `state.messages`。
+  - 修复：可见层只显示**紧凑状态**（工具名 + 完成/失败 + 安全摘要/diff，见 #38），**完整 result.text 只进 `convo`**（Role.Tool）喂模型；默认工具卡不再摘 raw `result.text`。
+
+- **#27 权限层切换不实时生效**
+  - 现状：`systemPrompt(state)` 每轮重建已读最新 `permTier`，但模型锚定历史里旧的 S1 描述。
+  - 修复：① 提示词里把"当前权限层"写成**权威实时**字段并强调以本字段为准；② 切换权限层时往 `convo` 注入一条提示说明"权限层已变更为 Sx"；③ 每轮请求在历史末尾追加不持久化 runtime system 状态，包含当前权限层和可见工具清单，压过旧历史。
+
+### B. 系统提示词（#28）
+
+- 从 codex 源码 `/data/data/com.termux/files/usr/tmp/codex-termux-v0.140.0/codex-rs/core/gpt_5_codex_prompt.md` 提炼，浓缩并改写成**网络浏览器 Agent** 口吻：身份、可用工具域（页面/网络/容器）、计划工具使用时机、审批语义、输出风格（简洁、引用路径、代码围栏）、当前权限层（实时权威）。在 `AgentEngine.systemPrompt()` 内扩充。
+
+### C. 第二轮收尾
+
+- **#33 流式输出**：重新加回 SSE（`AgentHttp` 加 `postSse`），OpenAI `stream:true` 解析 `data:` 增量 + `tool_calls` 增量；Anthropic `messages` SSE（`content_block_delta` 等）。增量 thread 进当前可见 assistant 消息。**坑**：`allWarningsAsErrors`，注意 import / 弃用 API。
+- **#34 按会话 AI 生成标题**：已改为凑够前两句真实用户输入后只做一次轻量 AI 命名，生成短标题写进 `recentChats`（与 #31 历史记录合流），后续不实时更新。
+- ~~楷书字体~~：用户已**取消**，不做。
+
+### D. UI 细节
+
+- **#29 多行输入框变形**：`ChatScreen.InputBar` 外层用 `AgentShapes.Pill`（percent=50）→ 多行时被撑成中间粗两边细的椭圆。改成固定圆角矩形（如 `RoundedCornerShape(22.dp)`），多行时纵向扩成圆角长方形。
+- **#30 审批卡长命令截断 + 详情全屏窗**：已做。`ApprovalSheet` 的 `req.detail` 超 360 字截断加省略号 +「详情」按钮，打开右侧全屏可滚动页显示完整指令行。
+- **#32 字面 \n 转义未处理**：已做。显示层 `ChatScreen.unescapeText()` 在 `AssistantContent` 前把 `\n`、`\t`、`\r`、`\"`、`\\` 等常见转义还原成真实字符。
+- **#36 resize 手柄改细灰弧线**：已做。`OverlayRoot.ResizeHandle` 只画细灰弧线，底部左右两角都有 30dp 隐形触摸区，拖任一角可缩放。
+- **#38 agent 风格工具结果 + diff 代码框**：已按 Codex 风格渲染。`write_code_file` / `delete_code_from_file` / `batch_edit_files` / `private_batch_edit_files` / 页面改写工具显示 `Edited <path> (+N -M)`，下面 `DiffBlock` 按行号输出 `+` 绿色、`-` 红色；工具结果 JSON 增加 `addedLines` / `removedLines` / `removedPreview` 等字段供 UI 构造 diff。
+
+### E. 计划流 + 审批设置
+
+- **#37 计划提出后 turn 不结束 + 批准自动继续**：现在模型调 create_plan 后 turn 结束（`reply.toolCalls` 处理完循环退出），用户批准 PlanCard 只是 `state.planMode=false` 不继续。改成：PlanCard "批准并开始" → 把批准信号喂回引擎循环（注入一条 user/tool 消息"用户已批准计划，继续执行"并重新 `onTurn`），模型自动继续；不再要用户手动重发。
+- **#39 一键自动放行设置**：设置里新增一项（自选图标），点进去先有配置项"自动同意所有请求"，**默认关闭**；左侧开关打开后不再二次确认（`PanelState.autoApproveAll`，`requestApproval`/`hasApprovalGrant` 直接放行）。持久化到 `AgentSettingsStore`（`auto_approve_all`）。
+- **#40 补全 update_plan 等计划工具**：`create_plan`/`update_plan` 已注册（AgentTools.kt:1172-1181，均 S1，title/steps/content）。本项主要是验证流程完整 + 配合 #37 让计划闭环。
+
+### 验证
+
+- JS 无改动（本轮纯 Kotlin/Compose）。
+- Kotlin 本地无 Java17 → 推 `haoyangtu09-art/BrowserHelper-Gecko` 触发 CI（`allWarningsAsErrors`：未用 import/弃用 API 会 fail），出 `BrowserHelper-Gecko-<SHA>-arm64.apk` 真机验。
+- 真机逐项核对 #26–#40。

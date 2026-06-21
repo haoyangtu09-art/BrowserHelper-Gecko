@@ -22,8 +22,10 @@ class AgentSettingsStore(context: Context) {
         state.selectedModel = sp.getString("selected_model", null)
         state.persona = sp.getString("persona", "平衡").orEmpty().ifBlank { "平衡" }
         state.memoryEnabled = sp.getBoolean("memory_enabled", true)
+        state.memorySummary = sp.getString("memory_summary", "").orEmpty()
         state.tier = enumValue(sp.getString("reason_tier", null), ReasonTier.Middle)
         state.permTier = enumValue(sp.getString("perm_tier", null), AgentPermissionTier.S1)
+        state.autoApproveAll = sp.getBoolean("auto_approve_all", false)
         state.memories.clear()
         val arr = try {
             JSONArray(sp.getString("memories", "[]") ?: "[]")
@@ -32,6 +34,15 @@ class AgentSettingsStore(context: Context) {
         }
         for (i in 0 until arr.length()) {
             arr.optString(i, "").takeIf { it.isNotBlank() }?.let { state.memories.add(it) }
+        }
+        state.recentChats.clear()
+        val chats = try {
+            JSONArray(sp.getString("recent_chats", "[]") ?: "[]")
+        } catch (_: Throwable) {
+            JSONArray()
+        }
+        for (i in 0 until chats.length()) {
+            chats.optString(i, "").takeIf { it.isNotBlank() }?.let { state.recentChats.add(it) }
         }
     }
 
@@ -45,9 +56,12 @@ class AgentSettingsStore(context: Context) {
             .putString("selected_model", state.selectedModel)
             .putString("persona", state.persona)
             .putBoolean("memory_enabled", state.memoryEnabled)
+            .putString("memory_summary", state.memorySummary)
             .putString("reason_tier", state.tier.name)
             .putString("perm_tier", state.permTier.name)
+            .putBoolean("auto_approve_all", state.autoApproveAll)
             .putString("memories", JSONArray().also { arr -> state.memories.forEach { arr.put(it) } }.toString())
+            .putString("recent_chats", JSONArray().also { arr -> state.recentChats.forEach { arr.put(it) } }.toString())
             .apply()
     }
 

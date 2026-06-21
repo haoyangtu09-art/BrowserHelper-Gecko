@@ -63,6 +63,48 @@ internal suspend fun getText(
     }
 }
 
+/**
+ * Streaming JSON POST over Server-Sent Events. Each `data:` payload (minus the prefix) is
+ * handed to [onData] as it arrives; the terminal `[DONE]` sentinel stops the stream. Non-2xx
+ * throws [AgentHttpException] with the (truncated) error body. The body must request streaming
+ * (e.g. `"stream": true`) for the server to actually emit SSE.
+ */
+internal suspend fun postSse(
+    endpoint: String,
+    headers: Map<String, String>,
+    body: String,
+    onData: (String) -> Unit,
+) = withContext(Dispatchers.IO) {
+    val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        doOutput = true
+        connectTimeout = 30_000
+        readTimeout = 120_000
+        setRequestProperty("Content-Type", "application/json")
+        setRequestProperty("Accept", "text/event-stream")
+        headers.forEach { (k, v) -> setRequestProperty(k, v) }
+    }
+    try {
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            val text = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            throw AgentHttpException(code, text)
+        }
+        conn.inputStream.bufferedReader().use { reader ->
+            reader.lineSequence().forEach { line ->
+                if (line.startsWith("data:")) {
+                    val payload = line.substring(5).trim()
+                    if (payload == "[DONE]") return@use
+                    if (payload.isNotEmpty()) onData(payload)
+                }
+            }
+        }
+    } finally {
+        conn.disconnect()
+    }
+}
+
 /** Plain JSON POST returning the response object. Non-2xx throws [AgentHttpException]. */
 internal suspend fun postJson(
     endpoint: String,

@@ -10,10 +10,17 @@ package org.mozilla.reference.browser.agent.core
  * wire format — the turn loop (history building, UI updates) lives in the engine above them.
  */
 interface ChatBackend {
+    /**
+     * Runs one model turn. When [onTextDelta] is non-null the backend streams the reply over
+     * SSE and invokes the callback with each text fragment as it arrives (the returned
+     * [ChatReply] still carries the full accumulated text + any tool calls). When null it does
+     * a plain non-streaming request.
+     */
     suspend fun complete(
         config: AgentConfig,
         messages: List<AgentMessage>,
         tools: List<ChatToolSpec> = emptyList(),
+        onTextDelta: ((String) -> Unit)? = null,
     ): ChatReply
 
     suspend fun listModels(config: AgentConfig): List<String>

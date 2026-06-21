@@ -20,6 +20,7 @@ class AnthropicBackend : ChatBackend {
         config: AgentConfig,
         messages: List<AgentMessage>,
         tools: List<ChatToolSpec>,
+        onTextDelta: ((String) -> Unit)?,
     ): ChatReply {
         val system = messages.filter { it.role == Role.System }
             .joinToString("\n") { it.content }
@@ -29,6 +30,7 @@ class AnthropicBackend : ChatBackend {
             put("max_tokens", config.maxTokens)
             if (system.isNotEmpty()) put("system", system)
             put("messages", buildMessages(turns))
+            if (onTextDelta != null) put("stream", true)
             if (tools.isNotEmpty()) {
                 put("tools", JSONArray().also { arr ->
                     tools.forEach { spec ->
@@ -43,6 +45,9 @@ class AnthropicBackend : ChatBackend {
             }
         }.toString()
         val endpoint = Endpoints.anthropicBase(config.baseUrl) + "/messages"
+        if (onTextDelta != null) {
+            return completeStreaming(endpoint, headers(config), body, onTextDelta)
+        }
         val obj = postJson(endpoint, headers(config), body)
         val content = obj.optJSONArray("content") ?: return ChatReply("")
         val text = StringBuilder()
@@ -65,6 +70,67 @@ class AnthropicBackend : ChatBackend {
             }
         }
         return ChatReply(text.toString(), calls)
+    }
+
+    /**
+     * Accumulates a streamed Messages reply. Content blocks arrive as `content_block_start`
+     * (carrying the block type + tool_use id/name), then `content_block_delta` with either a
+     * `text_delta` (streamed to [onTextDelta]) or an `input_json_delta` (tool argument JSON
+     * fragments). Blocks are tracked by their `index` and assembled into the final reply.
+     */
+    private suspend fun completeStreaming(
+        endpoint: String,
+        headers: Map<String, String>,
+        body: String,
+        onTextDelta: (String) -> Unit,
+    ): ChatReply {
+        val text = StringBuilder()
+        // index -> [isToolUse, id, name, accumulator(text or partial_json)]
+        val blocks = LinkedHashMap<Int, ToolBlock>()
+        postSse(endpoint, headers, body) { payload ->
+            val ev = try {
+                JSONObject(payload)
+            } catch (_: Exception) {
+                return@postSse
+            }
+            when (ev.optString("type")) {
+                "content_block_start" -> {
+                    val idx = ev.optInt("index", 0)
+                    val block = ev.optJSONObject("content_block")
+                    if (block?.optString("type") == "tool_use") {
+                        blocks[idx] = ToolBlock(
+                            id = block.optString("id", "call_$idx"),
+                            name = block.optString("name", ""),
+                        )
+                    }
+                }
+                "content_block_delta" -> {
+                    val d = ev.optJSONObject("delta") ?: return@postSse
+                    when (d.optString("type")) {
+                        "text_delta" -> {
+                            val frag = d.optString("text", "")
+                            if (frag.isNotEmpty()) {
+                                text.append(frag)
+                                onTextDelta(frag)
+                            }
+                        }
+                        "input_json_delta" -> {
+                            val idx = ev.optInt("index", 0)
+                            blocks[idx]?.args?.append(d.optString("partial_json", ""))
+                        }
+                    }
+                }
+            }
+        }
+        val calls = blocks.values.mapNotNull { b ->
+            if (b.name.isEmpty()) return@mapNotNull null
+            ChatToolCall(id = b.id, name = b.name, arguments = b.args.toString().ifEmpty { "{}" })
+        }
+        return ChatReply(text.toString(), calls)
+    }
+
+    private class ToolBlock(val id: String, val name: String) {
+        val args = StringBuilder()
     }
 
     /**

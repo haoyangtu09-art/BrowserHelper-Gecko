@@ -18,11 +18,13 @@ class OpenAiBackend : ChatBackend {
         config: AgentConfig,
         messages: List<AgentMessage>,
         tools: List<ChatToolSpec>,
+        onTextDelta: ((String) -> Unit)?,
     ): ChatReply {
         val body = JSONObject().apply {
             put("model", config.model)
             put("max_tokens", config.maxTokens)
             put("messages", messages.toJson())
+            if (onTextDelta != null) put("stream", true)
             if (tools.isNotEmpty()) {
                 put("tools", JSONArray().also { arr ->
                     tools.forEach { spec ->
@@ -43,7 +45,11 @@ class OpenAiBackend : ChatBackend {
             }
         }.toString()
         val endpoint = Endpoints.openAiBase(config.baseUrl) + "/chat/completions"
-        val obj = postJson(endpoint, mapOf("Authorization" to "Bearer ${config.apiKey}"), body)
+        val headers = mapOf("Authorization" to "Bearer ${config.apiKey}")
+        if (onTextDelta != null) {
+            return completeStreaming(endpoint, headers, body, onTextDelta)
+        }
+        val obj = postJson(endpoint, headers, body)
         val msg = obj.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
             ?: return ChatReply("")
         val calls = ArrayList<ChatToolCall>()
@@ -64,6 +70,58 @@ class OpenAiBackend : ChatBackend {
             }
         }
         return ChatReply(msg.optString("content", ""), calls)
+    }
+
+    /**
+     * Accumulates a streamed Chat Completions reply: `choices[0].delta.content` fragments are
+     * appended (and pushed to [onTextDelta] live), while `delta.tool_calls` fragments are
+     * merged by index (id/name set once, argument fragments concatenated) into final calls.
+     */
+    private suspend fun completeStreaming(
+        endpoint: String,
+        headers: Map<String, String>,
+        body: String,
+        onTextDelta: (String) -> Unit,
+    ): ChatReply {
+        val text = StringBuilder()
+        // index -> [id, name, argsBuilder]
+        val toolAcc = LinkedHashMap<Int, Triple<StringBuilder, StringBuilder, StringBuilder>>()
+        postSse(endpoint, headers, body) { payload ->
+            val chunk = try {
+                JSONObject(payload)
+            } catch (_: Exception) {
+                return@postSse
+            }
+            val delta = chunk.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
+                ?: return@postSse
+            val frag = delta.optString("content", "")
+            if (frag.isNotEmpty()) {
+                text.append(frag)
+                onTextDelta(frag)
+            }
+            val tcs = delta.optJSONArray("tool_calls") ?: return@postSse
+            for (i in 0 until tcs.length()) {
+                val tc = tcs.optJSONObject(i) ?: continue
+                val idx = tc.optInt("index", i)
+                val acc = toolAcc.getOrPut(idx) { Triple(StringBuilder(), StringBuilder(), StringBuilder()) }
+                tc.optString("id", "").takeIf { it.isNotEmpty() }?.let { if (acc.first.isEmpty()) acc.first.append(it) }
+                val fn = tc.optJSONObject("function")
+                if (fn != null) {
+                    fn.optString("name", "").takeIf { it.isNotEmpty() }?.let { if (acc.second.isEmpty()) acc.second.append(it) }
+                    acc.third.append(fn.optString("arguments", ""))
+                }
+            }
+        }
+        val calls = toolAcc.entries.mapNotNull { (idx, acc) ->
+            val name = acc.second.toString()
+            if (name.isEmpty()) return@mapNotNull null
+            ChatToolCall(
+                id = acc.first.toString().ifEmpty { "call_$idx" },
+                name = name,
+                arguments = acc.third.toString().ifEmpty { "{}" },
+            )
+        }
+        return ChatReply(text.toString(), calls)
     }
 
     override suspend fun listModels(config: AgentConfig): List<String> {

@@ -48,7 +48,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,7 +55,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.core.AgentApprovalDecision
@@ -74,26 +72,18 @@ import org.mozilla.reference.browser.agent.ui.theme.AgentText
  * page switches cannot briefly expose the wrong page underneath.
  */
 @Composable
-fun AgentPanelHost(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val state = rememberPanelState()
-    val scope = rememberCoroutineScope()
-    val engine = remember { AgentEngine(context.applicationContext) }
-    val settings = remember { AgentSettingsStore(context.applicationContext) }
-    state.onTurn = { engine.start(scope, state) }
-    state.onStop = { engine.cancel() }
-    state.onLoadModels = { engine.loadModels(scope, state) }
-    state.onPersist = { settings.save(state) }
-    state.onToolSelfTest = { name -> engine.testTool(scope, state, name) }
-    state.onToolSelfTestAll = { engine.testAllTools(scope, state) }
-    LaunchedEffect(Unit) { settings.loadInto(state) }
+fun AgentPanelHost(state: PanelState, modifier: Modifier = Modifier) {
     val fullScreenNav = when (state.nav) {
         PanelNav.Settings, PanelNav.Personalization, PanelNav.Memory, PanelNav.Advanced -> state.nav
         else -> null
     }
     var lastFullScreenNav by remember { mutableStateOf<PanelNav?>(PanelNav.Settings) }
+    var approvalDetail by remember { mutableStateOf<ApprovalReq?>(null) }
     LaunchedEffect(fullScreenNav) {
         if (fullScreenNav != null) lastFullScreenNav = fullScreenNav
+    }
+    LaunchedEffect(state.pendingApproval) {
+        if (state.pendingApproval == null) approvalDetail = null
     }
     Box(modifier.fillMaxSize()) {
         ChatScreen(
@@ -168,10 +158,21 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
             state.pendingApproval?.let { req ->
                 ApprovalSheet(
                     req = req,
+                    onShowDetail = { approvalDetail = req },
                     onDecision = { decision ->
+                        approvalDetail = null
                         state.resolveApproval(decision)
                     },
                 )
+            }
+        }
+        AnimatedVisibility(
+            visible = approvalDetail != null,
+            enter = slideInHorizontally(tween(220)) { it } + fadeIn(tween(180)),
+            exit = slideOutHorizontally(tween(180)) { it } + fadeOut(tween(140)),
+        ) {
+            approvalDetail?.let { req ->
+                ApprovalDetailScreen(req = req, onBack = { approvalDetail = null })
             }
         }
     }
@@ -183,7 +184,14 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
  * conversation / deny. Tool calls suspend until this sheet resolves.
  */
 @Composable
-private fun ApprovalSheet(req: ApprovalReq, onDecision: (AgentApprovalDecision) -> Unit) {
+private fun ApprovalSheet(
+    req: ApprovalReq,
+    onShowDetail: () -> Unit,
+    onDecision: (AgentApprovalDecision) -> Unit,
+) {
+    val detail = req.detail.trim()
+    val tooLong = detail.length > 360
+    val shownDetail = if (tooLong) detail.take(360) + "…" else detail
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -195,7 +203,15 @@ private fun ApprovalSheet(req: ApprovalReq, onDecision: (AgentApprovalDecision) 
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
             BasicText(req.title, style = AgentText.Title)
             Spacer(Modifier.height(6.dp))
-            BasicText(req.detail, style = AgentText.Secondary)
+            BasicText(shownDetail, style = AgentText.Secondary)
+            if (tooLong) {
+                Spacer(Modifier.height(8.dp))
+                BasicText(
+                    "详情",
+                    style = AgentText.Label.copy(color = AgentColors.Accent),
+                    modifier = Modifier.clickable { onShowDetail() }.padding(vertical = 4.dp),
+                )
+            }
         }
         ApprovalOption(req.approveLabel) { onDecision(AgentApprovalDecision.Approve) }
         Box(Modifier.fillMaxWidth().height(1.dp).background(AgentColors.HairlineFaint))
@@ -212,6 +228,34 @@ private fun ApprovalOption(label: String, onClick: () -> Unit) {
         style = AgentText.Body,
         modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 16.dp, vertical = 14.dp),
     )
+}
+
+@Composable
+private fun ApprovalDetailScreen(req: ApprovalReq, onBack: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(AgentColors.Surface)
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        ScreenHeader("请求详情", onBack)
+        Spacer(Modifier.height(16.dp))
+        BasicText(req.title, style = AgentText.Title)
+        Spacer(Modifier.height(8.dp))
+        BasicText(req.scopeLabel, style = AgentText.Secondary)
+        Spacer(Modifier.height(14.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(AgentShapes.Field)
+                .background(Color.White)
+                .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Field)
+                .padding(14.dp),
+        ) {
+            BasicText(req.detail, style = AgentText.Body)
+        }
+    }
 }
 
 /**
@@ -244,7 +288,7 @@ private fun PlanCard(state: PanelState) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(
                 Modifier.clip(AgentShapes.Pill).background(AgentColors.Accent)
-                    .clickable { state.planMode = false }
+                    .clickable { state.approvePlan() }
                     .padding(horizontal = 16.dp, vertical = 9.dp),
             ) { BasicText("批准并开始", style = AgentText.Body.copy(color = Color.White)) }
             Box(
@@ -461,9 +505,46 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
                 ToggleSwitch(state.memoryEnabled) { state.memoryEnabled = !state.memoryEnabled; state.persist() }
             }
             GroupDivider()
-            Box(
-                Modifier.fillMaxWidth().clickable { }.padding(horizontal = 14.dp, vertical = 13.dp),
-            ) { BasicText("记忆摘要", style = AgentText.Body) }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 13.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    BasicText("记忆摘要", style = AgentText.Body)
+                    Spacer(Modifier.weight(1f))
+                    if (state.memoryUpdating) {
+                        BasicText("整理中", style = AgentText.Label.copy(color = AgentColors.Accent))
+                    } else {
+                        Box(
+                            Modifier
+                                .clip(AgentShapes.Pill)
+                                .background(AgentColors.Control)
+                                .clickable { state.generateMemorySummary() }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                        ) {
+                            BasicText("生成摘要", style = AgentText.Label.copy(color = AgentColors.TextPrimary))
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    Modifier.fillMaxWidth().height(92.dp).clip(AgentShapes.Field).background(Color.White)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    BasicTextField(
+                        value = state.memorySummary,
+                        onValueChange = { state.setMemorySummary(it) },
+                        singleLine = false,
+                        textStyle = AgentText.Body,
+                        cursorBrush = SolidColor(AgentColors.Accent),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    if (state.memorySummary.isBlank()) {
+                        BasicText("还没有摘要", style = AgentText.Secondary)
+                    }
+                }
+                if (state.memorySummaryError.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    BasicText(state.memorySummaryError, style = AgentText.Label.copy(color = AgentColors.TextSecondary))
+                }
+            }
         }
         Spacer(Modifier.height(14.dp))
         // Stored memories: header + add affordance, then a deletable list (empty → hint).
@@ -472,7 +553,7 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
             Spacer(Modifier.weight(1f))
             Box(
                 Modifier.size(28.dp).clip(CircleShape).background(Color.White)
-                    .clickable { state.memories.add("记忆 ${state.memories.size + 1}"); state.persist() },
+                    .clickable { state.addMemory("") },
                 contentAlignment = Alignment.Center,
             ) { PlusIcon(color = AgentColors.TextPrimary, size = 16.dp) }
         }
@@ -487,9 +568,21 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
                         .padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    BasicText(item, style = AgentText.Body, modifier = Modifier.weight(1f))
+                    Box(Modifier.weight(1f)) {
+                        BasicTextField(
+                            value = item,
+                            onValueChange = { state.updateMemory(i, it) },
+                            singleLine = false,
+                            textStyle = AgentText.Body,
+                            cursorBrush = SolidColor(AgentColors.Accent),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (item.isBlank()) {
+                            BasicText("输入一条记忆", style = AgentText.Secondary)
+                        }
+                    }
                     Box(
-                        Modifier.size(24.dp).clip(CircleShape).clickable { state.memories.removeAt(i); state.persist() },
+                        Modifier.size(24.dp).clip(CircleShape).clickable { state.removeMemory(i) },
                         contentAlignment = Alignment.Center,
                     ) { BasicText("×", style = AgentText.Body.copy(color = AgentColors.TextSecondary)) }
                 }
@@ -659,7 +752,7 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 BasicText("智能", style = AgentText.Title)
                 Spacer(Modifier.weight(1f))
-                PermissionSlider(state.permTier) { state.permTier = it; state.persist() }
+                PermissionSlider(state.permTier) { state.setPermTier(it) }
             }
             Spacer(Modifier.height(10.dp))
             ReasonTier.values().forEach { tier ->

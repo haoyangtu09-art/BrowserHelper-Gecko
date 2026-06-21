@@ -614,6 +614,11 @@ class AgentToolRegistry(
         if (path.isBlank()) return err("path required")
         if (code.toByteArray(Charsets.UTF_8).size > FILE_WRITE_CAP) return err("code too large")
         val file = resolvePath(containerRoot(), path) ?: return err("invalid path")
+        val old = if (file.exists() && file.isFile && file.length() <= FILE_READ_CAP) {
+            file.readText(Charsets.UTF_8)
+        } else {
+            ""
+        }
         file.parentFile?.mkdirs()
         val mode = args.optString("mode", "replace").lowercase()
         if (mode == "append") {
@@ -626,6 +631,11 @@ class AgentToolRegistry(
                 .put("path", relativePath(containerRoot(), file))
                 .put("mode", mode)
                 .put("chars", code.length)
+                .put("addedLines", lineCount(code))
+                .put("removedLines", if (mode == "append") 0 else lineCount(old))
+                .put("oldLines", lineCount(old))
+                .put("newLines", lineCount(if (mode == "append") old + code else code))
+                .put("removedPreview", if (mode == "append") "" else previewText(old))
                 .toString(),
         )
     }
@@ -638,8 +648,13 @@ class AgentToolRegistry(
         if (!file.isFile) return err("not a file")
         if (file.length() > FILE_READ_CAP) return err("file too large (${file.length()} bytes)")
         val old = file.readText(Charsets.UTF_8)
+        var removedText = ""
+        var removedStartLine = 1
         val next = when {
-            args.optBoolean("all", false) -> ""
+            args.optBoolean("all", false) -> {
+                removedText = old
+                ""
+            }
             args.optInt("startLine", 0) > 0 -> {
                 val start = args.optInt("startLine", 0)
                 val end = args.optInt("endLine", start)
@@ -648,6 +663,8 @@ class AgentToolRegistry(
                 if (start > lines.size) return err("startLine out of range")
                 val from = start - 1
                 val to = minOf(end, lines.size) - 1
+                removedText = lines.subList(from, to + 1).joinToString("\n")
+                removedStartLine = start
                 for (i in to downTo from) lines.removeAt(i)
                 lines.joinToString("\n")
             }
@@ -663,12 +680,16 @@ class AgentToolRegistry(
                     if (endIdx < 0) return err("endMarker not found")
                     endIdx + endMarker.length
                 }
+                removedText = old.substring(from, to)
+                removedStartLine = lineNumberAt(old, from)
                 old.removeRange(from, to)
             }
             args.optString("code", "").isNotEmpty() -> {
                 val code = args.optString("code", "")
                 val from = old.indexOf(code)
                 if (from < 0) return err("code snippet not found")
+                removedText = code
+                removedStartLine = lineNumberAt(old, from)
                 old.removeRange(from, from + code.length)
             }
             else -> return err("delete range required: all, startLine/endLine, startMarker/endMarker, or code")
@@ -678,6 +699,9 @@ class AgentToolRegistry(
             JSONObject()
                 .put("path", relativePath(containerRoot(), file))
                 .put("removedChars", old.length - next.length)
+                .put("removedLines", lineCount(removedText))
+                .put("removedStartLine", removedStartLine)
+                .put("removedPreview", previewText(removedText))
                 .toString(),
         )
     }
@@ -765,7 +789,7 @@ class AgentToolRegistry(
     private fun batchWriteFiles(root: File, edits: JSONArray): AgentToolResult {
         if (edits.length() == 0) return err("edits required")
         if (edits.length() > 40) return err("too many edits; max 40 files")
-        val planned = ArrayList<Pair<File, String>>()
+        val planned = ArrayList<Triple<File, String, String>>()
         for (i in 0 until edits.length()) {
             val item = edits.optJSONObject(i) ?: return err("edit[$i] must be an object")
             val path = item.optString("path", "")
@@ -774,18 +798,28 @@ class AgentToolRegistry(
                 return err("edit[$i] content too large")
             }
             val file = resolvePath(root, path) ?: return err("edit[$i] invalid path")
-            planned.add(file to content)
+            val old = if (file.exists() && file.isFile && file.length() <= FILE_READ_CAP) {
+                file.readText(Charsets.UTF_8)
+            } else {
+                ""
+            }
+            planned.add(Triple(file, content, old))
         }
-        planned.forEach { (file, content) ->
+        planned.forEach { (file, content, _) ->
             file.parentFile?.mkdirs()
             file.writeText(content, Charsets.UTF_8)
         }
         val out = JSONArray()
-        planned.forEach { (file, content) ->
+        planned.forEach { (file, content, old) ->
             out.put(
                 JSONObject()
                     .put("path", relativePath(root, file))
-                    .put("chars", content.length),
+                    .put("chars", content.length)
+                    .put("addedLines", lineCount(content))
+                    .put("removedLines", lineCount(old))
+                    .put("oldLines", lineCount(old))
+                    .put("newLines", lineCount(content))
+                    .put("removedPreview", previewText(old)),
             )
         }
         return ok(JSONObject().put("written", out).toString())
@@ -942,6 +976,20 @@ class AgentToolRegistry(
 private fun ok(text: String) = AgentToolResult(true, text)
 
 private fun err(text: String) = AgentToolResult(false, text)
+
+private fun lineCount(text: String): Int {
+    if (text.isEmpty()) return 0
+    val lines = text.split('\n')
+    return if (lines.lastOrNull()?.isEmpty() == true) lines.size - 1 else lines.size
+}
+
+private fun lineNumberAt(text: String, index: Int): Int {
+    if (index <= 0) return 1
+    return text.take(index.coerceAtMost(text.length)).count { it == '\n' } + 1
+}
+
+private fun previewText(text: String, maxChars: Int = 20_000): String =
+    if (text.length <= maxChars) text else text.take(maxChars) + "\n…"
 
 private fun parseArgs(raw: String): JSONObject = try {
     if (raw.isBlank()) JSONObject() else JSONObject(raw)

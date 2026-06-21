@@ -34,21 +34,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.R
@@ -82,6 +87,23 @@ fun OverlayRoot(
     onPanelDrag: (Float, Float) -> Unit,
     onPanelResize: (Float, Float) -> Unit,
 ) {
+    // Panel state + backend wiring live here, ABOVE the AnimatedContent, so collapsing to the
+    // ball (which tears down the panel subtree) does not destroy the conversation. Only the
+    // panel/ball visuals are swapped; this state persists for the lifetime of the overlay.
+    val context = LocalContext.current
+    val state = rememberPanelState()
+    val scope = rememberCoroutineScope()
+    val engine = remember { AgentEngine(context.applicationContext) }
+    val settings = remember { AgentSettingsStore(context.applicationContext) }
+    state.onTurn = { engine.start(scope, state) }
+    state.onStop = { engine.cancel() }
+    state.onLoadModels = { engine.loadModels(scope, state) }
+    state.onPersist = { settings.save(state) }
+    state.onToolSelfTest = { name -> engine.testTool(scope, state, name) }
+    state.onToolSelfTestAll = { engine.testAllTools(scope, state) }
+    state.onGenerateMemorySummary = { engine.generateMemorySummary(scope, state) }
+    LaunchedEffect(Unit) { settings.loadInto(state) }
+
     AnimatedContent(
         targetState = expanded,
         // Keep the shared content pinned to the anchored side during the size change.
@@ -105,6 +127,7 @@ fun OverlayRoot(
     ) { isExpanded ->
         if (isExpanded) {
             AgentPanel(
+                state = state,
                 scale = panelScale,
                 onCollapse = onCollapse,
                 onPanelDrag = onPanelDrag,
@@ -192,6 +215,7 @@ private fun AgentBall(
 
 @Composable
 private fun AgentPanel(
+    state: PanelState,
     scale: Float,
     onCollapse: () -> Unit,
     onPanelDrag: (Float, Float) -> Unit,
@@ -293,12 +317,25 @@ private fun AgentPanel(
                 }
 
                 // Chat surface + internal navigation (drawer / settings / model selector).
-                AgentPanelHost(modifier = Modifier.weight(1f))
+                AgentPanelHost(state = state, modifier = Modifier.weight(1f))
             }
-            // Keep the resize grip attached to the panel's rounded corner. It lives inside
-            // the scaled panel so its anchor follows the corner while an inverse layer keeps
-            // the touch target at a stable physical size as the whole panel shrinks.
+            // Keep resize grips attached to the panel's rounded corners. They live inside
+            // the scaled panel so their anchors follow the corners while inverse layers keep
+            // the touch targets at a stable physical size as the whole panel shrinks.
             ResizeHandle(
+                corner = ResizeCorner.Start,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .graphicsLayer {
+                        val inv = 1f / scale.coerceAtLeast(0.01f)
+                        scaleX = inv
+                        scaleY = inv
+                        transformOrigin = TransformOrigin(0f, 1f)
+                    },
+                onResize = { dx, dy -> onPanelResize(-dx, dy) },
+            )
+            ResizeHandle(
+                corner = ResizeCorner.End,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .graphicsLayer {
@@ -313,19 +350,18 @@ private fun AgentPanel(
     }
 }
 
+private enum class ResizeCorner { Start, End }
+
 /**
- * A diagonal grip in the panel's bottom-right corner; dragging resizes the window. It sits
- * at the clipped panel corner and carries its own semi-transparent rounded backing so it
- * stays visible and grabbable even when the panel is scaled all the way down.
+ * A subtle curved resize line in either bottom corner. The visual is just a thin gray arc,
+ * while the invisible 30dp target remains easy to drag at every panel scale.
  */
 @Composable
-private fun ResizeHandle(modifier: Modifier, onResize: (Float, Float) -> Unit) {
+private fun ResizeHandle(corner: ResizeCorner, modifier: Modifier, onResize: (Float, Float) -> Unit) {
     Box(
         modifier = modifier
-            .padding(3.dp)
-            .size(26.dp)
-            .clip(RoundedCornerShape(topStart = 12.dp, bottomEnd = 8.dp))
-            .background(Color(0x33000000))
+            .padding(2.dp)
+            .size(30.dp)
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
@@ -334,19 +370,29 @@ private fun ResizeHandle(modifier: Modifier, onResize: (Float, Float) -> Unit) {
             },
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(modifier = Modifier.size(14.dp)) {
-            val sw = size.minDimension * 0.12f
-            drawLine(
-                Color.White,
-                Offset(size.width, size.height * 0.32f),
-                Offset(size.width * 0.32f, size.height),
-                sw, StrokeCap.Round,
-            )
-            drawLine(
-                Color.White,
-                Offset(size.width, size.height * 0.7f),
-                Offset(size.width * 0.7f, size.height),
-                sw, StrokeCap.Round,
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val path = Path()
+            if (corner == ResizeCorner.End) {
+                path.moveTo(size.width * 0.22f, size.height * 0.86f)
+                path.quadraticTo(
+                    size.width * 0.86f,
+                    size.height * 0.86f,
+                    size.width * 0.86f,
+                    size.height * 0.22f,
+                )
+            } else {
+                path.moveTo(size.width * 0.78f, size.height * 0.86f)
+                path.quadraticTo(
+                    size.width * 0.14f,
+                    size.height * 0.86f,
+                    size.width * 0.14f,
+                    size.height * 0.22f,
+                )
+            }
+            drawPath(
+                path = path,
+                color = Color(0xFFB7B7B7),
+                style = Stroke(width = size.minDimension * 0.08f, cap = StrokeCap.Round),
             )
         }
     }
