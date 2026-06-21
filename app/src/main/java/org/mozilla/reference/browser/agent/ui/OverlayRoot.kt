@@ -17,6 +17,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -34,10 +36,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.unit.dp
 
 /**
@@ -62,11 +66,11 @@ fun OverlayRoot(
         transitionSpec = {
             val origin = TransformOrigin(if (anchorRight) 1f else 0f, 0f)
             (
-                scaleIn(animationSpec = tween(220), initialScale = 0.85f, transformOrigin = origin) +
-                    fadeIn(tween(220))
+                scaleIn(animationSpec = tween(240), initialScale = 0.85f, transformOrigin = origin) +
+                    fadeIn(tween(240))
                 ) togetherWith (
-                scaleOut(animationSpec = tween(180), targetScale = 0.85f, transformOrigin = origin) +
-                    fadeOut(tween(160))
+                scaleOut(animationSpec = tween(320), targetScale = 0.85f, transformOrigin = origin) +
+                    fadeOut(tween(300))
                 ) using SizeTransform(clip = false) { _, _ -> snap() }
         },
         label = "overlay",
@@ -103,16 +107,16 @@ private fun AgentBall(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // Outer white ring (stroke only) with a transparent gap to the ball.
+        // Outer semi-transparent white ring (stroke only), thick and hugging the ball.
         Box(
             modifier = Modifier
                 .size(56.dp)
-                .border(width = 2.dp, color = Color.White, shape = CircleShape),
+                .border(width = 3.dp, color = Color(0x80FFFFFF), shape = CircleShape),
         )
-        // Inner solid white ball.
+        // Inner solid white ball, sized to meet the ring's inner edge (no gap).
         Box(
             modifier = Modifier
-                .size(44.dp)
+                .size(50.dp)
                 .clip(CircleShape)
                 .background(Color.White),
         )
@@ -132,7 +136,10 @@ private fun AgentPanel(
             .width(320.dp)
             .height(520.dp),
     ) {
-        // Blue drag handle near the top-center; a gray ellipse fades in while held.
+        // Blue drag handle near the top-center; a gray ellipse stays visible the whole
+        // time the bar is held (touch-down through drag to release). A single gesture
+        // loop drives both the press feedback and the drag so the ellipse doesn't vanish
+        // once dragging starts.
         var pressed by remember { mutableStateOf(false) }
         val ellipseAlpha by animateFloatAsState(if (pressed) 1f else 0f, label = "ellipse")
         Box(
@@ -140,48 +147,47 @@ private fun AgentPanel(
                 .align(Alignment.TopCenter)
                 .padding(top = 14.dp)
                 .pointerInput(Unit) {
-                    detectTapGestures(
-                        onPress = {
-                            pressed = true
-                            tryAwaitRelease()
-                            pressed = false
-                        },
-                    )
-                }
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = { pressed = true },
-                        onDragEnd = { pressed = false },
-                        onDragCancel = { pressed = false },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            onPanelDrag(dragAmount.x, dragAmount.y)
-                        },
-                    )
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        pressed = true
+                        var down = true
+                        while (down) {
+                            val event = awaitPointerEvent()
+                            event.changes.forEach { change ->
+                                val delta = change.positionChange()
+                                if (delta != Offset.Zero) {
+                                    onPanelDrag(delta.x, delta.y)
+                                    change.consume()
+                                }
+                            }
+                            down = event.changes.any { it.pressed }
+                        }
+                        pressed = false
+                    }
                 },
             contentAlignment = Alignment.Center,
         ) {
             Box(
                 modifier = Modifier
                     .graphicsLayer { alpha = ellipseAlpha }
-                    .size(width = 64.dp, height = 26.dp)
+                    .size(width = 60.dp, height = 24.dp)
                     .clip(RoundedCornerShape(percent = 50))
                     .background(Color(0xFFDADADA)),
             )
             Box(
                 modifier = Modifier
-                    .size(width = 46.dp, height = 5.dp)
+                    .size(width = 42.dp, height = 3.dp)
                     .clip(RoundedCornerShape(percent = 50))
                     .background(Color(0xFF4285F4)),
             )
         }
 
-        // Single collapse control: a minus inside a small gray ball, top-right.
+        // Single collapse control: a minus inside a small gray ball, top-right (compact).
         Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(12.dp)
-                .size(28.dp)
+                .size(14.dp)
                 .clip(CircleShape)
                 .background(Color(0xFFEAEAEA))
                 .clickable { onCollapse() },
@@ -189,7 +195,7 @@ private fun AgentPanel(
         ) {
             Box(
                 modifier = Modifier
-                    .size(width = 12.dp, height = 2.dp)
+                    .size(width = 8.dp, height = 2.dp)
                     .clip(RoundedCornerShape(percent = 50))
                     .background(Color(0xFF666666)),
             )

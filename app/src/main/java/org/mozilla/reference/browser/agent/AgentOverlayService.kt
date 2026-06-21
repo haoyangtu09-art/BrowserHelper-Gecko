@@ -193,7 +193,7 @@ class AgentOverlayService : Service() {
                 val ballW = root?.width ?: 0
                 val target = if (toRight) (screenW - ballW).coerceAtLeast(0) else 0
                 animateBallX(params?.x ?: 0, target)
-            }, 200L)
+            }, 320L)
         }
     }
 
@@ -234,8 +234,8 @@ class AgentOverlayService : Service() {
         cancelSnap()
         if (from == to) return
         val anim = ValueAnimator.ofInt(from, to).apply {
-            duration = 240
-            interpolator = DecelerateInterpolator()
+            duration = 380
+            interpolator = DecelerateInterpolator(1.5f)
             addUpdateListener { a ->
                 if (expandedState.value) {
                     cancel()
