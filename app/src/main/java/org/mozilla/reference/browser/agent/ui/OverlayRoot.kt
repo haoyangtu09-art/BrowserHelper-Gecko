@@ -63,6 +63,11 @@ fun OverlayRoot(
 ) {
     AnimatedContent(
         targetState = expanded,
+        // Keep the shared content pinned to the anchored side during the size change.
+        // Without this the small ball is laid out at the container's top-start while the
+        // window grows leftward for a right-side panel, so the ball visibly jumps left
+        // before the panel grows.
+        contentAlignment = if (anchorRight) Alignment.TopEnd else Alignment.TopStart,
         transitionSpec = {
             val origin = TransformOrigin(if (anchorRight) 1f else 0f, 0f)
             (
