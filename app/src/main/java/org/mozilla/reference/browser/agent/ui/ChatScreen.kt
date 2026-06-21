@@ -59,7 +59,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
@@ -203,7 +208,7 @@ private fun ChatTopBar(
 private fun FloatingCircleButton(onClick: () -> Unit, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
-            .size(34.dp)
+            .size(30.dp)
             .clip(CircleShape)
             .background(Color.White)
             .clickable { onClick() },
@@ -216,11 +221,11 @@ private fun FloatingCircleButton(onClick: () -> Unit, content: @Composable () ->
 private fun FloatingPill(onClick: () -> Unit, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
-            .height(32.dp)
+            .height(28.dp)
             .clip(AgentShapes.Pill)
             .background(Color.White)
             .clickable { onClick() }
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center,
     ) { content() }
 }
@@ -230,20 +235,20 @@ private fun FloatingPill(onClick: () -> Unit, content: @Composable () -> Unit) {
 private fun FloatingDualPill(onNew: () -> Unit, onMore: () -> Unit) {
     Row(
         modifier = Modifier
-            .height(32.dp)
+            .height(28.dp)
             .clip(AgentShapes.Pill)
             .background(Color.White),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.fillMaxHeight().clickable { onNew() }.padding(start = 14.dp, end = 10.dp),
+            Modifier.fillMaxHeight().clickable { onNew() }.padding(start = 13.dp, end = 9.dp),
             contentAlignment = Alignment.Center,
-        ) { PenSquareIcon(color = AgentColors.TextPrimary, size = 17.dp) }
-        Box(Modifier.width(1.dp).height(18.dp).background(AgentColors.HairlineFaint))
+        ) { PenSquareIcon(color = AgentColors.TextPrimary, size = 15.dp) }
+        Box(Modifier.width(1.dp).height(16.dp).background(AgentColors.HairlineFaint))
         Box(
-            Modifier.fillMaxHeight().clickable { onMore() }.padding(start = 10.dp, end = 14.dp),
+            Modifier.fillMaxHeight().clickable { onMore() }.padding(start = 9.dp, end = 13.dp),
             contentAlignment = Alignment.Center,
-        ) { MoreDotsIcon(color = AgentColors.TextPrimary, size = 17.dp) }
+        ) { MoreDotsIcon(color = AgentColors.TextPrimary, size = 15.dp) }
     }
 }
 
@@ -286,53 +291,42 @@ private fun MessageList(state: PanelState) {
                     Box(
                         modifier = Modifier
                             .widthIn(max = 240.dp)
-                            .clip(RoundedCornerShape(20.dp))
+                            .clip(RoundedCornerShape(18.dp))
                             .background(AgentColors.UserBubble)
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) { BasicText(msg.text, style = AgentText.Body) }
                 }
-            } else {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                    AssistantAvatar()
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f).padding(top = 4.dp)) {
-                        AssistantContent(msg.text)
-                        // Per-message action bar: a two-paper copy button (no "复制" text).
-                        Spacer(Modifier.height(6.dp))
-                        Box(
-                            Modifier.size(26.dp).clip(CircleShape).noRippleClickable {
-                                clipboard.setPrimaryClip(ClipData.newPlainText("assistant", msg.text))
-                            },
-                            contentAlignment = Alignment.Center,
-                        ) { CopyIcon(size = 16.dp, color = AgentColors.TextSecondary) }
-                    }
+            } else if (msg.text.isNotBlank()) {
+                // No avatar / no left indent: the assistant reply reads as plain text spanning
+                // the full width. The blank streaming placeholder is skipped so the wait state
+                // shows only the single dot below (not an empty bubble + a dot).
+                Column(Modifier.fillMaxWidth()) {
+                    AssistantContent(msg.text)
+                    Spacer(Modifier.height(4.dp))
+                    Box(
+                        Modifier.size(22.dp).clip(CircleShape).noRippleClickable {
+                            clipboard.setPrimaryClip(ClipData.newPlainText("assistant", msg.text))
+                        },
+                        contentAlignment = Alignment.Center,
+                    ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
                 }
             }
         }
         if (state.generating) {
             // Single slowly-pulsing dot — no avatar — so the wait state shows one dot, not two.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                BlinkingDot(Modifier.padding(start = 4.dp, top = 6.dp))
+                BlinkingDot(Modifier.padding(start = 2.dp, top = 4.dp))
             }
         }
         Spacer(Modifier.height(8.dp))
     }
 }
 
-@Composable
-private fun AssistantAvatar() {
-    Box(
-        modifier = Modifier.size(26.dp).clip(CircleShape).background(AgentColors.Control),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(Modifier.size(10.dp).clip(CircleShape).background(AgentColors.TextSecondary))
-    }
-}
-
 /**
  * Renders assistant text, splitting fenced ``` blocks out into rounded CodeBlock boxes. The
  * box is a standing container, so as the streamed text grows the frame is present first and
- * code appears inside it — not code-first-then-frame.
+ * code appears inside it — not code-first-then-frame. Non-code prose gets light markdown:
+ * `**bold**` is rendered bold and stray asterisks are dropped.
  */
 @Composable
 private fun AssistantContent(text: String) {
@@ -341,9 +335,34 @@ private fun AssistantContent(text: String) {
             if (isCode) {
                 CodeBlock(body)
             } else {
-                BasicText(body.trim(), style = AgentText.Body)
+                BasicText(mdInline(body.trim()), style = AgentText.Body)
             }
         }
+    }
+}
+
+/**
+ * Minimal inline markdown: turns `**bold**` spans bold and strips any leftover single `*`
+ * markers, so model output peppered with asterisks renders clean (bolded, not literal stars).
+ */
+private fun mdInline(text: String): AnnotatedString = buildAnnotatedString {
+    var i = 0
+    while (i < text.length) {
+        val open = text.indexOf("**", i)
+        if (open < 0) {
+            append(text.substring(i).replace("*", ""))
+            break
+        }
+        val close = text.indexOf("**", open + 2)
+        if (close < 0) {
+            append(text.substring(i).replace("*", ""))
+            break
+        }
+        append(text.substring(i, open).replace("*", ""))
+        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
+            append(text.substring(open + 2, close))
+        }
+        i = close + 2
     }
 }
 
@@ -415,11 +434,11 @@ private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
             .clip(AgentShapes.Pill)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Pill)
-            .padding(horizontal = 6.dp, vertical = 6.dp),
+            .padding(horizontal = 5.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         PlusButton(onClick = onPlusClick)
@@ -454,19 +473,19 @@ private fun PlusButton(onClick: () -> Unit) {
     val scale by animateFloatAsState(if (pressed) 0.86f else 1f, label = "plusScale")
     Box(
         modifier = Modifier
-            .size(32.dp)
+            .size(28.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(CircleShape)
             .clickable(interactionSource = interaction, indication = null) { onClick() },
         contentAlignment = Alignment.Center,
-    ) { PlusIcon(color = AgentColors.TextPrimary, size = 20.dp) }
+    ) { PlusIcon(color = AgentColors.TextPrimary, size = 18.dp) }
 }
 
 @Composable
 private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(30.dp)
+            .size(27.dp)
             .clip(CircleShape)
             .background(if (generating) AgentColors.Stop else AgentColors.Accent)
             .clickable { if (generating) onStop() else onSend() },
@@ -474,9 +493,9 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
     ) {
         if (generating) {
             // Rounded square = stop.
-            Box(Modifier.size(10.dp).clip(RoundedCornerShape(4.dp)).background(Color.White))
+            Box(Modifier.size(9.dp).clip(RoundedCornerShape(3.dp)).background(Color.White))
         } else {
-            SendArrowIcon(size = 16.dp, color = Color.White)
+            SendArrowIcon(size = 15.dp, color = Color.White)
         }
     }
 }

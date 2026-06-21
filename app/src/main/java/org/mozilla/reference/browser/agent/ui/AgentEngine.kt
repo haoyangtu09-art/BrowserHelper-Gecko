@@ -170,10 +170,10 @@ class AgentEngine(context: Context) {
             },
             searchKey = state.searchKey,
             searchUrl = state.searchUrl,
-            onPlanChanged = { text ->
-                state.planText = text
-                state.planMode = true
-            },
+            // Self-test must not engage the live plan card: testing create_plan/update_plan
+            // would otherwise pop the plan UI mid-run and look like the plan started executing
+            // before approval. Swallow the callback during self-test.
+            onPlanChanged = { },
         )
         val result = registry.selfTest(name)
         state.toolChecks[name] = ToolCheckState(if (result.ok) "OK" else "失败", result.text)

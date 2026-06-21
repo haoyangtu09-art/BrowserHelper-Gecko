@@ -26,7 +26,9 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -247,7 +249,7 @@ private fun PlanCard(state: PanelState) {
             ) { BasicText("批准并开始", style = AgentText.Body.copy(color = Color.White)) }
             Box(
                 Modifier.clip(AgentShapes.Pill).background(AgentColors.Bg)
-                    .clickable { }
+                    .clickable { state.planMode = false }
                     .padding(horizontal = 16.dp, vertical = 9.dp),
             ) { BasicText("继续编辑", style = AgentText.Body) }
         }
@@ -324,35 +326,39 @@ private fun DrawerSheet(state: PanelState, onClose: () -> Unit, onSettings: () -
 
 @Composable
 private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp).verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.offset(x = (-6).dp).size(36.dp).clip(CircleShape).clickable { onBack() },
-                contentAlignment = Alignment.Center,
-            ) { BackIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.width(2.dp))
-            BasicText("设置", style = AgentText.Title)
-        }
-        Spacer(Modifier.height(14.dp))
+    Column(Modifier.fillMaxSize().background(AgentColors.Surface).padding(16.dp).verticalScroll(rememberScrollState())) {
+        ScreenHeader("设置", onBack)
+        Spacer(Modifier.height(16.dp))
         // "我的 Agent" sits at the top now (was below the API fields).
         BasicText("我的 Agent", style = AgentText.Label)
         Spacer(Modifier.height(8.dp))
-        EntryRow("个性化", onClick = { state.nav = PanelNav.Personalization }) {
-            FaceMouthIcon(color = AgentColors.TextPrimary, size = 22.dp)
-        }
-        EntryRow("记忆", onClick = { state.nav = PanelNav.Memory }) {
-            OpenBookIcon(color = AgentColors.TextPrimary, size = 22.dp)
-        }
-        EntryRow("高级", onClick = { state.nav = PanelNav.Advanced }) {
-            GearIcon(color = AgentColors.TextPrimary, size = 22.dp)
+        GroupCard {
+            EntryRow("个性化", onClick = { state.nav = PanelNav.Personalization }) {
+                FaceMouthIcon(color = AgentColors.TextPrimary, size = 20.dp)
+            }
+            GroupDivider()
+            EntryRow("记忆", onClick = { state.nav = PanelNav.Memory }) {
+                OpenBookIcon(color = AgentColors.TextPrimary, size = 20.dp)
+            }
+            GroupDivider()
+            EntryRow("高级", onClick = { state.nav = PanelNav.Advanced }) {
+                GearIcon(color = AgentColors.TextPrimary, size = 20.dp)
+            }
         }
         Spacer(Modifier.height(18.dp))
         // API / request-format settings moved to the bottom.
-        LabeledField("api key", state.apiKey, secret = true) { state.apiKey = it; state.persist() }
-        LabeledField("api url", state.apiUrl) { state.apiUrl = it; state.persist() }
-        LabeledField("搜索引擎 api key", state.searchKey, secret = true) { state.searchKey = it; state.persist() }
-        LabeledField("搜索引擎 api url", state.searchUrl) { state.searchUrl = it; state.persist() }
+        BasicText("接口", style = AgentText.Label)
         Spacer(Modifier.height(8.dp))
+        GroupCard {
+            LabeledField("api key", state.apiKey, secret = true) { state.apiKey = it; state.persist() }
+            GroupDivider()
+            LabeledField("api url", state.apiUrl) { state.apiUrl = it; state.persist() }
+            GroupDivider()
+            LabeledField("搜索引擎 api key", state.searchKey, secret = true) { state.searchKey = it; state.persist() }
+            GroupDivider()
+            LabeledField("搜索引擎 api url", state.searchUrl) { state.searchUrl = it; state.persist() }
+        }
+        Spacer(Modifier.height(14.dp))
         BasicText("请求格式", style = AgentText.Label)
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -362,6 +368,41 @@ private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
     }
 }
 
+/**
+ * Shared sub-screen header: a floating pure-white circular back button (pops against the
+ * grayer page background) + title, with an optional trailing slot pinned to the right.
+ */
+@Composable
+private fun ScreenHeader(title: String, onBack: () -> Unit, trailing: (@Composable RowScope.() -> Unit)? = null) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(34.dp).clip(CircleShape).background(Color.White).clickable { onBack() },
+            contentAlignment = Alignment.Center,
+        ) { BackIcon(color = AgentColors.TextPrimary) }
+        Spacer(Modifier.width(10.dp))
+        BasicText(title, style = AgentText.Title)
+        if (trailing != null) {
+            Spacer(Modifier.weight(1f))
+            trailing()
+        }
+    }
+}
+
+/** A grouped settings card: a gray large-rounded container; rows separated by GroupDivider. */
+@Composable
+private fun GroupCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().clip(AgentShapes.Panel).background(AgentColors.Control),
+        content = content,
+    )
+}
+
+/** Pure-white 1dp divider line between grouped rows. */
+@Composable
+private fun GroupDivider() {
+    Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White))
+}
+
 /** A settings list row: a left leading icon + label, tappable to open a sub-screen. */
 @Composable
 private fun EntryRow(label: String, onClick: () -> Unit, icon: @Composable () -> Unit) {
@@ -369,10 +410,10 @@ private fun EntryRow(label: String, onClick: () -> Unit, icon: @Composable () ->
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
-            .padding(vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) { icon() }
+        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { icon() }
         Spacer(Modifier.width(12.dp))
         BasicText(label, style = AgentText.Body)
     }
@@ -380,29 +421,26 @@ private fun EntryRow(label: String, onClick: () -> Unit, icon: @Composable () ->
 
 @Composable
 private fun PersonalizationScreen(state: PanelState, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.offset(x = (-6).dp).size(36.dp).clip(CircleShape).clickable { onBack() },
-                contentAlignment = Alignment.Center,
-            ) { BackIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.width(2.dp))
-            BasicText("个性化", style = AgentText.Title)
-        }
-        Spacer(Modifier.height(14.dp))
-        listOf("理性", "平衡", "感性").forEach { option ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { state.persona = option; state.persist() }
-                    .padding(vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                    if (state.persona == option) CheckIcon(size = 14.dp, color = AgentColors.Accent)
+    Column(Modifier.fillMaxSize().background(AgentColors.Surface).padding(16.dp)) {
+        ScreenHeader("个性化", onBack)
+        Spacer(Modifier.height(16.dp))
+        GroupCard {
+            val options = listOf("理性", "平衡", "感性")
+            options.forEachIndexed { i, option ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { state.persona = option; state.persist() }
+                        .padding(horizontal = 14.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                        if (state.persona == option) CheckIcon(size = 14.dp, color = AgentColors.Accent)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    BasicText(option, style = AgentText.Body)
                 }
-                Spacer(Modifier.width(10.dp))
-                BasicText(option, style = AgentText.Body)
+                if (i < options.lastIndex) GroupDivider()
             }
         }
     }
@@ -410,34 +448,30 @@ private fun PersonalizationScreen(state: PanelState, onBack: () -> Unit) {
 
 @Composable
 private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp).verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxSize().background(AgentColors.Surface).padding(16.dp).verticalScroll(rememberScrollState())) {
+        ScreenHeader("记忆", onBack)
+        Spacer(Modifier.height(16.dp))
+        GroupCard {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BasicText("启用记忆", style = AgentText.Body)
+                Spacer(Modifier.weight(1f))
+                ToggleSwitch(state.memoryEnabled) { state.memoryEnabled = !state.memoryEnabled; state.persist() }
+            }
+            GroupDivider()
             Box(
-                Modifier.offset(x = (-6).dp).size(36.dp).clip(CircleShape).clickable { onBack() },
-                contentAlignment = Alignment.Center,
-            ) { BackIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.width(2.dp))
-            BasicText("记忆", style = AgentText.Title)
+                Modifier.fillMaxWidth().clickable { }.padding(horizontal = 14.dp, vertical = 13.dp),
+            ) { BasicText("记忆摘要", style = AgentText.Body) }
         }
         Spacer(Modifier.height(14.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            BasicText("启用记忆", style = AgentText.Body)
-            Spacer(Modifier.weight(1f))
-            ToggleSwitch(state.memoryEnabled) { state.memoryEnabled = !state.memoryEnabled; state.persist() }
-        }
-        Box(
-            Modifier.fillMaxWidth().clickable { }.padding(vertical = 12.dp),
-        ) { BasicText("记忆摘要", style = AgentText.Body) }
-        Spacer(Modifier.height(6.dp))
         // Stored memories: header + add affordance, then a deletable list (empty → hint).
         Row(verticalAlignment = Alignment.CenterVertically) {
             BasicText("已保存的记忆", style = AgentText.Label)
             Spacer(Modifier.weight(1f))
             Box(
-                Modifier.size(28.dp).clip(CircleShape).background(AgentColors.Bg)
+                Modifier.size(28.dp).clip(CircleShape).background(Color.White)
                     .clickable { state.memories.add("记忆 ${state.memories.size + 1}"); state.persist() },
                 contentAlignment = Alignment.Center,
             ) { PlusIcon(color = AgentColors.TextPrimary, size = 16.dp) }
@@ -449,7 +483,7 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
             state.memories.forEachIndexed { i, item ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                        .clip(AgentShapes.Field).background(AgentColors.Bg)
+                        .clip(AgentShapes.Field).background(Color.White)
                         .padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -467,15 +501,8 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
 @Composable
 private fun AdvancedScreen(state: PanelState, onBack: () -> Unit) {
     val tools = remember { agentToolInfos() }
-    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp).verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.offset(x = (-6).dp).size(36.dp).clip(CircleShape).clickable { onBack() },
-                contentAlignment = Alignment.Center,
-            ) { BackIcon(color = AgentColors.TextPrimary) }
-            Spacer(Modifier.width(2.dp))
-            BasicText("高级", style = AgentText.Title)
-            Spacer(Modifier.weight(1f))
+    Column(Modifier.fillMaxSize().background(AgentColors.Surface).padding(16.dp).verticalScroll(rememberScrollState())) {
+        ScreenHeader("高级", onBack) {
             Box(
                 Modifier.clip(AgentShapes.Pill)
                     .background(if (state.toolsChecking) AgentColors.Control else AgentColors.Accent)
@@ -488,7 +515,7 @@ private fun AdvancedScreen(state: PanelState, onBack: () -> Unit) {
                 )
             }
         }
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(16.dp))
         BasicText("工具自检", style = AgentText.Label)
         Spacer(Modifier.height(8.dp))
         tools.forEach { tool ->
@@ -509,7 +536,7 @@ private fun ToolCheckRow(tool: AgentToolInfo, check: ToolCheckState?, onClick: (
             .fillMaxWidth()
             .padding(vertical = 4.dp)
             .clip(AgentShapes.Field)
-            .background(AgentColors.Bg)
+            .background(Color.White)
             .clickable { onClick() }
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
@@ -523,7 +550,7 @@ private fun ToolCheckRow(tool: AgentToolInfo, check: ToolCheckState?, onClick: (
         BasicText(tool.description, style = AgentText.Secondary)
         if (status == "失败") {
             Spacer(Modifier.height(8.dp))
-            Box(Modifier.fillMaxWidth().clip(AgentShapes.Sheet).background(Color.White).padding(10.dp)) {
+            Box(Modifier.fillMaxWidth().clip(AgentShapes.Sheet).background(AgentColors.Surface).padding(10.dp)) {
                 BasicText(check?.detail.orEmpty(), style = AgentText.Secondary.copy(color = AgentColors.TextPrimary))
             }
         }
@@ -572,12 +599,12 @@ private fun ToggleSwitch(on: Boolean, onToggle: () -> Unit) {
 
 @Composable
 private fun LabeledField(label: String, value: String, secret: Boolean = false, onChange: (String) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp)) {
         BasicText(label, style = AgentText.Label)
         Spacer(Modifier.height(5.dp))
         Box(
-            Modifier.fillMaxWidth().clip(AgentShapes.Field).background(AgentColors.Bg)
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+            Modifier.fillMaxWidth().clip(AgentShapes.Field).background(Color.White)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
             BasicTextField(
                 value = value,

@@ -55,9 +55,11 @@ object AgentElevation {
 }
 
 object AgentText {
-    val Title = TextStyle(color = AgentColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-    val Body = TextStyle(color = AgentColors.TextPrimary, fontSize = 15.sp)
-    val Secondary = TextStyle(color = AgentColors.TextSecondary, fontSize = 13.sp)
-    val Hint = TextStyle(color = AgentColors.TextTertiary, fontSize = 15.sp)
-    val Label = TextStyle(color = AgentColors.TextSecondary, fontSize = 12.sp)
+    // Sizes kept deliberately small/compact (the UI previously read as oversized). Body at
+    // 13sp fits noticeably more characters per line in the narrow overlay.
+    val Title = TextStyle(color = AgentColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    val Body = TextStyle(color = AgentColors.TextPrimary, fontSize = 13.sp)
+    val Secondary = TextStyle(color = AgentColors.TextSecondary, fontSize = 12.sp)
+    val Hint = TextStyle(color = AgentColors.TextTertiary, fontSize = 13.sp)
+    val Label = TextStyle(color = AgentColors.TextSecondary, fontSize = 11.sp)
 }
