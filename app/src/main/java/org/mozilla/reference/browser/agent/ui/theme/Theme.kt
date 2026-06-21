@@ -1,0 +1,47 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+package org.mozilla.reference.browser.agent.ui.theme
+
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+/**
+ * Plain design tokens for the overlay Agent UI. The overlay has no MaterialTheme
+ * ambient (it lives in a bare WindowManager window), so colors / shapes / text styles
+ * are exposed as constants and the UI uses foundation primitives (BasicText /
+ * BasicTextField) with explicit styling rather than material components.
+ */
+object AgentColors {
+    val Bg = Color(0xFFF8F8F8)
+    val Panel = Color(0xFFFFFFFF)
+    val TextPrimary = Color(0xFF111111)
+    val TextSecondary = Color(0xFF666666)
+    val TextTertiary = Color(0xFF999999)
+    val Hairline = Color(0xFFB0B0B0)
+    val Control = Color(0xFFEAEAEA)
+    val UserBubble = Color(0xFFF2F2F2)
+    val Accent = Color(0xFF4285F4)
+    val Stop = Color(0xFF111111)
+}
+
+object AgentShapes {
+    val Pill = RoundedCornerShape(percent = 50)
+    val Panel = RoundedCornerShape(28.dp)
+    val Upload = RoundedCornerShape(32.dp)
+    val Field = RoundedCornerShape(24.dp)
+    val Sheet = RoundedCornerShape(20.dp)
+}
+
+object AgentText {
+    val Title = TextStyle(color = AgentColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    val Body = TextStyle(color = AgentColors.TextPrimary, fontSize = 15.sp)
+    val Secondary = TextStyle(color = AgentColors.TextSecondary, fontSize = 13.sp)
+    val Hint = TextStyle(color = AgentColors.TextTertiary, fontSize = 15.sp)
+    val Label = TextStyle(color = AgentColors.TextSecondary, fontSize = 12.sp)
+}

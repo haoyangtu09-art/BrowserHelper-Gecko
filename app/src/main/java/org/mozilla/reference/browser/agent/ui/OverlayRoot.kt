@@ -23,6 +23,9 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -179,69 +182,81 @@ private fun AgentPanel(
             .width(320.dp)
             .height(520.dp),
     ) {
-        // Blue drag handle near the top-center; a gray ellipse stays visible the whole
-        // time the bar is held (touch-down through drag to release). A single gesture
-        // loop drives both the press feedback and the drag so the ellipse doesn't vanish
-        // once dragging starts.
-        var pressed by remember { mutableStateOf(false) }
-        val ellipseAlpha by animateFloatAsState(if (pressed) 1f else 0f, label = "ellipse")
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 14.dp)
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        pressed = true
-                        var down = true
-                        while (down) {
-                            val event = awaitPointerEvent()
-                            event.changes.forEach { change ->
-                                val delta = change.positionChange()
-                                if (delta != Offset.Zero) {
-                                    onPanelDrag(delta.x, delta.y)
-                                    change.consume()
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Window chrome zone: blue drag handle (center) + collapse minus (end).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp),
+            ) {
+                // Blue drag handle near the top-center; a gray ellipse stays visible the
+                // whole time the bar is held (touch-down through drag to release). A single
+                // gesture loop drives both the press feedback and the drag so the ellipse
+                // doesn't vanish once dragging starts.
+                var pressed by remember { mutableStateOf(false) }
+                val ellipseAlpha by animateFloatAsState(if (pressed) 1f else 0f, label = "ellipse")
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp)
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                pressed = true
+                                var down = true
+                                while (down) {
+                                    val event = awaitPointerEvent()
+                                    event.changes.forEach { change ->
+                                        val delta = change.positionChange()
+                                        if (delta != Offset.Zero) {
+                                            onPanelDrag(delta.x, delta.y)
+                                            change.consume()
+                                        }
+                                    }
+                                    down = event.changes.any { it.pressed }
                                 }
+                                pressed = false
                             }
-                            down = event.changes.any { it.pressed }
-                        }
-                        pressed = false
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .graphicsLayer { alpha = ellipseAlpha }
-                    .size(width = 60.dp, height = 24.dp)
-                    .clip(RoundedCornerShape(percent = 50))
-                    .background(Color(0xFFDADADA)),
-            )
-            Box(
-                modifier = Modifier
-                    .size(width = 42.dp, height = 3.dp)
-                    .clip(RoundedCornerShape(percent = 50))
-                    .background(Color(0xFF4285F4)),
-            )
-        }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .graphicsLayer { alpha = ellipseAlpha }
+                            .size(width = 60.dp, height = 24.dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(Color(0xFFDADADA)),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(width = 42.dp, height = 3.dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(Color(0xFF4285F4)),
+                    )
+                }
 
-        // Single collapse control: a minus inside a small gray ball, top-right (compact).
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(12.dp)
-                .size(14.dp)
-                .clip(CircleShape)
-                .background(Color(0xFFEAEAEA))
-                .clickable { onCollapse() },
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(width = 8.dp, height = 2.dp)
-                    .clip(RoundedCornerShape(percent = 50))
-                    .background(Color(0xFF666666)),
-            )
+                // Single collapse control: a minus inside a small gray ball, top-right.
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .size(14.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFEAEAEA))
+                        .clickable { onCollapse() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(width = 8.dp, height = 2.dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(Color(0xFF666666)),
+                    )
+                }
+            }
+
+            // Chat surface + internal navigation (drawer / settings / model selector).
+            AgentPanelHost(modifier = Modifier.weight(1f))
         }
     }
 }
