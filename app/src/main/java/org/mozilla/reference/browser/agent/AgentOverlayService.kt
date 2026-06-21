@@ -29,6 +29,12 @@ import kotlin.math.roundToInt
 // Panel composable total width: 320dp content + 8dp outer padding on each side.
 private const val PANEL_TOTAL_DP = 336f
 
+// Ball composable total width: 42dp disc + 6dp outer padding on each side.
+private const val BALL_TOTAL_DP = 54f
+
+// Idle delay before a parked ball dims and tucks half off the edge.
+private const val IDLE_DELAY_MS = 2500L
+
 /**
  * Hosts the floating Agent UI in a single WindowManager overlay window.
  *
@@ -47,7 +53,10 @@ class AgentOverlayService : Service() {
 
     private val expandedState = mutableStateOf(false)
     private val anchorRightState = mutableStateOf(false)
+    private val dimmedState = mutableStateOf(false)
     private var snapAnimator: ValueAnimator? = null
+    private var idleHidden = false
+    private val idleRunnable = Runnable { enterIdle() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -114,8 +123,10 @@ class AgentOverlayService : Service() {
                 OverlayRoot(
                     expanded = expandedState.value,
                     anchorRight = anchorRightState.value,
+                    dimmed = dimmedState.value,
                     onExpand = { setExpanded(true) },
                     onCollapse = { setExpanded(false) },
+                    onWake = { wake() },
                     onBallDrag = { dx, dy -> moveBy(dx, dy) },
                     onBallDragEnd = { snapToEdge() },
                     onPanelDrag = { dx, dy -> movePanelBy(dx, dy) },
@@ -148,6 +159,7 @@ class AgentOverlayService : Service() {
         root = container
         try {
             windowManager.addView(container, lp)
+            scheduleIdle()
         } catch (_: Throwable) {
             root = null
             stopSelf()
@@ -167,6 +179,9 @@ class AgentOverlayService : Service() {
         val lp = params ?: return
         if (expanded) {
             cancelSnap()
+            cancelIdle()
+            idleHidden = false
+            dimmedState.value = false
             val screenW = resources.displayMetrics.widthPixels
             val ballCenter = lp.x + (root?.width ?: 0) / 2
             val toRight = ballCenter >= screenW / 2
@@ -181,26 +196,75 @@ class AgentOverlayService : Service() {
         } else {
             expandedState.value = false
             lp.flags = collapsedFlags()
-            safeUpdate()
-            // Let the collapse animation finish (so the window has shrunk back to the
-            // ball) before sliding the ball onto the edge it was anchored to. Snapping by
-            // measured center would pick the wrong edge for a right-anchored panel, so use
-            // the stored anchor side directly.
+            // The window shrinks back to the ball immediately (SizeTransform snaps), so
+            // place its x on the anchored edge right now. A right-anchored panel otherwise
+            // left the ball stranded mid-screen (window x was the panel's left), then it
+            // visibly slid to the edge. Setting x synchronously lets the panel collapse
+            // straight into the correct top corner — symmetric with the left side.
             val toRight = anchorRightState.value
+            val screenW = resources.displayMetrics.widthPixels
+            val ballW = (BALL_TOTAL_DP * resources.displayMetrics.density).roundToInt()
+            lp.x = if (toRight) (screenW - ballW).coerceAtLeast(0) else 0
+            safeUpdate()
+            // Once the collapse animation settles, correct x to the measured ball width
+            // (estimate may be a few px off) and re-arm the idle dim/tuck timer.
             root?.postDelayed({
                 if (expandedState.value) return@postDelayed
-                val screenW = resources.displayMetrics.widthPixels
-                val ballW = root?.width ?: 0
-                val target = if (toRight) (screenW - ballW).coerceAtLeast(0) else 0
-                animateBallX(params?.x ?: 0, target)
-            }, 320L)
+                val w = resources.displayMetrics.widthPixels
+                val measured = root?.width ?: ballW
+                params?.x = if (anchorRightState.value) (w - measured).coerceAtLeast(0) else 0
+                safeUpdate()
+                scheduleIdle()
+            }, 340L)
         }
     }
 
     private fun moveBy(dx: Float, dy: Float) {
         if (expandedState.value) return
         cancelSnap()
+        cancelIdle()
         moveWindowBy(dx, dy)
+    }
+
+    /** Wake a parked ball: cancel the idle timer, un-dim, and slide back fully on-screen. */
+    private fun wake() {
+        if (expandedState.value) return
+        cancelIdle()
+        dimmedState.value = false
+        if (!idleHidden) return
+        idleHidden = false
+        val lp = params ?: return
+        val screenW = resources.displayMetrics.widthPixels
+        val viewW = root?.width ?: 0
+        val onLeft = lp.x + viewW / 2 < screenW / 2
+        val target = if (onLeft) 0 else (screenW - viewW).coerceAtLeast(0)
+        animateBallX(lp.x, target)
+    }
+
+    private fun scheduleIdle() {
+        val container = root ?: return
+        container.removeCallbacks(idleRunnable)
+        if (expandedState.value) return
+        container.postDelayed(idleRunnable, IDLE_DELAY_MS)
+    }
+
+    private fun cancelIdle() {
+        root?.removeCallbacks(idleRunnable)
+    }
+
+    /** After resting at the edge, tuck half the ball off-screen and dim it so it stops
+     *  competing for attention. Any touch (onWake) brings it back. */
+    private fun enterIdle() {
+        if (expandedState.value) return
+        val lp = params ?: return
+        val screenW = resources.displayMetrics.widthPixels
+        val viewW = root?.width ?: 0
+        if (viewW == 0) return
+        val onLeft = lp.x + viewW / 2 < screenW / 2
+        val target = if (onLeft) -(viewW / 2) else screenW - viewW / 2
+        idleHidden = true
+        dimmedState.value = true
+        animateBallX(lp.x, target)
     }
 
     /** Drag the expanded panel freely (no edge snapping). */
@@ -227,6 +291,8 @@ class AgentOverlayService : Service() {
         val viewW = root?.width ?: 0
         val target = if (lp.x + viewW / 2 < screenW / 2) 0 else (screenW - viewW).coerceAtLeast(0)
         animateBallX(lp.x, target)
+        // Re-arm the idle dim/tuck after the snap settles (idle delay >> snap duration).
+        scheduleIdle()
     }
 
     /** Animate the collapsed ball window's x to the snapped edge. */
@@ -267,6 +333,7 @@ class AgentOverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         cancelSnap()
+        cancelIdle()
         root?.let { container ->
             try {
                 windowManager.removeView(container)

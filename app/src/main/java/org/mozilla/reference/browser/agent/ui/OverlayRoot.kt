@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -42,7 +43,10 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import org.mozilla.reference.browser.R
 
 /**
  * Floating Agent UI: a pure-white draggable ball (snaps to the nearest edge with an
@@ -55,8 +59,10 @@ import androidx.compose.ui.unit.dp
 fun OverlayRoot(
     expanded: Boolean,
     anchorRight: Boolean,
+    dimmed: Boolean,
     onExpand: () -> Unit,
     onCollapse: () -> Unit,
+    onWake: () -> Unit,
     onBallDrag: (Float, Float) -> Unit,
     onBallDragEnd: () -> Unit,
     onPanelDrag: (Float, Float) -> Unit,
@@ -83,21 +89,41 @@ fun OverlayRoot(
         if (isExpanded) {
             AgentPanel(onCollapse = onCollapse, onPanelDrag = onPanelDrag)
         } else {
-            AgentBall(onExpand = onExpand, onDrag = onBallDrag, onDragEnd = onBallDragEnd)
+            AgentBall(
+                dimmed = dimmed,
+                onExpand = onExpand,
+                onWake = onWake,
+                onDrag = onBallDrag,
+                onDragEnd = onBallDragEnd,
+            )
         }
     }
 }
 
 @Composable
 private fun AgentBall(
+    dimmed: Boolean,
     onExpand: () -> Unit,
+    onWake: () -> Unit,
     onDrag: (Float, Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
+    // When parked at the edge with no recent interaction the ball dims so it stays
+    // out of the way; any touch wakes it (handled natively) and animates back to 1f.
+    val ballAlpha by animateFloatAsState(if (dimmed) 0.4f else 1f, label = "ballDim")
     Box(
         modifier = Modifier
             .padding(6.dp)
-            .size(56.dp)
+            .size(42.dp)
+            .graphicsLayer { alpha = ballAlpha }
+            // A non-consuming down observer so even a parked/dimmed ball wakes the
+            // instant it is touched, before the tap/drag detectors below decide.
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    onWake()
+                }
+            }
             .pointerInput(Unit) {
                 detectTapGestures(onTap = { onExpand() })
             }
@@ -112,18 +138,30 @@ private fun AgentBall(
             },
         contentAlignment = Alignment.Center,
     ) {
+        // Inner solid white disc carrying the agent glyph; sized to meet the ring's
+        // inner edge (ring 42 − 2×5 border) so there is no gap and the ring's stroke
+        // still shows outside the disc against the page behind it.
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(Color.White),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(R.drawable.agent_ball_icon),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .padding(5.dp)
+                    .size(22.dp),
+            )
+        }
         // Outer semi-transparent white ring (stroke only), thick and hugging the ball.
         Box(
             modifier = Modifier
-                .size(56.dp)
-                .border(width = 3.dp, color = Color(0x80FFFFFF), shape = CircleShape),
-        )
-        // Inner solid white ball, sized to meet the ring's inner edge (no gap).
-        Box(
-            modifier = Modifier
-                .size(50.dp)
-                .clip(CircleShape)
-                .background(Color.White),
+                .size(42.dp)
+                .border(width = 5.dp, color = Color(0x80FFFFFF), shape = CircleShape),
         )
     }
 }
