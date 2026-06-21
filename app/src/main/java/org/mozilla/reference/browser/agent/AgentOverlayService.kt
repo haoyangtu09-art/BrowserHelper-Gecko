@@ -103,9 +103,6 @@ class AgentOverlayService : Service() {
         lifecycleOwner = owner
 
         val compose = ComposeView(this).apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeViewModelStoreOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
             setContent {
                 OverlayRoot(
                     expanded = expandedState.value,
@@ -117,7 +114,16 @@ class AgentOverlayService : Service() {
                 )
             }
         }
-        val container = FrameLayout(this).apply { addView(compose) }
+        // The ViewTree owners must live on the window's ROOT view: Compose builds its
+        // window recomposer by walking UP from the root to find a ViewTreeLifecycleOwner.
+        // Setting them only on the child ComposeView made that lookup start at the
+        // FrameLayout root and find nothing → "ViewTreeLifecycleOwner not found" crash.
+        val container = FrameLayout(this).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            addView(compose)
+        }
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
