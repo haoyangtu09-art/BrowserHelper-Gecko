@@ -69,18 +69,18 @@ fun PenSquareIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color 
         val frame = Path().apply {
             moveTo(p(11f, 4f).x, p(11f, 4f).y)
             lineTo(p(6f, 4f).x, p(6f, 4f).y)
-            quadraticBezierTo(p(4f, 4f).x, p(4f, 4f).y, p(4f, 6f).x, p(4f, 6f).y)
+            quadraticTo(p(4f, 4f).x, p(4f, 4f).y, p(4f, 6f).x, p(4f, 6f).y)
             lineTo(p(4f, 18f).x, p(4f, 18f).y)
-            quadraticBezierTo(p(4f, 20f).x, p(4f, 20f).y, p(6f, 20f).x, p(6f, 20f).y)
+            quadraticTo(p(4f, 20f).x, p(4f, 20f).y, p(6f, 20f).x, p(6f, 20f).y)
             lineTo(p(18f, 20f).x, p(18f, 20f).y)
-            quadraticBezierTo(p(20f, 20f).x, p(20f, 20f).y, p(20f, 18f).x, p(20f, 18f).y)
+            quadraticTo(p(20f, 20f).x, p(20f, 20f).y, p(20f, 18f).x, p(20f, 18f).y)
             lineTo(p(20f, 13f).x, p(20f, 13f).y)
         }
         drawPath(frame, color, style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
         // Pen quill: M18.5 2.5 a2.12 2.12 0 0 1 3 3 L12 15 l-4 1 1-4 Z
         val pen = Path().apply {
             moveTo(p(18.5f, 2.5f).x, p(18.5f, 2.5f).y)
-            quadraticBezierTo(p(21.5f, 2.5f).x, p(21.5f, 2.5f).y, p(21.5f, 5.5f).x, p(21.5f, 5.5f).y)
+            quadraticTo(p(21.5f, 2.5f).x, p(21.5f, 2.5f).y, p(21.5f, 5.5f).x, p(21.5f, 5.5f).y)
             lineTo(p(12f, 15f).x, p(12f, 15f).y)
             lineTo(p(8f, 16f).x, p(8f, 16f).y)
             lineTo(p(9f, 12f).x, p(9f, 12f).y)
