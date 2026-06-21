@@ -5,13 +5,17 @@
 package org.mozilla.reference.browser.agent
 
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.IBinder
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.FrameLayout
+import java.io.File
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -42,11 +46,56 @@ class AgentOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        installCrashDump()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         addOverlay()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    // Diagnostic: capture the real crash stack to Download/agent_crash.txt so it can be
+    // read without root/logcat. Chains to the previous handler so the normal crash flow
+    // is preserved. Remove once the overlay is stable.
+    private fun installCrashDump() {
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, ex ->
+            try { dumpCrash(ex) } catch (_: Throwable) {}
+            prev?.uncaughtException(thread, ex)
+        }
+    }
+
+    private fun dumpCrash(ex: Throwable) {
+        val text = "AgentOverlay crash @${System.currentTimeMillis()}\n" + ex.stackTraceToString()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = contentResolver
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.DISPLAY_NAME}=?",
+                arrayOf("agent_crash.txt"),
+                null,
+            )?.use { c ->
+                val idIdx = c.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                while (c.moveToNext()) {
+                    resolver.delete(
+                        android.content.ContentUris.withAppendedId(collection, c.getLong(idIdx)),
+                        null,
+                        null,
+                    )
+                }
+            }
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, "agent_crash.txt")
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            }
+            val uri = resolver.insert(collection, values) ?: return
+            resolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
+        } else {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            File(dir, "agent_crash.txt").outputStream().use { it.write(text.toByteArray()) }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
 
     private fun addOverlay() {
         if (root != null) return
