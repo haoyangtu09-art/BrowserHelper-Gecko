@@ -190,26 +190,27 @@ private fun ApprovalSheet(
     onDecision: (AgentApprovalDecision) -> Unit,
 ) {
     val detail = req.detail.trim()
-    val tooLong = detail.length > 360
-    val shownDetail = if (tooLong) detail.take(360) + "…" else detail
+    val previewCap = 150
+    val tooLong = detail.length > previewCap
+    val shownDetail = if (tooLong) detail.take(previewCap) + "…" else detail
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(12.dp)
+            .padding(8.dp)
             .clip(AgentShapes.Sheet)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet),
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
             BasicText(req.title, style = AgentText.Title)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
             BasicText(shownDetail, style = AgentText.Secondary)
             if (tooLong) {
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(5.dp))
                 BasicText(
                     "详情",
                     style = AgentText.Label.copy(color = AgentColors.Accent),
-                    modifier = Modifier.clickable { onShowDetail() }.padding(vertical = 4.dp),
+                    modifier = Modifier.clickable { onShowDetail() }.padding(vertical = 2.dp),
                 )
             }
         }
@@ -226,7 +227,7 @@ private fun ApprovalOption(label: String, onClick: () -> Unit) {
     BasicText(
         label,
         style = AgentText.Body,
-        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 16.dp, vertical = 14.dp),
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 14.dp, vertical = 11.dp),
     )
 }
 
@@ -387,6 +388,22 @@ private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
             GroupDivider()
             EntryRow("高级", onClick = { state.nav = PanelNav.Advanced }) {
                 GearIcon(color = AgentColors.TextPrimary, size = 20.dp)
+            }
+        }
+        Spacer(Modifier.height(18.dp))
+        BasicText("执行", style = AgentText.Label)
+        Spacer(Modifier.height(8.dp))
+        GroupCard {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BasicText("自动同意所有指令", style = AgentText.Body)
+                Spacer(Modifier.weight(1f))
+                ToggleSwitch(state.autoApproveAll) {
+                    state.autoApproveAll = !state.autoApproveAll
+                    state.persist()
+                }
             }
         }
         Spacer(Modifier.height(18.dp))

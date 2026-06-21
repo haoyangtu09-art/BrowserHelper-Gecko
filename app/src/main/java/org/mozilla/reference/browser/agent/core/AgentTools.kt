@@ -178,6 +178,21 @@ class AgentToolRegistry(
                     "flowId=${args.optString("flowId", "")}, decision=${args.optString("decision", "continue")}",
                     "允许，并且本次会话不再询问这条暂停请求",
                 )
+            "intercept_resolve_all" -> {
+                val idsArr = args.optJSONArray("ids")
+                val idsLabel =
+                    if (idsArr == null || idsArr.length() == 0) {
+                        "全部待放行"
+                    } else {
+                        (0 until idsArr.length()).joinToString(",") { idsArr.optString(it, "") }
+                    }
+                req(
+                    "允许 Agent 批量放行这些暂停的请求吗？",
+                    "intercept-all:${args.optString("decision", "continue")}:$idsLabel",
+                    "ids=$idsLabel, decision=${args.optString("decision", "continue")}",
+                    "允许，并且本次会话不再询问批量放行",
+                )
+            }
             "cookie_reveal" ->
                 req(
                     "允许 Agent 读取这条请求的凭证明文吗？",
@@ -210,22 +225,22 @@ class AgentToolRegistry(
             "update_plan" -> setPlanFromArgs(args, created = false)
             "write_code_file" -> writeCodeFile(args)
             "delete_code_from_file" -> deleteCodeFromFile(args)
-            "network_list" -> {
-                val sinceSec = args.optDouble("sinceSeconds", 0.0)
-                val sinceMs = if (sinceSec > 0) System.currentTimeMillis() - (sinceSec * 1000).toLong() else 0L
-                val rows = NetFlowStore.listJson(
-                    method = args.optString("method", ""),
-                    urlContains = args.optString("urlContains", ""),
-                    sinceMs = sinceMs,
-                    limit = args.optInt("limit", 50),
-                )
-                ok(rows.toString())
-            }
-            "network_get" -> {
-                val flowId = args.optString("id", "")
-                val rec = NetFlowStore.getJson(flowId)
-                if (rec == null) err("no flow with id=$flowId") else ok(rec.toString())
-            }
+	            "network_list" -> {
+	                val sinceSec = args.optDouble("sinceSeconds", 0.0)
+	                val sinceMs = if (sinceSec > 0) System.currentTimeMillis() - (sinceSec * 1000).toLong() else 0L
+	                val rows = NetFlowStore.listJson(
+	                    method = args.optString("method", ""),
+	                    urlContains = args.optString("urlContains", ""),
+	                    sinceMs = sinceMs,
+	                    limit = args.optInt("limit", 10),
+	                )
+	                ok(rows.toString())
+	            }
+	            "network_get" -> {
+	                val flowId = args.optString("id", "")
+	                val rec = NetFlowStore.getJson(flowId, args.optString("part", "all"))
+	                if (rec == null) err("no flow with id=$flowId") else ok(rec.toString())
+	            }
             "proxy_status" -> ok(if (ProxyProbe.isRunning()) "running" else "stopped")
             "page_index" -> page("getSource")
             "page_search" -> {
@@ -288,22 +303,25 @@ class AgentToolRegistry(
                 ProxyProbe.setMockRules(JSONObject().put("rules", arr))
                 ok("mock rules set: ${arr.length()} rules")
             }
-            "intercept_set" -> {
-                ProxyProbe.setInterceptRules(
-                    JSONObject()
-                        .put("reqAll", args.optBoolean("reqAll", false))
-                        .put("respAll", args.optBoolean("respAll", false))
-                        .put("interceptTelemetry", args.optBoolean("interceptTelemetry", false))
-                        .put("interceptNoise", args.optBoolean("interceptNoise", false))
-                        .put("interceptCookie", args.optBoolean("interceptCookie", false))
-                        .put("rules", args.optJSONArray("rules") ?: JSONArray()),
-                )
-                ok("intercept rules set")
-            }
+	            "intercept_set" -> {
+	                val reqAll = if (args.has("reqAll")) args.optBoolean("reqAll", false) else true
+	                val respAll = if (args.has("respAll")) args.optBoolean("respAll", false) else true
+	                ProxyProbe.setInterceptRules(
+	                    JSONObject()
+	                        .put("reqAll", reqAll)
+	                        .put("respAll", respAll)
+	                        .put("interceptTelemetry", args.optBoolean("interceptTelemetry", false))
+	                        .put("interceptHeartbeat", args.optBoolean("interceptHeartbeat", false))
+	                        .put("interceptNoise", args.optBoolean("interceptNoise", false))
+	                        .put("interceptCookie", args.optBoolean("interceptCookie", false))
+	                        .put("rules", args.optJSONArray("rules") ?: JSONArray()),
+	                )
+	                ok("intercept rules set: reqAll=$reqAll respAll=$respAll lowValue=${if (args.optBoolean("interceptTelemetry", false)) "" else "telemetry pass; "}${if (args.optBoolean("interceptHeartbeat", false) || args.optBoolean("interceptNoise", false)) "" else "heartbeat/noise pass; "}${if (args.optBoolean("interceptCookie", false)) "" else "cookie pass"}")
+	            }
             "intercept_pending" -> ok(ProxyProbe.pendingInterceptList().toString())
-            "intercept_resolve" -> {
-                val flowId = args.optString("flowId", "")
-                if (flowId.isEmpty()) return@withContext err("flowId required")
+	            "intercept_resolve" -> {
+	                val flowId = NetFlowStore.flowIdFor(args.optString("flowId", "")) ?: args.optString("flowId", "")
+	                if (flowId.isEmpty()) return@withContext err("flowId required")
                 val decision = JSONObject().put("decision", args.optString("decision", "continue"))
                 // Only carry the fields the model actually edited; absence = keep the
                 // original. headEdited tells ProxyProbe to rebuild the request line/headers;
@@ -320,9 +338,9 @@ class AgentToolRegistry(
                 ProxyProbe.resolveIntercept(flowId, decision)
                 ok("intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
             }
-            "resp_intercept_resolve" -> {
-                val flowId = args.optString("flowId", "")
-                if (flowId.isEmpty()) return@withContext err("flowId required")
+	            "resp_intercept_resolve" -> {
+	                val flowId = NetFlowStore.flowIdFor(args.optString("flowId", "")) ?: args.optString("flowId", "")
+	                if (flowId.isEmpty()) return@withContext err("flowId required")
                 val decision = JSONObject().put("decision", args.optString("decision", "continue"))
                 var headEdited = false
                 if (args.has("status")) { decision.put("status", args.optInt("status", 0)); headEdited = true }
@@ -334,6 +352,31 @@ class AgentToolRegistry(
                 if (args.has("respBody")) decision.put("respBody", resolvePlaceholders(args.optString("respBody", "")))
                 ProxyProbe.resolveRespIntercept(flowId, decision)
                 ok("resp intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
+            }
+            "intercept_resolve_all" -> {
+                val decisionStr = args.optString("decision", "continue")
+                val idsArr = args.optJSONArray("ids")
+                // No ids → release everything currently paused. With ids → release just those.
+                val targets: List<String> = if (idsArr == null || idsArr.length() == 0) {
+                    ProxyProbe.pendingInterceptFlowIds()
+                } else {
+                    (0 until idsArr.length())
+                        .map { idsArr.optString(it, "").trim() }
+                        .filter { it.isNotEmpty() }
+                        .map { NetFlowStore.flowIdFor(it) ?: it }
+                }
+                if (targets.isEmpty()) return@withContext err("没有待放行的拦截流；可传 ids:[六位 code] 指定，或留空放行全部")
+                val released = ArrayList<String>()
+                val missed = ArrayList<String>()
+                for (flowId in targets.distinct()) {
+                    val decision = JSONObject().put("decision", decisionStr)
+                    val label = NetFlowStore.codeFor(flowId) ?: flowId
+                    if (ProxyProbe.releaseIntercept(flowId, decision)) released.add(label) else missed.add(label)
+                }
+                ok(
+                    "批量放行(decision=$decisionStr)：成功 ${released.size} 条 [${released.joinToString(",")}]" +
+                        if (missed.isEmpty()) "" else "；未命中 ${missed.size} 条 [${missed.joinToString(",")}]",
+                )
             }
             "page_set_text" -> page(
                 "setText",
@@ -362,9 +405,9 @@ class AgentToolRegistry(
                 args,
                 args.optLong("timeoutMs", 20_000L).coerceIn(1_000L, 60_000L) + 1_000L,
             )
-            "cookie_reveal" -> {
-                val flowId = args.optString("id", "")
-                val header = args.optString("name", "authorization")
+	            "cookie_reveal" -> {
+	                val flowId = NetFlowStore.flowIdFor(args.optString("id", "")) ?: args.optString("id", "")
+	                val header = args.optString("name", "authorization")
                 val value = NetFlowStore.revealHeader(flowId, header)
                 if (value == null) err("flow $flowId has no $header header") else ok(value)
             }
@@ -500,6 +543,10 @@ class AgentToolRegistry(
             "resp_intercept_resolve" -> execute(
                 name,
                 JSONObject().put("flowId", "__agent_self_test__").put("decision", "continue"),
+            )
+            "intercept_resolve_all" -> execute(
+                name,
+                JSONObject().put("ids", JSONArray().put("__agent_self_test__")).put("decision", "continue"),
             )
             "page_set_text", "page_set_html", "page_set_attr" -> {
                 val id = "__bh_agent_self_test"
@@ -1244,16 +1291,17 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("code", str("要删除的精确代码片段"))
         required("path")
     }),
-    tool("network_list", AgentPermissionTier.S1, "列出 MITM 最近抓到的 HTTP(S) 请求摘要。", schema {
-        prop("method", str("按 HTTP method 过滤。"))
-        prop("urlContains", str("按 URL 子串过滤。"))
-        prop("sinceSeconds", num("只返回最近 N 秒。"))
-        prop("limit", num("最多返回条数，默认 50。"))
-    }),
-    tool("network_get", AgentPermissionTier.S1, "读取单条抓包 flow 的请求/响应头和 body；凭证头仍会脱敏。", schema {
-        prop("id", str("flow id"))
-        required("id")
-    }),
+	    tool("network_list", AgentPermissionTier.S1, "列出 MITM 最近抓到的 HTTP(S) 请求摘要；默认返回最近 10 条，每条带六位 code、请求/响应大小和 latencyMs。", schema {
+	        prop("method", str("按 HTTP method 过滤，如 GET/POST。"))
+	        prop("urlContains", str("按 URL 子串过滤。"))
+	        prop("sinceSeconds", num("只返回最近 N 秒。"))
+	        prop("limit", num("最多返回条数，默认 10。"))
+	    }),
+	    tool("network_get", AgentPermissionTier.S1, "按六位 code 或旧 flowId 读取单条抓包详情；凭证头仍会脱敏。", schema {
+	        prop("id", str("network_list 返回的六位 code；兼容旧 flowId"))
+	        prop("part", str("summary/requestHeaders/requestBody/responseHeaders/responseBody/all，默认 all"))
+	        required("id")
+	    }),
     tool("proxy_status", AgentPermissionTier.S1, "读取 MITM 代理当前状态。", emptySchema()),
     tool("page_index", AgentPermissionTier.S1, "索引当前页面源码，只返回标题、URL、heading、form、link 等摘要。", emptySchema()),
     tool("page_search", AgentPermissionTier.S1, "搜索已索引页面源码，返回片段。先调用 page_index。", schema {
@@ -1330,19 +1378,21 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         }))
         required("rules")
     }),
-    tool("intercept_set", AgentPermissionTier.S2, "配置请求/响应拦截。命中后暂停，等待 resolve。", schema {
-        prop("reqAll", bool("拦截全部请求"))
-        prop("respAll", bool("拦截全部响应"))
-        prop("interceptTelemetry", bool("是否拦截遥测类低价值流量"))
-        prop("interceptNoise", bool("是否拦截噪音类低价值流量"))
-        prop("interceptCookie", bool("是否拦截 cookie/auth 类流量"))
+	    tool("intercept_set", AgentPermissionTier.S2, "配置请求/响应拦截。未传 reqAll/respAll 时默认同时拦截请求和响应，但遥测、心跳/噪音、cookie/auth 类低价值流量默认自动放行。", schema {
+	        prop("reqAll", bool("拦截全部请求；缺省=true"))
+	        prop("respAll", bool("拦截全部响应；缺省=true"))
+	        prop("interceptTelemetry", bool("是否拦截遥测类低价值流量"))
+	        prop("interceptHeartbeat", bool("是否拦截心跳/keepalive 类低价值流量"))
+	        prop("interceptNoise", bool("是否拦截噪音类低价值流量"))
+	        prop("interceptCookie", bool("是否拦截 cookie/auth 类流量"))
         prop("rules", arr(obj {
-            prop("host", str("host"))
-            prop("path", str("path，不含 query"))
-            prop("method", str("HTTP method"))
-            prop("hasBody", bool("是否要求有 body"))
-            prop("interceptResp", bool("是否同时拦截响应"))
-        }))
+	            prop("host", str("host"))
+	            prop("path", str("path，不含 query"))
+	            prop("method", str("HTTP method"))
+	            prop("hasBody", bool("是否要求有 body"))
+	            prop("action", str("intercept 或 pass；缺省 pass"))
+	            prop("interceptResp", bool("是否同时拦截响应"))
+	        }))
     }),
     tool("intercept_pending", AgentPermissionTier.S2, "列出当前暂停等待决策的请求/响应。", emptySchema()),
     tool("intercept_resolve", AgentPermissionTier.S2, "决议暂停的请求：continue 可带编辑，abort 返回 403。", schema {
@@ -1363,6 +1413,10 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("respBody", str("可选：修改响应体"))
         required("flowId")
         required("decision")
+    }),
+    tool("intercept_resolve_all", AgentPermissionTier.S2, "一键放行多条暂停的请求/响应：传 ids（六位 code 数组）放行指定的，留空则放行全部。", schema {
+        prop("ids", JSONObject().put("type", "array").put("items", str("六位 code")))
+        prop("decision", str("continue 或 abort，默认 continue"))
     }),
     tool("page_set_text", AgentPermissionTier.S2, "设置当前页面匹配元素的 textContent。受限 DOM 写入，不执行任意 JS。", schema {
         prop("selector", str("CSS selector"))

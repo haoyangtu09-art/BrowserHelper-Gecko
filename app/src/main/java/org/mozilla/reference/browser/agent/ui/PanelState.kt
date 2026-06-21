@@ -13,6 +13,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import org.mozilla.reference.browser.agent.AgentAttachmentKind
+import org.mozilla.reference.browser.agent.AgentAttachmentResult
 import org.mozilla.reference.browser.agent.core.AgentApprovalDecision
 import org.mozilla.reference.browser.agent.core.AgentApprovalRequest
 import org.mozilla.reference.browser.agent.core.AgentConfig
@@ -33,6 +35,14 @@ typealias ApprovalReq = AgentApprovalRequest
 data class ToolCheckState(
     val status: String = "未测",
     val detail: String = "",
+)
+
+data class AgentAttachmentItem(
+    val kind: AgentAttachmentKind,
+    val uri: String,
+    val displayName: String,
+    val mimeType: String,
+    val sizeBytes: Long,
 )
 
 /**
@@ -59,6 +69,7 @@ class PanelState {
 
     // Recent conversations shown in the drawer; empty this round → only the "最近" label.
     val recentChats = mutableStateListOf<String>()
+    var currentChatTitle by mutableStateOf<String?>(null)
 
     // "我的 Agent": personalization style + durable memory.
     var persona by mutableStateOf("平衡")
@@ -69,6 +80,7 @@ class PanelState {
 
     // Stored memories shown on the memory screen and injected into the system prompt.
     val memories = mutableStateListOf<String>()
+    val attachments = mutableStateListOf<AgentAttachmentItem>()
 
     val toolChecks = mutableStateMapOf<String, ToolCheckState>()
     var toolsChecking by mutableStateOf(false)
@@ -110,6 +122,7 @@ class PanelState {
     var onToolSelfTest: ((String) -> Unit)? = null
     var onToolSelfTestAll: (() -> Unit)? = null
     var onGenerateMemorySummary: (() -> Unit)? = null
+    var onPickAttachment: ((AgentAttachmentKind) -> Unit)? = null
 
     /** Builds a provider config from the current settings, or null if not usable yet. */
     fun buildConfig(requireModel: Boolean = true): AgentConfig? {
@@ -135,6 +148,7 @@ class PanelState {
         if (text.isEmpty()) return
         messages.add(ChatMsg(fromUser = true, text = text))
         convo.add(AgentMessage(Role.User, text))
+        ensureProvisionalTitle(text)
         input = ""
         generating = true
         onTurn?.invoke()
@@ -155,6 +169,8 @@ class PanelState {
         planMode = false
         planText = ""
         titleGenerated = false
+        currentChatTitle = null
+        attachments.clear()
     }
 
     /**
@@ -217,6 +233,42 @@ class PanelState {
         onGenerateMemorySummary?.invoke()
     }
 
+    fun pickAttachment(kind: AgentAttachmentKind) {
+        if (kind == AgentAttachmentKind.Plugin) {
+            messages.add(ChatMsg(fromUser = false, text = "插件入口在网页 DevTools 的「拓展」面板里，当前悬浮窗已保留这个入口。"))
+            return
+        }
+        onPickAttachment?.invoke(kind)
+    }
+
+    fun addAttachment(result: AgentAttachmentResult) {
+        val item = AgentAttachmentItem(
+            kind = result.kind,
+            uri = result.uri,
+            displayName = result.displayName.ifBlank { defaultAttachmentName(result.kind) },
+            mimeType = result.mimeType,
+            sizeBytes = result.sizeBytes,
+        )
+        attachments.add(item)
+        val label = when (item.kind) {
+            AgentAttachmentKind.Camera -> "相机"
+            AgentAttachmentKind.Image -> "图片"
+            AgentAttachmentKind.File -> "文件"
+            AgentAttachmentKind.Plugin -> "插件"
+        }
+        val size = if (item.sizeBytes >= 0) "，${item.sizeBytes} bytes" else ""
+        val text = "已添加$label：${item.displayName}"
+        messages.add(ChatMsg(fromUser = true, text = text))
+        convo.add(
+            AgentMessage(
+                Role.User,
+                "（附件）$label：${item.displayName}；uri=${item.uri}；mime=${item.mimeType.ifBlank { "未知" }}$size",
+            ),
+        )
+        ensureProvisionalTitle(text)
+        persist()
+    }
+
     /**
      * Switches the permission tier. The system prompt is authoritative and rebuilt each turn,
      * but if a conversation is already underway we also drop an explicit note into the
@@ -263,6 +315,53 @@ class PanelState {
         approvalWaiter = null
         pendingApproval = null
         waiter?.complete(decision)
+    }
+
+    private fun ensureProvisionalTitle(text: String) {
+        if (tempChat || currentChatTitle != null) return
+        val title = localTitle(text)
+        if (title.isBlank()) return
+        currentChatTitle = title
+        recentChats.add(0, title)
+        trimRecentChats()
+        persist()
+    }
+
+    fun replaceCurrentTitle(title: String) {
+        if (tempChat) return
+        val cleaned = title.trim().replace(Regex("\\s+"), " ").take(20)
+        if (cleaned.isBlank()) return
+        val old = currentChatTitle
+        val oldIndex = if (old == null) -1 else recentChats.indexOf(old)
+        if (oldIndex >= 0) {
+            recentChats[oldIndex] = cleaned
+        } else if (!recentChats.contains(cleaned)) {
+            recentChats.add(0, cleaned)
+        }
+        currentChatTitle = cleaned
+        trimRecentChats()
+        persist()
+    }
+
+    private fun trimRecentChats() {
+        val seen = LinkedHashSet<String>()
+        val cleaned = recentChats.map { it.trim() }.filter { it.isNotBlank() && seen.add(it) }.take(20)
+        recentChats.clear()
+        recentChats.addAll(cleaned)
+    }
+
+    private fun localTitle(text: String): String =
+        text.trim()
+            .replace(Regex("\\s+"), " ")
+            .trimStart('（', '(', '[', '【')
+            .take(16)
+            .ifBlank { "新对话" }
+
+    private fun defaultAttachmentName(kind: AgentAttachmentKind): String = when (kind) {
+        AgentAttachmentKind.Camera -> "camera.jpg"
+        AgentAttachmentKind.Image -> "image"
+        AgentAttachmentKind.File -> "file"
+        AgentAttachmentKind.Plugin -> "plugin"
     }
 }
 

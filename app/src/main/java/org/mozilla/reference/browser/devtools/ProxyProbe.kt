@@ -112,7 +112,16 @@ object ProxyProbe {
     fun pendingInterceptList(): org.json.JSONArray {
         val arr = org.json.JSONArray()
         for ((flowId, m) in pendingInterceptMeta) {
-            arr.put(JSONObject().put("flowId", flowId).put("type", m.type).put("url", m.url).put("method", m.method).put("ts", m.ts))
+            arr.put(
+                JSONObject()
+                    .put("id", NetFlowStore.codeFor(flowId) ?: flowId)
+                    .put("code", NetFlowStore.codeFor(flowId) ?: flowId)
+                    .put("flowId", flowId)
+                    .put("type", m.type)
+                    .put("url", m.url)
+                    .put("method", m.method)
+                    .put("ts", m.ts),
+            )
         }
         return arr
     }
@@ -245,12 +254,12 @@ object ProxyProbe {
 
     /** Panel → native: install intercept config (intercept-all gates + override rules). */
     @Synchronized
-    fun setInterceptRules(data: JSONObject) {
-        reqInterceptAll = data.optBoolean("reqAll", false)
-        respInterceptAll = data.optBoolean("respAll", false)
-        interceptTelemetry = data.optBoolean("interceptTelemetry", false)
-        interceptNoise = data.optBoolean("interceptNoise", false)
-        interceptCookie = data.optBoolean("interceptCookie", false)
+	    fun setInterceptRules(data: JSONObject) {
+	        reqInterceptAll = data.optBoolean("reqAll", false)
+	        respInterceptAll = data.optBoolean("respAll", false)
+	        interceptTelemetry = data.optBoolean("interceptTelemetry", false)
+	        interceptNoise = data.optBoolean("interceptNoise", data.optBoolean("interceptHeartbeat", false))
+	        interceptCookie = data.optBoolean("interceptCookie", false)
         val rulesJson = data.optJSONArray("rules")
         interceptRulesList = parseInterceptRules(rulesJson)
         saveInterceptConfig(reqInterceptAll, respInterceptAll, rulesJson)
@@ -279,10 +288,11 @@ object ProxyProbe {
     private fun saveInterceptConfig(reqAll: Boolean, respAll: Boolean, rulesJson: org.json.JSONArray?) {
         val ctx = appContext ?: return
         try {
-            val obj = JSONObject().put("reqAll", reqAll).put("respAll", respAll)
-                .put("interceptTelemetry", interceptTelemetry)
-                .put("interceptNoise", interceptNoise)
-                .put("interceptCookie", interceptCookie)
+	            val obj = JSONObject().put("reqAll", reqAll).put("respAll", respAll)
+	                .put("interceptTelemetry", interceptTelemetry)
+	                .put("interceptHeartbeat", interceptNoise)
+	                .put("interceptNoise", interceptNoise)
+	                .put("interceptCookie", interceptCookie)
                 .put("rules", rulesJson ?: org.json.JSONArray())
             ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .edit().putString(INTERCEPT_PREFS_KEY, obj.toString()).apply()
@@ -296,11 +306,11 @@ object ProxyProbe {
             val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .getString(INTERCEPT_PREFS_KEY, null) ?: return
             val obj = JSONObject(s)
-            reqInterceptAll = obj.optBoolean("reqAll", false)
-            respInterceptAll = obj.optBoolean("respAll", false)
-            interceptTelemetry = obj.optBoolean("interceptTelemetry", false)
-            interceptNoise = obj.optBoolean("interceptNoise", false)
-            interceptCookie = obj.optBoolean("interceptCookie", false)
+	            reqInterceptAll = obj.optBoolean("reqAll", false)
+	            respInterceptAll = obj.optBoolean("respAll", false)
+	            interceptTelemetry = obj.optBoolean("interceptTelemetry", false)
+	            interceptNoise = obj.optBoolean("interceptNoise", obj.optBoolean("interceptHeartbeat", false))
+	            interceptCookie = obj.optBoolean("interceptCookie", false)
             interceptRulesList = parseInterceptRules(obj.optJSONArray("rules"))
         } catch (_: Throwable) {}
     }
@@ -560,15 +570,36 @@ object ProxyProbe {
 
     /** Panel → native: the user's decision for a paused request flow. */
     fun resolveIntercept(flowId: String, decision: JSONObject) {
-        pendingInterceptMeta.remove(flowId)
-        pendingIntercepts.remove(flowId)?.complete(decision)
+        val realFlowId = NetFlowStore.flowIdFor(flowId) ?: flowId
+        pendingInterceptMeta.remove(realFlowId)
+        pendingIntercepts.remove(realFlowId)?.complete(decision)
     }
 
     /** Panel → native: the user's decision for a paused response flow. */
     fun resolveRespIntercept(flowId: String, decision: JSONObject) {
-        pendingInterceptMeta.remove(flowId)
-        pendingRespIntercepts.remove(flowId)?.complete(decision)
+        val realFlowId = NetFlowStore.flowIdFor(flowId) ?: flowId
+        pendingInterceptMeta.remove(realFlowId)
+        pendingRespIntercepts.remove(realFlowId)?.complete(decision)
     }
+
+    /**
+     * Release one paused flow regardless of direction (request OR response). Used by the
+     * batch-resolve tool so a single id needn't know whether it paused on req or resp.
+     * Returns true if something was actually waiting and got completed.
+     */
+    fun releaseIntercept(flowId: String, decision: JSONObject): Boolean {
+        val realFlowId = NetFlowStore.flowIdFor(flowId) ?: flowId
+        val reqFut = pendingIntercepts.remove(realFlowId)
+        val respFut = pendingRespIntercepts.remove(realFlowId)
+        if (reqFut == null && respFut == null) return false
+        pendingInterceptMeta.remove(realFlowId)
+        reqFut?.complete(decision)
+        respFut?.complete(decision)
+        return true
+    }
+
+    /** Snapshot of every currently paused flow id (real flowIds), for "release all". */
+    fun pendingInterceptFlowIds(): List<String> = pendingInterceptMeta.keys.toList()
 
     // Parse a raw HTTP head's header lines into a JSONObject (last value wins).
     private fun headersJson(head: String): JSONObject {
@@ -598,7 +629,10 @@ object ProxyProbe {
                 .put("url", "https://$host$target")
                 .put("method", method)
                 .put("reqHeaders", headersJson(reqHead))
-                .put("reqBody", bodyText),
+                .put("reqHeaderBytes", reqHead.toByteArray(Charsets.ISO_8859_1).size)
+                .put("reqBodyBytes", body.size)
+                .put("reqBody", bodyText)
+                .put("ts", System.currentTimeMillis()),
         )
         return try {
             fut.get(INTERCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -663,7 +697,10 @@ object ProxyProbe {
                 .put("flowId", flowId)
                 .put("status", status)
                 .put("respHeaders", headersJson(respHead))
-                .put("respBody", bodyText),
+                .put("respHeaderBytes", respHead.toByteArray(Charsets.ISO_8859_1).size)
+                .put("respBodyBytes", decodedBody.size)
+                .put("respBody", bodyText)
+                .put("ts", System.currentTimeMillis()),
         )
         return try {
             fut.get(INTERCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -920,7 +957,10 @@ object ProxyProbe {
                 .put("flowId", flowId)
                 .put("status", status)
                 .put("respHeaders", headersJson(respHead))
-                .put("respBody", bodyText),
+                .put("respHeaderBytes", respHead.toByteArray(Charsets.ISO_8859_1).size)
+                .put("respBodyBytes", raw?.size ?: 0)
+                .put("respBody", bodyText)
+                .put("ts", System.currentTimeMillis()),
         )
 
         // Block until the panel releases. No hard timeout BY DESIGN — the heartbeat keeps
@@ -1273,6 +1313,8 @@ object ProxyProbe {
                 .put("method", method)
                 .put("host", host)
                 .put("reqHeaders", headers)
+                .put("reqHeaderBytes", head.toByteArray(Charsets.ISO_8859_1).size)
+                .put("reqBodyBytes", headerValue(head, "Content-Length")?.toLongOrNull() ?: 0L)
                 .put("ts", System.currentTimeMillis()),
         )
     }
@@ -1293,7 +1335,10 @@ object ProxyProbe {
                 .put("type", "flowResp")
                 .put("flowId", flowId)
                 .put("status", status)
-                .put("respHeaders", headers),
+                .put("respHeaders", headers)
+                .put("respHeaderBytes", head.toByteArray(Charsets.ISO_8859_1).size)
+                .put("respBodyBytes", headerValue(head, "Content-Length")?.toLongOrNull() ?: 0L)
+                .put("ts", System.currentTimeMillis()),
         )
     }
 
@@ -1805,6 +1850,7 @@ object ProxyProbe {
                 .put("type", "flowRespBody")
                 .put("flowId", flowId)
                 .put("respBody", text)
+                .put("respBodyBytes", body.size)
                 .put("truncated", truncated)
                 .put("encoding", contentEncoding ?: ""),
         )
@@ -1891,6 +1937,7 @@ object ProxyProbe {
                 .put("type", "flowReqBody")
                 .put("flowId", flowId)
                 .put("reqBody", String(body, Charsets.UTF_8))
+                .put("reqBodyBytes", body.size)
                 .put("truncated", truncated),
         )
     }

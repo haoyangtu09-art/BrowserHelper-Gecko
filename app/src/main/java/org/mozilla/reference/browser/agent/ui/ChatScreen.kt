@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +48,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import org.mozilla.reference.browser.agent.AgentAttachmentKind
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 import org.mozilla.reference.browser.agent.ui.theme.AgentText
@@ -164,7 +167,10 @@ fun ChatScreen(
           exit = scaleOut(tween(180), targetScale = 0.9f, transformOrigin = TransformOrigin(0f, 1f)) + fadeOut(tween(160)),
           modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 66.dp),
       ) {
-          UploadSheet(onPick = { showUpload = false })
+          UploadSheet(onPick = { kind ->
+              showUpload = false
+              state.pickAttachment(kind)
+          })
       }
     }
 }
@@ -297,7 +303,28 @@ private fun MenuRow(label: String, onClick: () -> Unit) {
 @Composable
 private fun MessageList(state: PanelState) {
     val scroll = rememberScrollState()
+    var followBottom by remember { mutableStateOf(true) }
+    var lastScrollValue by remember { mutableStateOf(0) }
     val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    LaunchedEffect(scroll.value, scroll.maxValue) {
+        if (scroll.value < lastScrollValue - 4 && scroll.maxValue - scroll.value > 48) {
+            followBottom = false
+        }
+        if (scroll.maxValue - scroll.value <= 48) {
+            followBottom = true
+        }
+        lastScrollValue = scroll.value
+    }
+    LaunchedEffect(
+        state.messages.size,
+        state.messages.lastOrNull()?.text,
+        state.messages.lastOrNull()?.tool,
+        state.generating,
+        scroll.maxValue,
+        followBottom,
+    ) {
+        if (followBottom) scroll.scrollTo(scroll.maxValue)
+    }
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -559,10 +586,8 @@ private fun BlinkingDot(modifier: Modifier = Modifier) {
 
 @Composable
 private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {
-    // Plus + text field + send wrapped in one white container with a FIXED rounded-rectangle
-    // shape. A 50%-pill shape would bulge into a "thick middle, thin ends" oval when the field
-    // wraps to multiple lines; a fixed 22dp radius grows straight down into a rounded box and
-    // keeps the plus/send buttons pinned to the bottom edge.
+    // Plus + text field + send wrapped in one white container with a fixed rounded-rectangle
+    // shape. Buttons stay vertically centered in the input, including the one-line state.
     val shape = RoundedCornerShape(22.dp)
     Row(
         modifier = Modifier
@@ -571,13 +596,13 @@ private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {
             .clip(shape)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, shape)
-            .padding(horizontal = 5.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.Bottom,
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         PlusButton(onClick = onPlusClick)
         Spacer(Modifier.width(4.dp))
         Box(
-            modifier = Modifier.weight(1f).padding(horizontal = 4.dp, vertical = 6.dp),
+            modifier = Modifier.weight(1f).heightIn(min = 32.dp).padding(horizontal = 4.dp, vertical = 4.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             if (state.input.isEmpty()) BasicText("问问…", style = AgentText.Hint)
@@ -637,24 +662,54 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
 /** Floating popup shown above the plus button: a narrow white rounded card listing the four
  *  upload sources as rows (same look as the model selector, not a bottom sheet). */
 @Composable
-private fun UploadSheet(onPick: () -> Unit) {
+private fun UploadSheet(onPick: (AgentAttachmentKind) -> Unit) {
     Column(
         modifier = Modifier
-            .width(170.dp)
+            .width(182.dp)
             .clip(AgentShapes.Sheet)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
-            .padding(vertical = 4.dp),
+            .padding(vertical = 6.dp),
     ) {
-        listOf("相机", "照片", "文件", "插件").forEach { label ->
-            BasicText(
-                label,
-                style = AgentText.Body,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPick() }
-                    .padding(horizontal = 18.dp, vertical = 13.dp),
-            )
+        UploadRow("相机", AgentAttachmentKind.Camera, onPick) {
+            CameraIcon(color = AgentColors.TextPrimary, size = 18.dp)
         }
+        UploadRow("图片", AgentAttachmentKind.Image, onPick) {
+            ImageLandscapeIcon(size = 21.dp)
+        }
+        UploadRow("文件", AgentAttachmentKind.File, onPick) {
+            SpiralClipIcon(color = AgentColors.TextPrimary, size = 20.dp)
+        }
+        UploadRow("插件", AgentAttachmentKind.Plugin, onPick) {
+            PluginPlugIcon(color = AgentColors.TextPrimary, size = 20.dp)
+        }
+    }
+}
+
+@Composable
+private fun UploadRow(
+    label: String,
+    kind: AgentAttachmentKind,
+    onPick: (AgentAttachmentKind) -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onPick(kind) }
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(width = 38.dp, height = 32.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(AgentColors.Control),
+            contentAlignment = Alignment.Center,
+        ) {
+            icon()
+        }
+        Spacer(Modifier.width(10.dp))
+        BasicText(label, style = AgentText.Body)
     }
 }

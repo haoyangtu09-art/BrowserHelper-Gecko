@@ -21,6 +21,8 @@ import org.mozilla.reference.browser.agent.core.ChatBackend
 import org.mozilla.reference.browser.agent.core.Role
 import org.mozilla.reference.browser.agent.core.ChatToolCall
 
+private const val TOOL_LOOP_LIMIT = 250
+
 /**
  * Orchestrates one model turn over [PanelState]. The UI calls [start] after the user message
  * is already appended to the structured transcript ([PanelState.convo]); the engine prepends
@@ -66,7 +68,7 @@ class AgentEngine(context: Context) {
             var producedAnything = false
             try {
                 var loops = 0
-                while (loops < 6) {
+                while (loops < TOOL_LOOP_LIMIT) {
                     loops += 1
                     val messages = ArrayList<AgentMessage>(convo.size + 2)
                     messages.add(AgentMessage(Role.System, systemPrompt(state)))
@@ -126,8 +128,8 @@ class AgentEngine(context: Context) {
                         )
                     }
                 }
-                if (loops >= 6) {
-                    state.messages.add(ChatMsg(fromUser = false, text = "工具循环已到上限，已停止继续调用。"))
+                if (loops >= TOOL_LOOP_LIMIT) {
+                    state.messages.add(ChatMsg(fromUser = false, text = "工具循环已到 ${TOOL_LOOP_LIMIT} 次上限，已停止继续调用。"))
                 }
                 if (!producedAnything) {
                     state.messages.add(ChatMsg(fromUser = false, text = "(无内容)"))
@@ -311,7 +313,7 @@ class AgentEngine(context: Context) {
      * a history label, not another per-turn summarization job.
      */
     private suspend fun maybeGenerateTitle(config: AgentConfig, backend: ChatBackend, state: PanelState) {
-        if (state.titleGenerated) return
+        if (state.tempChat || state.titleGenerated) return
         val seed = titleSeed(state) ?: return
         state.titleGenerated = true
         try {
@@ -324,12 +326,9 @@ class AgentEngine(context: Context) {
             )
             val reply = backend.complete(config.copy(maxTokens = 40), msgs, emptyList(), null)
             val title = reply.content.trim().replace("\n", " ").take(20)
-            if (title.isNotEmpty() && !state.recentChats.contains(title)) {
-                state.recentChats.add(0, title)
-                state.persist()
-            }
+            state.replaceCurrentTitle(title)
         } catch (_: Exception) {
-            // Title is best-effort; leave history untitled on failure.
+            // Title is best-effort; the local provisional title remains in the drawer.
         }
     }
 
@@ -341,7 +340,7 @@ class AgentEngine(context: Context) {
                 pieces.addAll(firstSentences(msg.content))
                 if (pieces.size >= 2) return pieces.take(2).joinToString("\n").take(500)
             }
-        return null
+        return pieces.firstOrNull()?.take(500)
     }
 
     private fun isRealUserTitleText(text: String): Boolean {

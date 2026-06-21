@@ -54,14 +54,14 @@ class AnthropicBackend : ChatBackend {
         val calls = ArrayList<ChatToolCall>()
         for (i in 0 until content.length()) {
             val part = content.optJSONObject(i) ?: continue
-            when (part.optString("type")) {
-                "text" -> text.append(part.optString("text", ""))
+            when (part.optStringValue("type")) {
+                "text" -> text.append(part.optStringValue("text"))
                 "tool_use" -> {
-                    val name = part.optString("name", "")
+                    val name = part.optStringValue("name")
                     if (name.isEmpty()) continue
                     calls.add(
                         ChatToolCall(
-                            id = part.optString("id", "call_$i"),
+                            id = part.optStringValue("id", "call_$i"),
                             name = name,
                             arguments = part.optJSONObject("input")?.toString() ?: "{}",
                         ),
@@ -93,22 +93,22 @@ class AnthropicBackend : ChatBackend {
             } catch (_: Exception) {
                 return@postSse
             }
-            when (ev.optString("type")) {
+            when (ev.optStringValue("type")) {
                 "content_block_start" -> {
                     val idx = ev.optInt("index", 0)
                     val block = ev.optJSONObject("content_block")
-                    if (block?.optString("type") == "tool_use") {
+                    if (block?.optStringValue("type") == "tool_use") {
                         blocks[idx] = ToolBlock(
-                            id = block.optString("id", "call_$idx"),
-                            name = block.optString("name", ""),
+                            id = block.optStringValue("id", "call_$idx"),
+                            name = block.optStringValue("name"),
                         )
                     }
                 }
                 "content_block_delta" -> {
                     val d = ev.optJSONObject("delta") ?: return@postSse
-                    when (d.optString("type")) {
+                    when (d.optStringValue("type")) {
                         "text_delta" -> {
-                            val frag = d.optString("text", "")
+                            val frag = d.optStringValue("text")
                             if (frag.isNotEmpty()) {
                                 text.append(frag)
                                 onTextDelta(frag)
@@ -116,7 +116,7 @@ class AnthropicBackend : ChatBackend {
                         }
                         "input_json_delta" -> {
                             val idx = ev.optInt("index", 0)
-                            blocks[idx]?.args?.append(d.optString("partial_json", ""))
+                            blocks[idx]?.args?.append(d.optStringValue("partial_json"))
                         }
                     }
                 }
@@ -200,7 +200,7 @@ class AnthropicBackend : ChatBackend {
         val text = getText(endpoint, headers(config))
         val arr = JSONObject(text).optJSONArray("data") ?: return emptyList()
         return (0 until arr.length())
-            .mapNotNull { arr.optJSONObject(it)?.optString("id")?.ifEmpty { null } }
+            .mapNotNull { arr.optJSONObject(it)?.optStringValue("id")?.ifEmpty { null } }
             .sorted()
     }
 
@@ -208,4 +208,10 @@ class AnthropicBackend : ChatBackend {
         "x-api-key" to config.apiKey,
         "anthropic-version" to ANTHROPIC_VERSION,
     )
+}
+
+private fun JSONObject.optStringValue(name: String, fallback: String = ""): String {
+    if (!has(name) || isNull(name)) return fallback
+    val value = opt(name) ?: return fallback
+    return if (value == JSONObject.NULL) fallback else value.toString()
 }

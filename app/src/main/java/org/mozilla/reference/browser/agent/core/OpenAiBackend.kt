@@ -58,18 +58,18 @@ class OpenAiBackend : ChatBackend {
             for (i in 0 until arr.length()) {
                 val c = arr.optJSONObject(i) ?: continue
                 val fn = c.optJSONObject("function") ?: continue
-                val name = fn.optString("name", "")
+                val name = fn.optStringValue("name")
                 if (name.isEmpty()) continue
                 calls.add(
                     ChatToolCall(
-                        id = c.optString("id", "call_$i"),
+                        id = c.optStringValue("id", "call_$i"),
                         name = name,
-                        arguments = fn.optString("arguments", "{}"),
+                        arguments = fn.optStringValue("arguments", "{}"),
                     ),
                 )
             }
         }
-        return ChatReply(msg.optString("content", ""), calls)
+        return ChatReply(msg.optStringValue("content"), calls)
     }
 
     /**
@@ -94,7 +94,7 @@ class OpenAiBackend : ChatBackend {
             }
             val delta = chunk.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
                 ?: return@postSse
-            val frag = delta.optString("content", "")
+            val frag = delta.optStringValue("content")
             if (frag.isNotEmpty()) {
                 text.append(frag)
                 onTextDelta(frag)
@@ -104,11 +104,11 @@ class OpenAiBackend : ChatBackend {
                 val tc = tcs.optJSONObject(i) ?: continue
                 val idx = tc.optInt("index", i)
                 val acc = toolAcc.getOrPut(idx) { Triple(StringBuilder(), StringBuilder(), StringBuilder()) }
-                tc.optString("id", "").takeIf { it.isNotEmpty() }?.let { if (acc.first.isEmpty()) acc.first.append(it) }
+                tc.optStringValue("id").takeIf { it.isNotEmpty() }?.let { if (acc.first.isEmpty()) acc.first.append(it) }
                 val fn = tc.optJSONObject("function")
                 if (fn != null) {
-                    fn.optString("name", "").takeIf { it.isNotEmpty() }?.let { if (acc.second.isEmpty()) acc.second.append(it) }
-                    acc.third.append(fn.optString("arguments", ""))
+                    fn.optStringValue("name").takeIf { it.isNotEmpty() }?.let { if (acc.second.isEmpty()) acc.second.append(it) }
+                    acc.third.append(fn.optStringValue("arguments"))
                 }
             }
         }
@@ -129,7 +129,7 @@ class OpenAiBackend : ChatBackend {
         val text = getText(endpoint, mapOf("Authorization" to "Bearer ${config.apiKey}"))
         val arr = JSONObject(text).optJSONArray("data") ?: return emptyList()
         return (0 until arr.length())
-            .mapNotNull { arr.optJSONObject(it)?.optString("id")?.ifEmpty { null } }
+            .mapNotNull { arr.optJSONObject(it)?.optStringValue("id")?.ifEmpty { null } }
             .sorted()
     }
 
@@ -161,4 +161,10 @@ class OpenAiBackend : ChatBackend {
         }
         return arr
     }
+}
+
+private fun JSONObject.optStringValue(name: String, fallback: String = ""): String {
+    if (!has(name) || isNull(name)) return fallback
+    val value = opt(name) ?: return fallback
+    return if (value == JSONObject.NULL) fallback else value.toString()
 }

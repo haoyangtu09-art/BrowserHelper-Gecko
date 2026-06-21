@@ -200,6 +200,11 @@
         <service android:name=".agent.AgentOverlayService"
             android:exported="false" />
 
+        <activity
+            android:name=".agent.AgentAttachmentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name=".push.FirebasePush"
             android:exported="false">
