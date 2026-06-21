@@ -4,6 +4,9 @@
 
 package org.mozilla.reference.browser.agent.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -55,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
@@ -72,8 +76,7 @@ private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
 
 /**
  * Chat surface: top bar (menu / Agent / state action) + message list (with a slowly
- * blinking dot while generating) + input bar (+ / field / send↔stop). Pure UI on mock
- * in-memory state; no model/tool calls this round.
+ * blinking dot while generating) + input bar (+ / field / send↔stop).
  */
 @Composable
 fun ChatScreen(
@@ -270,6 +273,7 @@ private fun MenuRow(label: String, onClick: () -> Unit) {
 @Composable
 private fun MessageList(state: PanelState) {
     val scroll = rememberScrollState()
+    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -296,7 +300,9 @@ private fun MessageList(state: PanelState) {
                         // Per-message action bar: a two-paper copy button (no "复制" text).
                         Spacer(Modifier.height(6.dp))
                         Box(
-                            Modifier.size(26.dp).clip(CircleShape).noRippleClickable { },
+                            Modifier.size(26.dp).clip(CircleShape).noRippleClickable {
+                                clipboard.setPrimaryClip(ClipData.newPlainText("assistant", msg.text))
+                            },
                             contentAlignment = Alignment.Center,
                         ) { CopyIcon(size = 16.dp, color = AgentColors.TextSecondary) }
                     }
@@ -325,7 +331,7 @@ private fun AssistantAvatar() {
 
 /**
  * Renders assistant text, splitting fenced ``` blocks out into rounded CodeBlock boxes. The
- * box is a standing container, so as the (mock) text grows the frame is present first and
+ * box is a standing container, so as the streamed text grows the frame is present first and
  * code appears inside it — not code-first-then-frame.
  */
 @Composable
@@ -361,6 +367,7 @@ private fun parseSegments(text: String): List<Pair<Boolean, String>> {
 /** A rounded dark code box with a two-paper copy button pinned to the top-right corner. */
 @Composable
 private fun CodeBlock(code: String) {
+    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -374,7 +381,9 @@ private fun CodeBlock(code: String) {
             modifier = Modifier.fillMaxWidth().padding(end = 24.dp, top = 18.dp),
         )
         Box(
-            Modifier.align(Alignment.TopEnd).size(24.dp).clip(CircleShape).noRippleClickable { },
+            Modifier.align(Alignment.TopEnd).size(24.dp).clip(CircleShape).noRippleClickable {
+                clipboard.setPrimaryClip(ClipData.newPlainText("code", code))
+            },
             contentAlignment = Alignment.Center,
         ) { CopyIcon(size = 15.dp, color = Color(0xFFBFBFBF)) }
     }

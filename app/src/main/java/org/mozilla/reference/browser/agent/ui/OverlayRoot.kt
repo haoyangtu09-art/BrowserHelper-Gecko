@@ -295,20 +295,28 @@ private fun AgentPanel(
                 // Chat surface + internal navigation (drawer / settings / model selector).
                 AgentPanelHost(modifier = Modifier.weight(1f))
             }
+            // Keep the resize grip attached to the panel's rounded corner. It lives inside
+            // the scaled panel so its anchor follows the corner while an inverse layer keeps
+            // the touch target at a stable physical size as the whole panel shrinks.
+            ResizeHandle(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .graphicsLayer {
+                        val inv = 1f / scale.coerceAtLeast(0.01f)
+                        scaleX = inv
+                        scaleY = inv
+                        transformOrigin = TransformOrigin(1f, 1f)
+                    },
+                onResize = onPanelResize,
+            )
         }
-        // Bottom-right resize grip: drag to uniformly scale the panel (handled natively).
-        ResizeHandle(
-            modifier = Modifier.align(Alignment.BottomEnd),
-            onResize = onPanelResize,
-        )
     }
 }
 
 /**
  * A diagonal grip in the panel's bottom-right corner; dragging resizes the window. It sits
- * on the unclipped outer Box (never the scaled, clipped content) and carries its own
- * semi-transparent rounded backing so it stays visible and grabbable even when the panel is
- * scaled all the way down — previously the bare hairlines vanished against a small panel.
+ * at the clipped panel corner and carries its own semi-transparent rounded backing so it
+ * stays visible and grabbable even when the panel is scaled all the way down.
  */
 @Composable
 private fun ResizeHandle(modifier: Modifier, onResize: (Float, Float) -> Unit) {

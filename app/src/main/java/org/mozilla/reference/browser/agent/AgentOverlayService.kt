@@ -303,13 +303,15 @@ class AgentOverlayService : Service() {
         // Use the dominant drag axis (average) over the base width to derive a scale delta.
         val deltaScale = ((dx + dy) / 2f / density) / PANEL_BASE_W_DP
         val newScale = (oldScale + deltaScale).coerceIn(MIN_PANEL_SCALE, maxScale)
+        if (newScale == oldScale) return
         panelScaleState.value = newScale
         if (anchorRightState.value) {
             val deltaPx = (PANEL_BASE_W_DP * (newScale - oldScale) * density).roundToInt()
             val lp = params ?: return
             lp.x = (lp.x - deltaPx).coerceAtLeast(0)
-            safeUpdate()
         }
+        root?.requestLayout()
+        safeUpdate()
     }
 
     private fun moveWindowBy(dx: Float, dy: Float) {

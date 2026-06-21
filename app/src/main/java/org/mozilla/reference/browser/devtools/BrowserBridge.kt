@@ -598,12 +598,17 @@ object BrowserBridge {
                 "intercept_resolve" -> {
                     val flowId = args.optString("flowId", "")
                     if (flowId.isEmpty()) return toolError(id, "flowId required")
-                    val decision = JSONObject()
-                        .put("decision", args.optString("decision", "continue"))
-                        .put("url", args.optString("url", ""))
-                        .put("method", args.optString("method", ""))
-                        .put("reqHeaders", resolveHeaderPlaceholders(args.optJSONObject("reqHeaders")))
-                    // Only include reqBody when explicitly provided; absence = keep original body.
+                    val decision = JSONObject().put("decision", args.optString("decision", "continue"))
+                    // Only carry edited fields; absence = keep original. headEdited makes
+                    // ProxyProbe rebuild the request line/headers (else forwarded verbatim).
+                    var headEdited = false
+                    if (args.has("url")) { decision.put("url", args.optString("url", "")); headEdited = true }
+                    if (args.has("method")) { decision.put("method", args.optString("method", "")); headEdited = true }
+                    if (args.has("reqHeaders")) {
+                        decision.put("reqHeaders", resolveHeaderPlaceholders(args.optJSONObject("reqHeaders")))
+                        headEdited = true
+                    }
+                    if (headEdited) decision.put("headEdited", true)
                     if (args.has("reqBody")) decision.put("reqBody", resolvePlaceholders(args.optString("reqBody", "")))
                     ProxyProbe.resolveIntercept(flowId, decision)
                     toolText(id, "intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")
@@ -611,11 +616,14 @@ object BrowserBridge {
                 "resp_intercept_resolve" -> {
                     val flowId = args.optString("flowId", "")
                     if (flowId.isEmpty()) return toolError(id, "flowId required")
-                    val decision = JSONObject()
-                        .put("decision", args.optString("decision", "continue"))
-                        .put("status", args.optInt("status", 0))
-                        .put("respHeaders", resolveHeaderPlaceholders(args.optJSONObject("respHeaders")))
-                    // Only include respBody when explicitly provided; absence = keep original body.
+                    val decision = JSONObject().put("decision", args.optString("decision", "continue"))
+                    var headEdited = false
+                    if (args.has("status")) { decision.put("status", args.optInt("status", 0)); headEdited = true }
+                    if (args.has("respHeaders")) {
+                        decision.put("respHeaders", resolveHeaderPlaceholders(args.optJSONObject("respHeaders")))
+                        headEdited = true
+                    }
+                    if (headEdited) decision.put("headEdited", true)
                     if (args.has("respBody")) decision.put("respBody", resolvePlaceholders(args.optString("respBody", "")))
                     ProxyProbe.resolveRespIntercept(flowId, decision)
                     toolText(id, "resp intercept resolved: flowId=$flowId decision=${decision.optString("decision")}")

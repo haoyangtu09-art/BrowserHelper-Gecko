@@ -611,7 +611,11 @@ object ProxyProbe {
     // Rebuild a request head from the panel's edited decision (origin-form target,
     // edited headers, fresh Content-Length; Transfer-Encoding/old CL dropped).
     private fun buildReqHead(decision: JSONObject, host: String, origHead: String, bodyLen: Int): String {
-        val method = decision.optString("method", "GET").uppercase()
+        // Fall back to the ORIGINAL method when the caller edited only headers/url, so a
+        // partial edit (e.g. just a header) can't silently downgrade a POST to GET.
+        val method = decision.optString("method", "").uppercase().ifBlank {
+            origHead.substringBefore("\r\n").trimStart().substringBefore(' ').trim().ifBlank { "GET" }
+        }
         val target = requestTargetFromUrl(decision.optString("url", ""), origHead)
         val sb = StringBuilder()
         sb.append(method).append(' ').append(target).append(" HTTP/1.1\r\n")
@@ -1544,15 +1548,23 @@ object ProxyProbe {
                         } catch (_: Throwable) {}
                         return
                     }
-                    val fBody = if (decision != null && verdict == "continue") {
+                    // Mirror the request side: an absent respBody key means "keep the
+                    // original body", not "clear it" — otherwise a plain continue (no edit)
+                    // would wipe the response to empty.
+                    val fBody = if (decision != null && verdict == "continue" && decision.has("respBody")) {
                         decision.optString("respBody", "").toByteArray(Charsets.UTF_8)
                     } else {
                         decoded
                     }
-                    val fHead = if (decision != null && verdict == "continue") {
+                    // Only rebuild the head from the (unordered) JSONObject when the caller
+                    // actually edited status/headers (headEdited). Otherwise preserve the
+                    // ORIGINAL response headers verbatim — rebuilding from scratch would drop
+                    // Set-Cookie/Content-Type/CORS and scramble header order.
+                    val fHead = if (decision != null && verdict == "continue" && decision.optBoolean("headEdited", false)) {
                         buildRespHead(decision, respHead, fBody.size)
                     } else {
-                        // Fail-open: forward the decoded body as identity (drop CE, fix CL).
+                        // Fail-open / no head edit: forward the decoded body as identity
+                        // (drop CE, fix CL) while keeping the original headers.
                         var h = respHead
                         if (ce != null) h = stripHeader(h, "Content-Encoding")
                         forceContentLength(h, fBody.size)

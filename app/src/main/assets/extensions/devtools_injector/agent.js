@@ -11,7 +11,8 @@
 //
 // page_exec runs arbitrary JS in PAGE world using Gecko's wrappedJSObject.Function —
 // synchronous, CSP-bypass capable, Gecko-only (fine, this is a GeckoView APK).
-// It is gated behind an L3 native confirmation dialog in BrowserBridge/AgentConfirm.
+// It is gated by the native caller: S3 ApprovalSheet for the overlay Agent, or
+// AgentConfirm for the external BrowserBridge compatibility path.
 
 /* jshint esversion: 6 */
 /* global browser, wrappedJSObject */
@@ -102,6 +103,73 @@ function _bhEvalInPage(code, timeoutMs) {
             document.removeEventListener(evtName, handler);
             resolve({ error: 'evalJS timeout — CSP may be blocking all script execution on this page' });
         }, timeoutMs || 10000);
+    });
+}
+
+function _bhPageFetch(args) {
+    var target = String(args.url || '');
+    if (!target) return Promise.resolve({ error: 'url required' });
+    var required = String(args.requiredPageUrlContains || '');
+    if (required && location.href.indexOf(required) < 0) {
+        return Promise.resolve({ error: 'current page URL does not match requiredPageUrlContains', pageUrl: location.href });
+    }
+    var payload = {
+        url: target,
+        method: String(args.method || 'GET').toUpperCase(),
+        headers: args.headers || {},
+        body: Object.prototype.hasOwnProperty.call(args, 'body') ? String(args.body || '') : null,
+        credentials: args.credentials || 'same-origin',
+        mode: args.mode || 'cors',
+        timeoutMs: Math.max(1000, Math.min(Number(args.timeoutMs || 20000), 60000)),
+        bodyCap: 512 * 1024,
+        pageUrl: location.href,
+    };
+    return new Promise(function (resolve) {
+        var evtName = '__bhPageFetch' + (++_bhEvalSeq) + '_' + Date.now();
+        var done = false;
+        function finish(detail) {
+            if (done) return;
+            done = true;
+            document.removeEventListener(evtName, handler);
+            resolve(detail || { error: 'no detail' });
+        }
+        function handler(e) { finish(e.detail); }
+        document.addEventListener(evtName, handler);
+
+        var scriptCode =
+            '(function(){var cfg=' + JSON.stringify(payload) + ';' +
+            'var ctl=new AbortController();' +
+            'var timer=setTimeout(function(){try{ctl.abort();}catch(_){}} ,cfg.timeoutMs);' +
+            'function send(d){clearTimeout(timer);document.dispatchEvent(new CustomEvent(' + JSON.stringify(evtName) + ',{detail:d}));}' +
+            'try{var opt={method:cfg.method,headers:cfg.headers||{},credentials:cfg.credentials,mode:cfg.mode,signal:ctl.signal};' +
+            'if(cfg.body!==null&&cfg.method!=="GET"&&cfg.method!=="HEAD")opt.body=cfg.body;' +
+            'fetch(cfg.url,opt).then(function(r){return r.text().then(function(text){' +
+            'var h={};try{r.headers.forEach(function(v,k){h[k]=v;});}catch(_){}' +
+            'send({ok:true,pageUrl:cfg.pageUrl,url:r.url,status:r.status,statusText:r.statusText,headers:h,body:text.substring(0,cfg.bodyCap),truncated:text.length>cfg.bodyCap});' +
+            '});}).catch(function(e){send({ok:false,error:String(e),pageUrl:cfg.pageUrl});});' +
+            '}catch(e){send({ok:false,error:String(e),pageUrl:cfg.pageUrl});}})()'
+        ;
+
+        var injected = false;
+        try {
+            var blob = new Blob([scriptCode], { type: 'application/javascript' });
+            var blobUrl = URL.createObjectURL(blob);
+            var blobScript = document.createElement('script');
+            blobScript.src = blobUrl;
+            blobScript.onerror = function () {
+                URL.revokeObjectURL(blobUrl);
+                blobScript.remove();
+                if (!done) _bhRunInPage(scriptCode);
+            };
+            blobScript.onload = function () { URL.revokeObjectURL(blobUrl); blobScript.remove(); };
+            (document.head || document.documentElement).appendChild(blobScript);
+            injected = true;
+        } catch (_) {}
+        if (!injected && !done) _bhRunInPage(scriptCode);
+
+        setTimeout(function () {
+            finish({ error: 'pageFetch timeout', pageUrl: location.href });
+        }, payload.timeoutMs + 1000);
     });
 }
 
@@ -211,8 +279,46 @@ function bhHandleAgentCmd(msg) {
         }
     }
 
-    // ── page_exec (L3) ──────────────────────────────────────────────────────
-    // Execute arbitrary JS in PAGE world. Gate: L3 native confirmation in APK.
+    // ── page write (S2, constrained DOM writes) ─────────────────────────────
+    // These commands intentionally cover common page-source edits without exposing
+    // arbitrary JS. Full page-world JS stays behind the S3-only evalJS command.
+    if (cmd === 'setText' || cmd === 'setHTML' || cmd === 'setAttr') {
+        var writeSel = args.selector || '';
+        if (!writeSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var targets = Array.prototype.slice.call(document.querySelectorAll(writeSel), 0, args.all ? 50 : 1);
+            if (!targets.length) return Promise.resolve({ error: 'no elements matched selector' });
+            if (cmd === 'setText') {
+                targets.forEach(function (el) { el.textContent = String(args.text || ''); });
+            } else if (cmd === 'setHTML') {
+                targets.forEach(function (el) { el.innerHTML = String(args.html || ''); });
+            } else {
+                var attrName = String(args.name || '').trim();
+                if (!/^[A-Za-z_:][A-Za-z0-9_.:-]*$/.test(attrName)) {
+                    return Promise.resolve({ error: 'invalid attribute name' });
+                }
+                targets.forEach(function (el) { el.setAttribute(attrName, String(args.value || '')); });
+            }
+            return Promise.resolve({
+                ok: true,
+                cmd: cmd,
+                selector: writeSel,
+                count: targets.length,
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page-origin fetch (S3) ─────────────────────────────────────────────
+    // Runs fetch in page world, so the request originates from the current page
+    // instead of the native app process.
+    if (cmd === 'pageFetch') {
+        return _bhPageFetch(args);
+    }
+
+    // ── page_exec (S3/L3) ───────────────────────────────────────────────────
+    // Execute arbitrary JS in PAGE world. Gate: native caller approval in APK.
     // wrappedJSObject gives full access to page APIs (fetch, document.cookie, etc.).
     if (cmd === 'evalJS') {
         var code = args.code || '';
