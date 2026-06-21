@@ -16,6 +16,16 @@ enum class PanelNav { Chat, Drawer, Settings, ModelSelector, Personalization, Me
 /** Reasoning effort tiers, mapped to a token budget (wired in a later round). */
 enum class ReasonTier { Low, Middle, High }
 
+/** Permission tiers shown on the model-selector slider, mirroring BrowserBridge L1/L2/L3. */
+enum class PermTier { P1, P2, P3 }
+
+/**
+ * A pending secondary-confirmation request, modeled on Codex's approval object. This round
+ * it is produced by a mock trigger; later it will be filled before a real tool call. The
+ * three decisions map to Codex ReviewDecision: approve / approve-for-session / deny.
+ */
+data class ApprovalReq(val kind: String, val title: String, val detail: String)
+
 /**
  * In-memory UI state for the Agent panel. This round is UI-only: messages are mock,
  * "generating" just toggles the blinking dot / stop button, and settings are held in
@@ -39,6 +49,21 @@ class PanelState {
     // "我的 Agent": personalization style + memory toggle (memory only this round).
     var persona by mutableStateOf("平衡")
     var memoryEnabled by mutableStateOf(true)
+
+    // Stored memories shown on the memory screen (in-memory this round).
+    val memories = mutableStateListOf<String>()
+
+    // Permission tier picked on the model-selector slider (UI-only this round).
+    var permTier by mutableStateOf(PermTier.P1)
+
+    // Secondary-confirmation (二次确认) state. pendingApproval drives the bottom sheet;
+    // approvalSkip holds the kinds the user chose "不再询问" for this session.
+    var pendingApproval by mutableStateOf<ApprovalReq?>(null)
+    val approvalSkip = mutableStateListOf<String>()
+
+    // Plan mode (mirrors the assistant's own enter/write/exit-plan flow). UI表征 only.
+    var planMode by mutableStateOf(false)
+    var planText by mutableStateOf("")
 
     // Settings (memory only this round).
     var apiKey by mutableStateOf("")

@@ -6,6 +6,7 @@ package org.mozilla.reference.browser.agent.ui
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -89,13 +90,15 @@ fun OverlayRoot(
         // before the panel grows.
         contentAlignment = if (anchorRight) Alignment.TopEnd else Alignment.TopStart,
         transitionSpec = {
+            // Grow/shrink from the anchored corner with one shared easing so the scale and
+            // fade stay in lockstep — symmetric in/out durations avoid the "闪现" snap feel.
             val origin = TransformOrigin(if (anchorRight) 1f else 0f, 0f)
             (
-                scaleIn(animationSpec = tween(240), initialScale = 0.85f, transformOrigin = origin) +
-                    fadeIn(tween(240))
+                scaleIn(animationSpec = tween(260, easing = FastOutSlowInEasing), initialScale = 0.82f, transformOrigin = origin) +
+                    fadeIn(tween(220, easing = FastOutSlowInEasing))
                 ) togetherWith (
-                scaleOut(animationSpec = tween(320), targetScale = 0.85f, transformOrigin = origin) +
-                    fadeOut(tween(300))
+                scaleOut(animationSpec = tween(260, easing = FastOutSlowInEasing), targetScale = 0.82f, transformOrigin = origin) +
+                    fadeOut(tween(200, easing = FastOutSlowInEasing))
                 ) using SizeTransform(clip = false) { _, _ -> snap() }
         },
         label = "overlay",
@@ -301,13 +304,20 @@ private fun AgentPanel(
     }
 }
 
-/** A small diagonal grip in the panel's bottom-right corner; dragging resizes the window. */
+/**
+ * A diagonal grip in the panel's bottom-right corner; dragging resizes the window. It sits
+ * on the unclipped outer Box (never the scaled, clipped content) and carries its own
+ * semi-transparent rounded backing so it stays visible and grabbable even when the panel is
+ * scaled all the way down — previously the bare hairlines vanished against a small panel.
+ */
 @Composable
 private fun ResizeHandle(modifier: Modifier, onResize: (Float, Float) -> Unit) {
     Box(
         modifier = modifier
-            .padding(4.dp)
-            .size(24.dp)
+            .padding(3.dp)
+            .size(26.dp)
+            .clip(RoundedCornerShape(topStart = 12.dp, bottomEnd = 8.dp))
+            .background(Color(0x33000000))
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
@@ -317,15 +327,15 @@ private fun ResizeHandle(modifier: Modifier, onResize: (Float, Float) -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.size(14.dp)) {
-            val sw = size.minDimension * 0.10f
+            val sw = size.minDimension * 0.12f
             drawLine(
-                AgentColors.Hairline,
+                Color.White,
                 Offset(size.width, size.height * 0.32f),
                 Offset(size.width * 0.32f, size.height),
                 sw, StrokeCap.Round,
             )
             drawLine(
-                AgentColors.Hairline,
+                Color.White,
                 Offset(size.width, size.height * 0.7f),
                 Offset(size.width * 0.7f, size.height),
                 sw, StrokeCap.Round,

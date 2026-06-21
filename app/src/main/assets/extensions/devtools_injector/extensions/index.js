@@ -4,7 +4,7 @@
 var extPanel = null;
 
 var EXT_STYLE = [
-  '#bh-ext{display:flex;flex-direction:column;height:100%;font-size:15px;',
+  '#bh-ext{position:relative;display:flex;flex-direction:column;height:100%;font-size:15px;',
   '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
   '  background:#fff;color:#111;pointer-events:auto;touch-action:auto;}',
   '#bh-ext-head{display:flex;align-items:center;gap:8px;padding:10px 12px;',
@@ -12,26 +12,86 @@ var EXT_STYLE = [
   '#bh-ext-title{flex:1;font-size:15px;font-weight:700;}',
   '#bh-ext-body{flex:1;overflow:auto;padding:12px;display:grid;',
   '  grid-template-columns:repeat(2,1fr);gap:12px;align-content:start;}',
+  // Square cards: aspect-ratio 1/1 instead of a tall min-height rectangle.
   '.bh-ext-card{display:flex;flex-direction:column;gap:8px;padding:14px;',
   '  border:1px solid #d0d7de;border-radius:16px;background:#fff;',
-  '  box-shadow:0 1px 3px rgba(0,0,0,.06);min-height:120px;}',
-  '.bh-ext-card-info{flex:1;min-width:0;}',
+  '  box-shadow:0 1px 3px rgba(0,0,0,.06);aspect-ratio:1/1;}',
+  '.bh-ext-card-info{flex:1;min-width:0;overflow:hidden;}',
   '.bh-ext-card-name{font-size:15px;font-weight:600;color:#111;}',
-  '.bh-ext-card-ver{margin-left:6px;font-size:11px;font-weight:600;color:#2563eb;',
-  '  background:#eff6ff;border-radius:6px;padding:1px 6px;vertical-align:middle;}',
-  '.bh-ext-card-desc{font-size:12px;color:#888;margin-top:4px;line-height:1.4;}',
-  '.bh-ext-toggle{align-self:stretch;padding:8px 0;border:none;border-radius:10px;',
-  '  font-size:14px;font-weight:600;color:#fff;}',
+  // Version now occupies the old description slot.
+  '.bh-ext-card-ver{margin-top:8px;font-size:13px;font-weight:600;color:#2563eb;}',
+  '.bh-ext-actions{display:flex;gap:8px;}',
+  '.bh-ext-btn{flex:1;padding:8px 0;border:none;border-radius:10px;',
+  '  font-size:13px;font-weight:600;text-align:center;}',
+  '.bh-ext-detail{background:#eef2f7;color:#333;}',
+  '.bh-ext-toggle{color:#fff;}',
   '.bh-ext-toggle.on{background:#16a34a;}',
   '.bh-ext-toggle.off{background:#6b7280;}',
+  // Detail dialog overlay (centered inside the panel).
+  '.bh-ext-dlg-mask{position:absolute;inset:0;background:rgba(0,0,0,.4);display:flex;',
+  '  align-items:center;justify-content:center;z-index:10;}',
+  '.bh-ext-dlg{width:82%;max-width:320px;max-height:80%;overflow:auto;background:#fff;',
+  '  border-radius:14px;padding:16px;}',
+  '.bh-ext-dlg-title{font-size:16px;font-weight:700;color:#111;}',
+  '.bh-ext-dlg-ver{margin-left:6px;font-size:11px;font-weight:600;color:#2563eb;',
+  '  background:#eff6ff;border-radius:6px;padding:1px 6px;}',
+  '.bh-ext-dlg-sec{margin-top:12px;font-size:13px;font-weight:700;color:#333;}',
+  '.bh-ext-dlg-txt{margin-top:4px;font-size:13px;color:#555;line-height:1.5;white-space:pre-wrap;}',
+  '.bh-ext-dlg-close{margin-top:16px;width:100%;padding:9px 0;border:none;border-radius:10px;',
+  '  background:#111;color:#fff;font-size:14px;font-weight:600;}',
 ].join('');
 
 // 单个拓展方块卡：名称 + 描述 + 底部「启用/禁用」开关按钮。
 // 按钮态随 isPluginEnabled 切换，点击 togglePlugin 后刷新本卡。
 function syncExtToggleBtn(btn, id) {
   var on = (typeof isPluginEnabled === 'function') && isPluginEnabled(id);
-  btn.className = 'bh-ext-toggle ' + (on ? 'on' : 'off');
+  btn.className = 'bh-ext-btn bh-ext-toggle ' + (on ? 'on' : 'off');
   btn.textContent = on ? '● 已启用' : '○ 已禁用';
+}
+
+// 居中详情弹窗：标题 + 版本 + 介绍 + 使用说明 + 关闭。叠在 #bh-ext 之上。
+function showExtDetailDialog(p) {
+  if (!extPanel) return;
+  var mask = document.createElement('div');
+  mask.className = 'bh-ext-dlg-mask';
+  var dlg = document.createElement('div');
+  dlg.className = 'bh-ext-dlg';
+  var title = document.createElement('div');
+  title.className = 'bh-ext-dlg-title';
+  title.textContent = p.name || '';
+  if (p.version) {
+    var ver = document.createElement('span');
+    ver.className = 'bh-ext-dlg-ver';
+    ver.textContent = 'v' + p.version;
+    title.appendChild(ver);
+  }
+  dlg.appendChild(title);
+  function section(label, text) {
+    if (!text) return;
+    var h = document.createElement('div');
+    h.className = 'bh-ext-dlg-sec';
+    h.textContent = label;
+    dlg.appendChild(h);
+    var t = document.createElement('div');
+    t.className = 'bh-ext-dlg-txt';
+    t.textContent = text;
+    dlg.appendChild(t);
+  }
+  section('介绍', p.detail || p.desc || '');
+  section('使用说明', p.usage || '');
+  var close = document.createElement('button');
+  close.className = 'bh-ext-dlg-close';
+  close.textContent = '关闭';
+  close.addEventListener('click', function () {
+    if (mask.parentNode) mask.parentNode.removeChild(mask);
+  });
+  dlg.appendChild(close);
+  // 点遮罩空白处也关闭（点弹窗本体不关）。
+  mask.addEventListener('click', function (e) {
+    if (e.target === mask && mask.parentNode) mask.parentNode.removeChild(mask);
+  });
+  mask.appendChild(dlg);
+  extPanel.appendChild(mask);
 }
 
 function buildExtCard(p) {
@@ -42,28 +102,30 @@ function buildExtCard(p) {
   var name = document.createElement('div');
   name.className = 'bh-ext-card-name';
   name.textContent = p.name || '';
-  if (p.version) {
-    var ver = document.createElement('span');
-    ver.className = 'bh-ext-card-ver';
-    ver.textContent = 'v' + p.version;
-    name.appendChild(ver);
-  }
   info.appendChild(name);
-  if (p.desc) {
-    var desc = document.createElement('div');
-    desc.className = 'bh-ext-card-desc';
-    desc.textContent = p.desc;
-    info.appendChild(desc);
-  }
+  // 描述位置改放版本号。
+  var ver = document.createElement('div');
+  ver.className = 'bh-ext-card-ver';
+  ver.textContent = p.version ? 'v' + p.version : '';
+  info.appendChild(ver);
   card.appendChild(info);
+  // 底部动作行：详情 + 安装/启用。
+  var actions = document.createElement('div');
+  actions.className = 'bh-ext-actions';
+  var detail = document.createElement('button');
+  detail.className = 'bh-ext-btn bh-ext-detail';
+  detail.textContent = '详情';
+  detail.addEventListener('click', function () { showExtDetailDialog(p); });
+  actions.appendChild(detail);
   var btn = document.createElement('button');
-  btn.className = 'bh-ext-toggle off';
+  btn.className = 'bh-ext-btn bh-ext-toggle off';
   syncExtToggleBtn(btn, p.id);
   btn.addEventListener('click', function () {
     if (typeof togglePlugin === 'function') togglePlugin(p.id);
     syncExtToggleBtn(btn, p.id);
   });
-  card.appendChild(btn);
+  actions.appendChild(btn);
+  card.appendChild(actions);
   return card;
 }
 

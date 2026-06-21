@@ -5,6 +5,7 @@
 package org.mozilla.reference.browser.agent.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -13,10 +14,13 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,10 +30,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
@@ -112,14 +119,123 @@ fun AgentPanelHost(modifier: Modifier = Modifier) {
         ) {
             ModelSelectorOverlay(state, onClose = { state.nav = PanelNav.Chat })
         }
+        // Plan mode card pinned to the top of the conversation area.
+        AnimatedVisibility(
+            visible = state.planMode,
+            enter = slideInVertically(tween(220)) { -it } + fadeIn(tween(220)),
+            exit = slideOutVertically(tween(200)) { -it } + fadeOut(tween(180)),
+            modifier = Modifier.align(Alignment.TopCenter),
+        ) {
+            PlanCard(state)
+        }
+        // Secondary-confirmation sheet rises from the bottom, above everything else.
+        AnimatedVisibility(
+            visible = state.pendingApproval != null,
+            enter = slideInVertically(tween(240)) { it } + fadeIn(tween(240)),
+            exit = slideOutVertically(tween(200)) { it } + fadeOut(tween(180)),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            state.pendingApproval?.let { req ->
+                ApprovalSheet(
+                    req = req,
+                    onDecision = { decision ->
+                        if (decision == ApprovalDecision.ApproveSession) state.approvalSkip.add(req.kind)
+                        state.pendingApproval = null
+                    },
+                )
+            }
+        }
     }
 }
 
-// Transparent dismiss layer: catches outside taps to close, but no gray tint — the
-// floating feel comes from color contrast, not a scrim.
+/** The three Codex-style review decisions surfaced by the confirmation sheet. */
+private enum class ApprovalDecision { Approve, ApproveSession, Deny }
+
+/**
+ * Bottom secondary-confirmation sheet (照搬 Codex 审批语义). Title + summary, then three
+ * options divided by hairlines: 是 / 是，且不再询问 / 否 — mapping to approve /
+ * approve-for-session / deny. UI-only this round (mock trigger).
+ */
+@Composable
+private fun ApprovalSheet(req: ApprovalReq, onDecision: (ApprovalDecision) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+            .clip(AgentShapes.Sheet)
+            .background(Color.White)
+            .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+            BasicText(req.title, style = AgentText.Title)
+            Spacer(Modifier.height(6.dp))
+            BasicText(req.detail, style = AgentText.Secondary)
+        }
+        ApprovalOption("是") { onDecision(ApprovalDecision.Approve) }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(AgentColors.HairlineFaint))
+        ApprovalOption("是，且不再询问") { onDecision(ApprovalDecision.ApproveSession) }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(AgentColors.HairlineFaint))
+        ApprovalOption("否") { onDecision(ApprovalDecision.Deny) }
+    }
+}
+
+@Composable
+private fun ApprovalOption(label: String, onClick: () -> Unit) {
+    BasicText(
+        label,
+        style = AgentText.Body,
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(horizontal = 16.dp, vertical = 14.dp),
+    )
+}
+
+/**
+ * Plan-mode card (mirrors the assistant's enter/write/exit-plan flow). Shows the plan text
+ * with two actions: approve to start, or keep editing. UI表征 only — no backend.
+ */
+@Composable
+private fun PlanCard(state: PanelState) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+            .clip(AgentShapes.Sheet)
+            .background(Color.White)
+            .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
+            .padding(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(AgentColors.Accent))
+            Spacer(Modifier.width(8.dp))
+            BasicText("计划模式", style = AgentText.Title)
+        }
+        Spacer(Modifier.height(8.dp))
+        BasicText(
+            state.planText.ifBlank { "（暂无计划内容）" },
+            style = AgentText.Body,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(
+                Modifier.clip(AgentShapes.Pill).background(AgentColors.Accent)
+                    .clickable { state.planMode = false }
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+            ) { BasicText("批准并开始", style = AgentText.Body.copy(color = Color.White)) }
+            Box(
+                Modifier.clip(AgentShapes.Pill).background(AgentColors.Bg)
+                    .clickable { }
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+            ) { BasicText("继续编辑", style = AgentText.Body) }
+        }
+    }
+}
+
+// Transparent dismiss layer: catches outside taps to close, but no gray tint and no ripple
+// — the floating feel comes from color contrast, and indication=null kills the gray flash
+// that the default clickable shows on touch-down.
 @Composable
 private fun Scrim(onClose: () -> Unit) {
-    Box(Modifier.fillMaxSize().clickable { onClose() })
+    val src = remember { MutableInteractionSource() }
+    Box(Modifier.fillMaxSize().clickable(interactionSource = src, indication = null) { onClose() })
 }
 
 @Composable
@@ -153,13 +269,35 @@ private fun DrawerSheet(state: PanelState, onClose: () -> Unit, onSettings: () -
                         .padding(horizontal = 4.dp, vertical = 12.dp),
                 ) { BasicText(title, style = AgentText.Body) }
             }
+            Spacer(Modifier.weight(1f))
+            // Demo triggers for the (mock) secondary-confirmation sheet and plan-mode card,
+            // so both can be seen on-device until they're wired to real tool calls.
+            BasicText("演示", style = AgentText.Label)
+            Spacer(Modifier.height(6.dp))
+            Box(
+                Modifier.fillMaxWidth().clickable {
+                    state.pendingApproval = ApprovalReq(
+                        kind = "page_exec",
+                        title = "调用工具：执行命令",
+                        detail = "Agent 想在当前页面执行一段脚本，是否允许？",
+                    )
+                    onClose()
+                }.padding(horizontal = 4.dp, vertical = 12.dp),
+            ) { BasicText("二次确认演示", style = AgentText.Body) }
+            Box(
+                Modifier.fillMaxWidth().clickable {
+                    state.planText = "1. 读取页面结构\n2. 定位目标元素\n3. 生成并执行改写脚本"
+                    state.planMode = true
+                    onClose()
+                }.padding(horizontal = 4.dp, vertical = 12.dp),
+            ) { BasicText("进入计划模式", style = AgentText.Body) }
         }
     }
 }
 
 @Composable
 private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp)) {
+    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(36.dp).clip(CircleShape).clickable { onBack() },
@@ -169,6 +307,17 @@ private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
             BasicText("设置", style = AgentText.Title)
         }
         Spacer(Modifier.height(14.dp))
+        // "我的 Agent" sits at the top now (was below the API fields).
+        BasicText("我的 Agent", style = AgentText.Label)
+        Spacer(Modifier.height(8.dp))
+        EntryRow("个性化", onClick = { state.nav = PanelNav.Personalization }) {
+            FaceMouthIcon(color = AgentColors.TextPrimary, size = 22.dp)
+        }
+        EntryRow("记忆", onClick = { state.nav = PanelNav.Memory }) {
+            OpenBookIcon(color = AgentColors.TextPrimary, size = 22.dp)
+        }
+        Spacer(Modifier.height(18.dp))
+        // API / request-format settings moved to the bottom.
         LabeledField("api key", state.apiKey, secret = true) { state.apiKey = it }
         LabeledField("api url", state.apiUrl) { state.apiUrl = it }
         LabeledField("搜索引擎 api key", state.searchKey, secret = true) { state.searchKey = it }
@@ -179,15 +328,6 @@ private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             FormatOption("OpenAI", !state.anthropicFormat) { state.anthropicFormat = false }
             FormatOption("Anthropic", state.anthropicFormat) { state.anthropicFormat = true }
-        }
-        Spacer(Modifier.height(18.dp))
-        BasicText("我的 Agent", style = AgentText.Label)
-        Spacer(Modifier.height(8.dp))
-        EntryRow("个性化", onClick = { state.nav = PanelNav.Personalization }) {
-            FaceMouthIcon(color = AgentColors.TextPrimary, size = 22.dp)
-        }
-        EntryRow("记忆", onClick = { state.nav = PanelNav.Memory }) {
-            OpenBookIcon(color = AgentColors.TextPrimary, size = 22.dp)
         }
     }
 }
@@ -240,7 +380,7 @@ private fun PersonalizationScreen(state: PanelState, onBack: () -> Unit) {
 
 @Composable
 private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp)) {
+    Column(Modifier.fillMaxSize().background(AgentColors.Panel).padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(36.dp).clip(CircleShape).clickable { onBack() },
@@ -261,6 +401,36 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
         Box(
             Modifier.fillMaxWidth().clickable { }.padding(vertical = 12.dp),
         ) { BasicText("记忆摘要", style = AgentText.Body) }
+        Spacer(Modifier.height(6.dp))
+        // Stored memories: header + add affordance, then a deletable list (empty → hint).
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            BasicText("已保存的记忆", style = AgentText.Label)
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier.size(28.dp).clip(CircleShape).background(AgentColors.Bg)
+                    .clickable { state.memories.add("记忆 ${state.memories.size + 1}") },
+                contentAlignment = Alignment.Center,
+            ) { PlusIcon(color = AgentColors.TextPrimary, size = 16.dp) }
+        }
+        Spacer(Modifier.height(8.dp))
+        if (state.memories.isEmpty()) {
+            BasicText("还没有记忆", style = AgentText.Secondary, modifier = Modifier.padding(vertical = 10.dp))
+        } else {
+            state.memories.forEachIndexed { i, item ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        .clip(AgentShapes.Field).background(AgentColors.Bg)
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BasicText(item, style = AgentText.Body, modifier = Modifier.weight(1f))
+                    Box(
+                        Modifier.size(24.dp).clip(CircleShape).clickable { state.memories.removeAt(i) },
+                        contentAlignment = Alignment.Center,
+                    ) { BasicText("×", style = AgentText.Body.copy(color = AgentColors.TextSecondary)) }
+                }
+            }
+        }
     }
 }
 
@@ -332,13 +502,18 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 10.dp, top = 44.dp)
-                .width(180.dp)
+                .width(220.dp)
                 .clip(AgentShapes.Sheet)
                 .background(Color.White)
                 .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
                 .padding(14.dp),
         ) {
-            BasicText("智能", style = AgentText.Title)
+            // Title row: "智能" on the left, the P1/P2/P3 permission slider on the right.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BasicText("智能", style = AgentText.Title)
+                Spacer(Modifier.weight(1f))
+                PermissionSlider(state.permTier) { state.permTier = it }
+            }
             Spacer(Modifier.height(10.dp))
             ReasonTier.values().forEach { tier ->
                 TierRow(tier.name, state.tier == tier) { state.tier = tier }
@@ -383,6 +558,54 @@ private fun ModelSelectorOverlay(state: PanelState, onClose: () -> Unit) {
                             ) { BasicText(m, style = AgentText.Body) }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A compact pill bar with three permission segments (P1/P2/P3) and a white sliding knob that
+ * animates to the selected segment, mapping to the three tiers (mirrors BrowserBridge L1/L2/L3).
+ */
+@Composable
+private fun PermissionSlider(tier: PermTier, onPick: (PermTier) -> Unit) {
+    val tiers = PermTier.values()
+    val index = tiers.indexOf(tier)
+    val knob by animateFloatAsState(index.toFloat(), label = "permKnob")
+    val segW = 30.dp
+    Box(
+        modifier = Modifier
+            .width(segW * tiers.size)
+            .height(24.dp)
+            .clip(AgentShapes.Pill)
+            .background(AgentColors.Control),
+    ) {
+        // Sliding knob behind the labels.
+        Box(
+            modifier = Modifier
+                .padding(2.dp)
+                .width(segW - 4.dp)
+                .fillMaxHeight()
+                .offset(x = segW * knob)
+                .clip(AgentShapes.Pill)
+                .background(AgentColors.Accent),
+        )
+        Row(Modifier.fillMaxHeight()) {
+            tiers.forEach { t ->
+                val sel = t == tier
+                Box(
+                    modifier = Modifier
+                        .width(segW)
+                        .fillMaxHeight()
+                        .clip(AgentShapes.Pill)
+                        .clickable { onPick(t) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    BasicText(
+                        t.name,
+                        style = AgentText.Label.copy(color = if (sel) Color.White else AgentColors.TextSecondary),
+                    )
                 }
             }
         }

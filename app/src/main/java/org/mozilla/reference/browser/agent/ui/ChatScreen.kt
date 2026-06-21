@@ -4,7 +4,10 @@
 
 package org.mozilla.reference.browser.agent.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -13,8 +16,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -49,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -57,6 +62,13 @@ import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
 import org.mozilla.reference.browser.agent.ui.theme.AgentText
 
 data class ChatMsg(val fromUser: Boolean, val text: String)
+
+/** Click with no ripple/indication, so transparent dismiss layers don't gray-flash on tap. */
+@Composable
+private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
+    val src = remember { MutableInteractionSource() }
+    return this.clickable(interactionSource = src, indication = null) { onClick() }
+}
 
 /**
  * Chat surface: top bar (menu / Agent / state action) + message list (with a slowly
@@ -104,7 +116,7 @@ fun ChatScreen(
             // Tap anywhere over the conversation to dismiss the overflow menu, then draw
             // the menu above that dismiss layer.
             if (showMenu) {
-                Box(Modifier.fillMaxSize().clickable { showMenu = false })
+                Box(Modifier.fillMaxSize().noRippleClickable { showMenu = false })
                 OverflowMenu(
                     onShare = { showMenu = false },
                     onDelete = { showMenu = false; state.newChat() },
@@ -114,15 +126,16 @@ fun ChatScreen(
         }
         InputBar(state, onPlusClick = { showUpload = !showUpload })
       }
-      // Plus opens a floating sheet that slides up from the bottom (camera/photo/file/plugin).
+      // Plus opens a small floating popup anchored just above the plus button (like the
+      // model selector), not a full-width sheet sliding up from the bottom edge.
       if (showUpload) {
-          Box(Modifier.fillMaxSize().clickable { showUpload = false })
+          Box(Modifier.fillMaxSize().noRippleClickable { showUpload = false })
       }
       AnimatedVisibility(
           visible = showUpload,
-          enter = slideInVertically { it } + fadeIn(),
-          exit = slideOutVertically { it } + fadeOut(),
-          modifier = Modifier.align(Alignment.BottomCenter),
+          enter = scaleIn(tween(200), initialScale = 0.9f, transformOrigin = TransformOrigin(0f, 1f)) + fadeIn(tween(200)),
+          exit = scaleOut(tween(180), targetScale = 0.9f, transformOrigin = TransformOrigin(0f, 1f)) + fadeOut(tween(160)),
+          modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 66.dp),
       ) {
           UploadSheet(onPick = { showUpload = false })
       }
@@ -148,24 +161,35 @@ private fun ChatTopBar(
         Spacer(Modifier.width(8.dp))
         FloatingPill(onClick = onOpenModels) { BasicText("Agent", style = AgentText.Title) }
         Spacer(Modifier.weight(1f))
-        if (state.messages.isEmpty()) {
-            FloatingCircleButton(onClick = { state.tempChat = !state.tempChat }) {
-                Box(contentAlignment = Alignment.Center) {
-                    ChatBubbleIcon(color = AgentColors.TextPrimary, size = 18.dp)
-                    if (state.tempChat) {
-                        Box(
-                            Modifier.size(12.dp).clip(CircleShape).background(AgentColors.Accent),
-                            contentAlignment = Alignment.Center,
-                        ) { CheckIcon(size = 10.dp) }
+        // On the first send the single round button elongates into the pen+dots pill: the
+        // SizeTransform stretches the width while the icons cross-fade, so it visibly morphs.
+        AnimatedContent(
+            targetState = state.messages.isEmpty(),
+            transitionSpec = {
+                fadeIn(tween(220)) togetherWith fadeOut(tween(160)) using
+                    SizeTransform { _, _ -> tween(260, easing = FastOutSlowInEasing) }
+            },
+            label = "topRightButton",
+        ) { empty ->
+            if (empty) {
+                FloatingCircleButton(onClick = { state.tempChat = !state.tempChat }) {
+                    Box(contentAlignment = Alignment.Center) {
+                        ChatBubbleIcon(color = AgentColors.TextPrimary, size = 18.dp)
+                        if (state.tempChat) {
+                            Box(
+                                Modifier.size(12.dp).clip(CircleShape).background(AgentColors.Accent),
+                                contentAlignment = Alignment.Center,
+                            ) { CheckIcon(size = 10.dp) }
+                        }
                     }
                 }
+            } else {
+                // New-chat (pen) and overflow (dots) wrapped together in one floating pill.
+                FloatingDualPill(
+                    onNew = { state.newChat() },
+                    onMore = { onToggleMenu(!menuOpen) },
+                )
             }
-        } else {
-            // New-chat (pen) and overflow (dots) wrapped together in one floating pill.
-            FloatingDualPill(
-                onNew = { state.newChat() },
-                onMore = { onToggleMenu(!menuOpen) },
-            )
         }
     }
 }
@@ -267,7 +291,15 @@ private fun MessageList(state: PanelState) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                     AssistantAvatar()
                     Spacer(Modifier.width(10.dp))
-                    BasicText(msg.text, style = AgentText.Body, modifier = Modifier.weight(1f).padding(top = 4.dp))
+                    Column(Modifier.weight(1f).padding(top = 4.dp)) {
+                        AssistantContent(msg.text)
+                        // Per-message action bar: a two-paper copy button (no "复制" text).
+                        Spacer(Modifier.height(6.dp))
+                        Box(
+                            Modifier.size(26.dp).clip(CircleShape).noRippleClickable { },
+                            contentAlignment = Alignment.Center,
+                        ) { CopyIcon(size = 16.dp, color = AgentColors.TextSecondary) }
+                    }
                 }
             }
         }
@@ -288,6 +320,63 @@ private fun AssistantAvatar() {
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(AgentColors.TextSecondary))
+    }
+}
+
+/**
+ * Renders assistant text, splitting fenced ``` blocks out into rounded CodeBlock boxes. The
+ * box is a standing container, so as the (mock) text grows the frame is present first and
+ * code appears inside it — not code-first-then-frame.
+ */
+@Composable
+private fun AssistantContent(text: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parseSegments(text).forEach { (isCode, body) ->
+            if (isCode) {
+                CodeBlock(body)
+            } else {
+                BasicText(body.trim(), style = AgentText.Body)
+            }
+        }
+    }
+}
+
+/** Splits text on ``` fences into (isCode, body) segments; a leading language line on a code
+ *  fence is dropped. */
+private fun parseSegments(text: String): List<Pair<Boolean, String>> {
+    val parts = text.split("```")
+    val out = ArrayList<Pair<Boolean, String>>()
+    for (i in parts.indices) {
+        val seg = parts[i]
+        if (i % 2 == 0) {
+            if (seg.isNotBlank()) out.add(false to seg)
+        } else {
+            val body = if (seg.contains('\n')) seg.substringAfter('\n') else seg
+            out.add(true to body.trimEnd('\n'))
+        }
+    }
+    return out
+}
+
+/** A rounded dark code box with a two-paper copy button pinned to the top-right corner. */
+@Composable
+private fun CodeBlock(code: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF1E1E1E))
+            .padding(12.dp),
+    ) {
+        BasicText(
+            code,
+            style = AgentText.Body.copy(color = Color(0xFFE6E6E6)),
+            modifier = Modifier.fillMaxWidth().padding(end = 24.dp, top = 18.dp),
+        )
+        Box(
+            Modifier.align(Alignment.TopEnd).size(24.dp).clip(CircleShape).noRippleClickable { },
+            contentAlignment = Alignment.Center,
+        ) { CopyIcon(size = 15.dp, color = Color(0xFFBFBFBF)) }
     }
 }
 
@@ -383,14 +472,13 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
     }
 }
 
-/** Bottom sheet that slides up when the plus is tapped: a white rounded card listing the
- *  four upload sources as full-width rows. */
+/** Floating popup shown above the plus button: a narrow white rounded card listing the four
+ *  upload sources as rows (same look as the model selector, not a bottom sheet). */
 @Composable
 private fun UploadSheet(onPick: () -> Unit) {
     Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .width(170.dp)
             .clip(AgentShapes.Sheet)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
@@ -403,7 +491,7 @@ private fun UploadSheet(onPick: () -> Unit) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onPick() }
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                    .padding(horizontal = 18.dp, vertical = 13.dp),
             )
         }
     }
