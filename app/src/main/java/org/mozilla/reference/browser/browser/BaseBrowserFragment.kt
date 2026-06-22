@@ -32,6 +32,7 @@ import mozilla.components.feature.findinpage.view.FindInPageBar
 import mozilla.components.feature.findinpage.view.FindInPageView
 import mozilla.components.feature.media.fullscreen.MediaSessionFullscreenFeature
 import mozilla.components.feature.prompts.PromptFeature
+import mozilla.components.feature.prompts.file.AndroidPhotoPicker
 import mozilla.components.feature.session.FullScreenFeature
 import mozilla.components.feature.session.ScreenOrientationFeature
 import mozilla.components.feature.session.SessionFeature
@@ -116,6 +117,24 @@ abstract class BaseBrowserFragment :
     private lateinit var requestDownloadPermissionsLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var requestSitePermissionsLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var requestPromptsPermissionsLauncher: ActivityResultLauncher<Array<String>>
+
+    // Registers a photo picker activity launcher in single-select mode.
+    private val singleMediaPicker =
+        AndroidPhotoPicker.singleMediaPicker(
+            { getFragment() },
+            { getPromptsFeature() },
+        )
+
+    // Registers a photo picker activity launcher in multi-select mode.
+    private val multipleMediaPicker =
+        AndroidPhotoPicker.multipleMediaPicker(
+            { getFragment() },
+            { getPromptsFeature() },
+        )
+
+    private fun getFragment(): Fragment = this
+
+    private fun getPromptsFeature(): PromptFeature? = promptsFeature.get()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -281,6 +300,11 @@ abstract class BaseBrowserFragment :
                 onNeedToRequestPermissions = { permissions ->
                     requestPromptsPermissionsLauncher.launch(permissions)
                 },
+                androidPhotoPicker = AndroidPhotoPicker(
+                    requireContext(),
+                    singleMediaPicker,
+                    multipleMediaPicker,
+                ),
             ),
             owner = this,
             view = view,
