@@ -16,13 +16,15 @@ var EXT_STYLE = [
   '.bh-ext-card{display:flex;flex-direction:column;gap:12px;padding:18px;',
   '  border:1px solid #d0d7de;border-radius:22px;background:#fff;aspect-ratio:1/1;min-width:0;}',
   '.bh-ext-card-info{flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column;',
-  '  justify-content:center;text-align:center;}',
-  '.bh-ext-card-name{font-size:26px;line-height:1.15;font-weight:800;color:#111;',
+  '  justify-content:flex-start;text-align:left;}',
+  '.bh-ext-card-name{font-size:22px;line-height:1.2;font-weight:800;color:#111;',
   '  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
-  '.bh-ext-card-ver{margin-top:8px;font-size:18px;line-height:1;font-weight:700;color:#2563eb;}',
+  '.bh-ext-card-ver{margin-top:6px;font-size:14px;line-height:1;font-weight:700;color:#2563eb;}',
+  '.bh-ext-card-desc{margin-top:12px;font-size:14px;line-height:1.45;color:#57606a;',
+  '  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}',
   '.bh-ext-actions{display:flex;gap:10px;}',
   '.bh-ext-btn{flex:1;padding:11px 0;border:none;border-radius:14px;',
-  '  font-size:18px;line-height:1.1;font-weight:800;text-align:center;white-space:nowrap;}',
+  '  font-size:15px;line-height:1.1;font-weight:700;text-align:center;white-space:nowrap;}',
   '.bh-ext-detail{background:#eef2f7;color:#333;}',
   '.bh-ext-toggle{color:#fff;}',
   '.bh-ext-toggle.on{background:#16a34a;}',
@@ -46,7 +48,7 @@ var EXT_STYLE = [
 function syncExtToggleBtn(btn, id) {
   var on = (typeof isPluginEnabled === 'function') && isPluginEnabled(id);
   btn.className = 'bh-ext-btn bh-ext-toggle ' + (on ? 'on' : 'off');
-  btn.textContent = on ? '开' : '关';
+  btn.textContent = on ? '已启用' : '未启用';
 }
 
 // 居中详情弹窗：标题 + 版本 + 介绍 + 使用说明 + 关闭。叠在 #bh-ext 之上。
@@ -103,18 +105,22 @@ function buildExtCard(p) {
   name.className = 'bh-ext-card-name';
   name.textContent = p.name || '';
   info.appendChild(name);
-  // 描述位置改放版本号。
   var ver = document.createElement('div');
   ver.className = 'bh-ext-card-ver';
   ver.textContent = p.version ? 'v' + p.version : '';
   info.appendChild(ver);
+  // 描述填充卡片，避免单卡太空。
+  var desc = document.createElement('div');
+  desc.className = 'bh-ext-card-desc';
+  desc.textContent = p.desc || p.detail || '';
+  info.appendChild(desc);
   card.appendChild(info);
   // 底部动作行：详情 + 安装/启用。
   var actions = document.createElement('div');
   actions.className = 'bh-ext-actions';
   var detail = document.createElement('button');
   detail.className = 'bh-ext-btn bh-ext-detail';
-  detail.textContent = '详';
+  detail.textContent = '详情';
   detail.addEventListener('click', function () { showExtDetailDialog(p); });
   actions.appendChild(detail);
   var btn = document.createElement('button');

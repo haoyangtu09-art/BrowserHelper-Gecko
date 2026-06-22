@@ -70,6 +70,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import org.mozilla.reference.browser.agent.AgentAttachmentKind
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
@@ -91,8 +92,9 @@ data class ChatMsg(
  */
 data class ToolCard(
     val name: String,
+    // "Running" while executing, "Done"/"Failed" once resolved. Drives the blinking bullet.
     val status: String,
-    // Agent-standard header rendered after the ● bullet, e.g. "page_exec(document.title)".
+    // Agent-standard header rendered after the ● bullet, e.g. "Read(agent.js)" / "Update(x.kt)".
     val summary: String,
     val diff: String = "",
     // Raw tool result shown in the ⎿ block (capped to 6 lines, expandable, copyable). Used by
@@ -101,6 +103,10 @@ data class ToolCard(
     // Full raw error text for a failed tool call, shown verbatim (multi-line) in the chat so
     // failures are easy to debug. Empty for successful calls.
     val error: String = "",
+    // English one-line diff summary ("Added 3 lines") shown on the ⎿ line above an edit diff.
+    val diffLabel: String = "",
+    // True while the tool is still executing — the bullet blinks and a "Running… (Xs)" line shows.
+    val running: Boolean = false,
 )
 
 /** Click with no ripple/indication, so transparent dismiss layers don't gray-flash on tap. */
@@ -152,6 +158,13 @@ fun ChatScreen(
                 onToggleMenu = { showMenu = it },
                 modifier = Modifier.align(Alignment.TopStart).padding(top = 34.dp),
             )
+            // Floating working bar centered in the top row's empty middle, only while generating.
+            if (state.generating) {
+                WorkingBar(
+                    state,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 38.dp),
+                )
+            }
             // Tap anywhere over the conversation to dismiss the overflow menu, then draw
             // the menu above that dismiss layer.
             if (showMenu) {
@@ -374,15 +387,10 @@ private fun MessageList(state: PanelState) {
             }
         }
         // Visual task list — a flat, borderless todo list at the bottom of the transcript, just
-        // above the latest message and the streaming dot. Empty trackers self-skip.
+        // above the latest message. Empty trackers self-skip. The "generating" state is shown by
+        // the floating WorkingBar at the top, so there is no separate bottom dot here.
         if (state.tracker.groups.isNotEmpty()) {
             TaskTrackerCard(state)
-        }
-        if (state.generating) {
-            // Single slowly-pulsing dot — no avatar — so the wait state shows one dot, not two.
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                BlinkingDot(Modifier.padding(start = 2.dp, top = 4.dp))
-            }
         }
         Spacer(Modifier.height(8.dp))
     }
@@ -547,40 +555,106 @@ private fun CodeBlock(code: String) {
  */
 @Composable
 private fun ToolCardView(tool: ToolCard) {
-    Column(Modifier.fillMaxWidth()) {
+    val running = tool.status == "Running"
+    Column(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
         Row(verticalAlignment = Alignment.Top) {
-            // Plain black bullet — the app's minimal black/white style, no status colors.
-            BasicText(
-                "●",
-                style = AgentText.Body.copy(
-                    color = if (tool.status == "运行中") AgentColors.TextTertiary else AgentColors.TextPrimary,
-                ),
-            )
-            Spacer(Modifier.width(8.dp))
+            // Gray bullet (blinking while running) — logs read as a quiet subordinate of the
+            // prose, never competing with it.
+            ToolBullet(running)
+            Spacer(Modifier.width(6.dp))
             BasicText(
                 tool.summary.ifBlank { tool.name },
-                style = AgentText.Body.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
+                style = ToolLogStyle,
                 modifier = Modifier.weight(1f),
             )
         }
         when {
-            tool.error.isNotBlank() -> Connector { OutputBlock(tool.error, capped = false) }
-            tool.diff.isNotBlank() -> Connector { DiffBlock(tool.diff) }
+            running -> RunningConnector()
+            tool.error.isNotBlank() -> Connector { OutputBlock(tool.error, capped = true) }
+            tool.diff.isNotBlank() -> DiffConnector(tool.diffLabel, tool.diff)
             tool.output.isNotBlank() -> Connector { OutputBlock(tool.output, capped = true) }
         }
+    }
+}
+
+/** Small gray monospace style shared by every tool-log line, keeping logs flat + subordinate. */
+private val ToolLogStyle = AgentText.Label.copy(
+    color = AgentColors.TextSecondary,
+    fontFamily = FontFamily.Monospace,
+)
+
+/** The "●" bullet before a tool header; pulses while the tool is still running. */
+@Composable
+private fun ToolBullet(running: Boolean) {
+    if (running) {
+        val transition = rememberInfiniteTransition(label = "toolDot")
+        val alpha by transition.animateFloat(
+            initialValue = 0.25f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+            label = "toolDotAlpha",
+        )
+        BasicText(
+            "●",
+            style = ToolLogStyle.copy(color = AgentColors.TextTertiary),
+            modifier = Modifier.graphicsLayer { this.alpha = alpha },
+        )
+    } else {
+        BasicText("●", style = ToolLogStyle.copy(color = AgentColors.TextTertiary))
     }
 }
 
 /** Lays out the "⎿" connector glyph beside an indented result block. */
 @Composable
 private fun Connector(content: @Composable () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 3.dp)) {
+    Row(Modifier.fillMaxWidth().padding(top = 2.dp)) {
         BasicText(
             "⎿",
-            style = AgentText.Body.copy(color = AgentColors.TextTertiary),
+            style = ToolLogStyle.copy(color = AgentColors.TextTertiary),
             modifier = Modifier.padding(start = 3.dp, end = 6.dp),
         )
         Box(Modifier.weight(1f)) { content() }
+    }
+}
+
+/** "⎿ Running… (Xs)" line shown under a tool header while it is still executing. The seconds
+ *  tick up from when the running card first appears. */
+@Composable
+private fun RunningConnector() {
+    val start = remember { System.currentTimeMillis() }
+    var secs by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            secs = (System.currentTimeMillis() - start) / 1000
+            delay(1000)
+        }
+    }
+    Row(Modifier.fillMaxWidth().padding(top = 2.dp)) {
+        BasicText(
+            "⎿",
+            style = ToolLogStyle.copy(color = AgentColors.TextTertiary),
+            modifier = Modifier.padding(start = 3.dp, end = 6.dp),
+        )
+        BasicText("Running… (${secs}s)", style = ToolLogStyle.copy(color = AgentColors.TextTertiary))
+    }
+}
+
+/** "⎿ Added N lines" label followed by the indented +/- diff (file-edit tools only). */
+@Composable
+private fun DiffConnector(label: String, diff: String) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp)) {
+            BasicText(
+                "⎿",
+                style = ToolLogStyle.copy(color = AgentColors.TextTertiary),
+                modifier = Modifier.padding(start = 3.dp, end = 6.dp),
+            )
+            BasicText(label.ifBlank { "Diff" }, style = ToolLogStyle.copy(color = AgentColors.TextTertiary))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp)) {
+            Spacer(Modifier.width(18.dp))
+            Box(Modifier.weight(1f)) { DiffBlock(diff) }
+        }
     }
 }
 
@@ -597,38 +671,39 @@ private fun OutputBlock(text: String, capped: Boolean) {
     val overflow = capped && lines.size > CAP_LINES
     val shown = if (overflow && !expanded) lines.take(CAP_LINES).joinToString("\n") else text
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(CodeBg).padding(12.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(CodeBg)
+            .padding(horizontal = 9.dp, vertical = 7.dp),
     ) {
         BasicText(
             shown,
-            style = AgentText.Label.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
+            style = AgentText.Label.copy(color = AgentColors.TextSecondary, fontFamily = FontFamily.Monospace),
             modifier = Modifier.fillMaxWidth(),
         )
         if (overflow && !expanded) {
             BasicText(
-                "… +${lines.size - CAP_LINES} 行",
+                "… +${lines.size - CAP_LINES} lines",
                 style = AgentText.Label.copy(color = AgentColors.TextTertiary),
                 modifier = Modifier.padding(top = 2.dp),
             )
         }
         Row(
-            Modifier.fillMaxWidth().padding(top = 6.dp),
+            Modifier.fillMaxWidth().padding(top = 4.dp),
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (overflow || expanded) {
                 BasicText(
-                    if (expanded) "收起" else "展开",
+                    if (expanded) "collapse" else "expand",
                     style = AgentText.Label.copy(color = AgentColors.TextSecondary),
                     modifier = Modifier.noRippleClickable { expanded = !expanded }.padding(end = 12.dp),
                 )
             }
             Box(
-                Modifier.size(22.dp).clip(CircleShape).noRippleClickable {
+                Modifier.size(20.dp).clip(CircleShape).noRippleClickable {
                     clipboard.setPrimaryClip(ClipData.newPlainText("tool", text))
                 },
                 contentAlignment = Alignment.Center,
-            ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
+            ) { CopyIcon(size = 13.dp, color = AgentColors.TextSecondary) }
         }
     }
 }
@@ -645,15 +720,15 @@ private fun DiffBlock(diff: String) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(10.dp))
             .background(CodeBg)
-            .padding(vertical = 8.dp),
+            .padding(vertical = 6.dp),
     ) {
         diff.split('\n').forEach { line ->
             val marker = diffMarker(line)
             val added = marker == '+'
             val removed = marker == '-'
-            // Gray box, dark neutral text; only the +/- lines keep red/green (tints darkened so
+            // Gray box, muted neutral text; only the +/- lines keep red/green (tints darkened so
             // they read on the light-gray background).
             val bg = when {
                 added -> Color(0x1A188038)
@@ -663,7 +738,7 @@ private fun DiffBlock(diff: String) {
             val fg = when {
                 added -> Color(0xFF188038)
                 removed -> Color(0xFFB3261E)
-                else -> AgentColors.TextPrimary
+                else -> AgentColors.TextSecondary
             }
             BasicText(
                 line.ifEmpty { " " },
@@ -671,7 +746,7 @@ private fun DiffBlock(diff: String) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(bg)
-                    .padding(horizontal = 12.dp, vertical = 1.dp),
+                    .padding(horizontal = 9.dp, vertical = 1.dp),
             )
         }
     }
@@ -695,24 +770,42 @@ private fun diffMarker(line: String): Char? {
     }
 }
 
-/** A single black dot pulsing slowly to signal the model is generating. */
+/** Floating top status pill shown while the model is working: a blinking bullet + cycling gerund
+ *  + elapsed time + rough token estimate, e.g. "Imagining… (1m 12s · ↓ 1.2k tokens)". */
 @Composable
-private fun BlinkingDot(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "gen")
-    val alpha by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
-        label = "genAlpha",
-    )
-    Box(
-        modifier
-            .graphicsLayer { this.alpha = alpha }
-            .size(9.dp)
-            .clip(CircleShape)
-            .background(AgentColors.TextPrimary),
-    )
+private fun WorkingBar(state: PanelState, modifier: Modifier = Modifier) {
+    // Re-tick once a second so the elapsed clock advances; the token estimate updates on its own
+    // as state.genTokens grows during streaming.
+    val start = state.turnStartMs
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(start) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    val elapsed = ((nowMs - start) / 1000).coerceAtLeast(0)
+    val timeStr = if (elapsed < 60) "${elapsed}s" else "${elapsed / 60}m ${elapsed % 60}s"
+    val tokens = state.genTokens
+    val tokStr = if (tokens >= 1000) "${tokens / 1000}.${(tokens % 1000) / 100}k" else "$tokens"
+    val word = WORKING_WORDS[((elapsed / 3) % WORKING_WORDS.size).toInt()]
+    Row(
+        modifier = modifier
+            .clip(AgentShapes.Pill)
+            .background(Color.White)
+            .padding(horizontal = 12.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ToolBullet(running = true)
+        Spacer(Modifier.width(6.dp))
+        BasicText("$word… ($timeStr · ↓ $tokStr tokens)", style = ToolLogStyle)
+    }
 }
+
+/** Playful cycling verbs for the working bar (Claude-Code style), one swapped in every ~3s. */
+private val WORKING_WORDS = listOf(
+    "Thinking", "Working", "Imagining", "Reasoning", "Composing", "Crafting",
+)
 
 @Composable
 private fun InputBar(state: PanelState, onPlusClick: () -> Unit) {

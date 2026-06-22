@@ -86,6 +86,12 @@ class PanelState {
     // when a turn starts and refuses to write into shared state once it no longer matches, so a
     // superseded / stopped reply can never bleed into the chat the user is now looking at.
     var turnEpoch = 0
+
+    // Wall-clock start of the current turn + a rough running token estimate, used by the top
+    // "working bar" (Thinking… (12s · ↓ 1.2k tokens)). turnStartMs is set when a turn begins;
+    // genTokens accumulates ~chars/4 from streamed deltas. Both reset at each new turn.
+    var turnStartMs by mutableStateOf(0L)
+    var genTokens by mutableStateOf(0)
     var tempChat by mutableStateOf(false)
     var nav by mutableStateOf(PanelNav.Chat)
     var tier by mutableStateOf(ReasonTier.Middle)
@@ -188,6 +194,8 @@ class PanelState {
         input = ""
         generating = true
         turnEpoch += 1
+        turnStartMs = System.currentTimeMillis()
+        genTokens = 0
         onTurn?.invoke()
     }
 
@@ -280,6 +288,8 @@ class PanelState {
         saveCurrentChat()
         generating = true
         turnEpoch += 1
+        turnStartMs = System.currentTimeMillis()
+        genTokens = 0
         onTurn?.invoke()
     }
 

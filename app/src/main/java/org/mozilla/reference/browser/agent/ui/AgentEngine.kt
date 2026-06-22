@@ -113,6 +113,8 @@ class AgentEngine(context: Context) {
                         // Drop streamed fragments once this turn is no longer live (stopped or
                         // superseded by a new chat) so they never append to another chat.
                         if (alive()) {
+                            // Rough running token estimate for the top working bar (~4 chars/token).
+                            state.genTokens += (frag.length + 3) / 4
                             if (streamIndex < 0) {
                                 streamIndex = state.messages.size
                                 state.messages.add(ChatMsg(fromUser = false, text = frag))
@@ -311,7 +313,37 @@ class AgentEngine(context: Context) {
     /** Card shown while a tool call is executing (before the result/approval resolves). */
     private fun runningCard(call: ChatToolCall): ToolCard {
         val args = try { JSONObject(call.arguments) } catch (_: Exception) { JSONObject() }
-        return ToolCard(name = call.name, status = "运行中", summary = "${call.name}(${argPreview(call.name, args)})")
+        return ToolCard(
+            name = call.name,
+            status = "Running",
+            summary = toolHeader(call.name, args, running = true),
+            running = true,
+        )
+    }
+
+    /** Agent-standard English display verb for a tool: gerund (running) + past tense (done). */
+    private fun toolVerb(name: String): Pair<String, String> = when (name) {
+        "page_index", "page_query", "container_read", "private_file_read", "container_head",
+        "network_get", "proxy_status",
+        -> "Reading" to "Read"
+        "container_list", "private_file_list", "network_list" -> "Listing" to "Listed"
+        "page_search", "web_search", "container_grep" -> "Searching" to "Searched"
+        "page_navigate", "page_reload", "page_back", "page_forward" -> "Navigating" to "Navigated"
+        "page_exec", "page_fetch", "browser_request" -> "Running" to "Ran"
+        else -> "Running" to "Ran"
+    }
+
+    /**
+     * Agent-standard header text "Verb(target)" (e.g. "Read(agent.js)"); while [running] the
+     * gerund + an ellipsis is used ("Reading(agent.js)…"). A blank target collapses to the bare
+     * verb. Edit/write tools build their own "Update(path)" headers in [buildToolCard].
+     */
+    private fun toolHeader(name: String, args: JSONObject, running: Boolean): String {
+        val (gerund, past) = toolVerb(name)
+        val verb = if (running) gerund else past
+        val target = argPreview(name, args)
+        val head = if (target.isBlank()) verb else "$verb($target)"
+        return if (running) "$head…" else head
     }
 
     /**
@@ -344,15 +376,16 @@ class AgentEngine(context: Context) {
      * that only goes back to the model).
      */
     private fun buildToolCard(call: ChatToolCall, result: AgentToolResult): ToolCard {
-        val status = if (result.ok) "完成" else "失败"
+        val status = if (result.ok) "Done" else "Failed"
         val args = try {
             org.json.JSONObject(call.arguments)
         } catch (_: Exception) {
             org.json.JSONObject()
         }
-        // Agent-standard header: ● name(arg). Edit/write tools below override it with a
-        // "Edited <path> (+N -M)" line since the +/- diff carries the same intent.
-        val header = "${call.name}(${argPreview(call.name, args)})"
+        // Agent-standard header: ● Verb(target). Edit/write tools below override it with an
+        // "Update(<path>)" header + an "Added N lines" diff label since the +/- diff carries
+        // the same intent.
+        val header = toolHeader(call.name, args, running = false)
         if (!result.ok) {
             // Surface the full raw error text in the chat (not a one-line snippet) so tool
             // failures are easy to debug. ToolCardView renders [error] as a gray text block.
@@ -372,20 +405,20 @@ class AgentEngine(context: Context) {
                 val removed = res.optInt("removedLines", 0)
                 val startLine = if (mode == "append") res.optInt("oldLines", 0) + 1 else 1
                 val removedText = res.optString("removedPreview", "")
-                ToolCard(call.name, status, "Edited $path (+$added -$removed)", editDiff(removedText, code, startLine))
+                ToolCard(call.name, status, "Update($path)", editDiff(removedText, code, startLine), diffLabel = diffLabel(added, removed))
             }
             "delete_code_from_file" -> {
                 val path = res.optString("path", args.optString("path", ""))
                 val removedText = res.optString("removedPreview", args.optString("code", ""))
                 val removed = res.optInt("removedLines", lineCount(removedText))
                 val startLine = res.optInt("removedStartLine", args.optInt("startLine", 1).coerceAtLeast(1))
-                ToolCard(call.name, status, "Edited $path (+0 -$removed)", removedDiff(removedText, startLine))
+                ToolCard(call.name, status, "Update($path)", removedDiff(removedText, startLine), diffLabel = diffLabel(0, removed))
             }
             "container_write", "private_file_write" -> {
                 val path = args.optString("path", "")
                 val content = args.optString("content", "")
                 val added = lineCount(content)
-                ToolCard(call.name, status, "Wrote $path (+$added -0)", addedDiff(content, 1))
+                ToolCard(call.name, status, "Write($path)", addedDiff(content, 1), diffLabel = diffLabel(added, 0))
             }
             "batch_edit_files", "private_batch_edit_files" -> batchEditCard(call.name, status, args, res)
             "page_set_text" -> pageEditCard(call.name, status, args.optString("selector", ""), args.optString("text", ""))
@@ -396,8 +429,8 @@ class AgentEngine(context: Context) {
                 args.optString("selector", ""),
                 "${args.optString("name", "")}=\"${args.optString("value", "")}\"",
             )
-            "create_plan" -> ToolCard(call.name, status, "创建计划")
-            "update_plan" -> ToolCard(call.name, status, "更新计划")
+            "create_plan" -> ToolCard(call.name, status, "Create plan")
+            "update_plan" -> ToolCard(call.name, status, "Update plan")
             // Every other tool: agent-standard header + the raw result shown in the ⎿ block
             // (capped/expandable by ToolCardView). Empty/`{}` results show just the header.
             else -> ToolCard(call.name, status, header, output = toolOutputText(result.text))
@@ -443,13 +476,23 @@ class AgentEngine(context: Context) {
             blocks.add(editDiff(meta.optString("removedPreview", ""), content, 1))
         }
         val count = if (edits.length() == 1) "1 file" else "${edits.length()} files"
-        return ToolCard(name, status, "Edited $count (+$totalAdded -$totalRemoved)", blocks.joinToString("\n"))
+        return ToolCard(name, status, "Update($count)", blocks.joinToString("\n"), diffLabel = diffLabel(totalAdded, totalRemoved))
     }
 
     private fun pageEditCard(name: String, status: String, selector: String, value: String): ToolCard {
         val added = lineCount(value).coerceAtLeast(1)
         val target = if (selector.isBlank()) "current page" else selector
-        return ToolCard(name, status, "Edited page $target (+$added -0)", addedDiff(value, 1))
+        return ToolCard(name, status, "Update($target)", addedDiff(value, 1), diffLabel = diffLabel(added, 0))
+    }
+
+    /** English diff summary shown on the "⎿" line above a diff, e.g. "Added 3 lines, removed 1 line". */
+    private fun diffLabel(added: Int, removed: Int): String {
+        fun lines(n: Int) = if (n == 1) "$n line" else "$n lines"
+        return when {
+            added > 0 && removed > 0 -> "Added ${lines(added)}, removed ${lines(removed)}"
+            removed > 0 -> "Removed ${lines(removed)}"
+            else -> "Added ${lines(added)}"
+        }
     }
 
     private fun editDiff(oldText: String, newText: String, startLine: Int): String {

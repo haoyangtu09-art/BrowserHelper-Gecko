@@ -297,131 +297,20 @@ Eruda v3.4.3 的 `init()` 默认 `autoScale=true`；移动端会读取 `<meta na
 - 以后若重构 `DevToolsHelper` 或 content native port，必须保留这条 round-trip，否则刷新恢复放大 bug 会回归。
 - 若未来这块又坏，第一检查项是：content 自动恢复有没有绕过 `DevToolsHelper.sendToggle(engineSession)`。
 
-## Codex Termux 0.140.0 源码分析与浏览器 Agent 计划
+## 原生悬浮 Agent（已落地，详见 `AGENT.md`）
 
-> 记录时间：2026-06-20。目标不是把完整 Codex/Linux 容器塞进手机浏览器，而是借 Codex 的交互模型、
-> 事件协议、工具调度和审批机制，做一个真正进入 BrowserHelper 工作层的网页 Agent。
+> 早期的「借 Codex 交互模型做网页 Agent」规划已落地为 `org.mozilla.reference.browser.agent`
+> 原生 Android 悬浮窗 Agent（内置后端 + `AgentToolRegistry` 工具层 + S1/S2/S3 权限审批 +
+> 任务追踪 UI）。**完整接力看 `AGENT.md`**，那条线与本文件的抓包代理/DevTools 基本独立。
+> 这里只保留对抓包/DevTools 侧仍然适用的硬边界。
 
-### 源码与版本事实
+### 仍然适用的硬边界
 
-- 当前本机 `codex`：`codex-cli 0.140.0`，全局包为
-  `/data/data/com.termux/files/usr/lib/node_modules/@mmmbuto/codex-cli-termux`。
-- 该包不是 JS 源码实现，而是 npm wrapper + 原生 Rust ELF：
-  `bin/codex.js` / `bin/codex-exec.js` 包装 `bin/codex.bin` / `bin/codex-exec.bin`。
-  wrapper 主要负责 `CODEX_SELF_EXE`、`LD_LIBRARY_PATH`、以及把未知首参补成 `exec`。
-- 已下载并分析匹配当前版本的 Termux 定制源码：
-  `/data/data/com.termux/files/usr/tmp/codex-termux-v0.140.0`，
-  tag `v0.140.0`，commit `82ddfe61e663c68cb111ad8eeabfe96cd2a85b71`。
-- 源码仓库来自 `https://github.com/DioNanos/codex-termux`，Cargo workspace version 为 `0.140.0`。
-- `/data/data/com.termux/files/usr/lib/node_modules/codex-monorepo` 是旧的 `0.72.0` 源码树，只能作历史结构参考，
-  不能当当前 Codex Termux 版本分析依据。
-
-### Codex 架构结论
-
-- Codex 本体是 Rust core，不是一个可直接搬进浏览器的 JS 应用。真正核心在 `codex-rs/core`；
-  `cli`、`tui`、`exec`、`app-server` 都只是 core 外面的不同外壳。
-- CLI 入口：`codex-rs/cli/src/main.rs`。无子命令进入 `codex_tui::run_main(...)`；
-  `exec` / `review` 进入 `codex_exec::run_main(...)`；另有 `mcp-server`、`app-server`、
-  `remote-control`、`login/logout`、`sandbox` 等子命令。
-- 协议主干：`codex-rs/protocol/src/protocol.rs`。
-  客户端向 core 发 `Submission { id, op, ... }`，`Op` 包括 `UserInput`、`ThreadSettings`、
-  `ExecApproval`、`PatchApproval`、`RequestPermissionsResponse`、`Interrupt` 等。
-  core 向 UI 发 `EventMsg`，包括 `TurnStarted`、`TurnComplete`、`AgentMessage`、
-  `ExecCommandBegin/OutputDelta/End`、`ExecApprovalRequest`、`ApplyPatchApprovalRequest`、
-  `RequestUserInput`、`McpToolCallBegin/End` 等。
-- 审批是一等协议对象，不是 UI 临时弹窗。`protocol/src/approvals.rs` 里的
-  `ExecApprovalRequestEvent` 带 `call_id`、`approval_id`、`command`、`cwd`、`reason`、
-  `available_decisions`、`parsed_cmd` 等；`ReviewDecision` 明确区分 approve/deny/session/amendment/timeout。
-- Agent 循环在 `codex-rs/core/src/session/turn.rs`：收用户输入 → 构建 prompt/tools →
-  streaming 调模型 → 遇到 tool call 就交给 tool router 执行 → 把 tool output 写回 conversation history →
-  需要 follow-up 时继续下一轮采样。这是可复用的核心模式。
-- 工具系统在 `codex-rs/core/src/tools/*`：
-  `spec_plan.rs` 组装 shell/MCP/core/dynamic/extension/hosted tools；
-  `router.rs` 把模型函数调用转成内部 `ToolCall`；
-  `registry.rs` 调 handler；
-  `parallel.rs` 用读写锁控制可并行工具与互斥工具。
-- `code-mode` 在 Termux 版已经是真实 V8 runtime（不是 Android stub），提供 `execute/wait/terminate`
-  这种长任务 cell 语义。但浏览器本来就有 JS runtime，未来浏览器 Agent 应借它的“cell + wait + 嵌套工具”
-  语义，不要把 rusty_v8 或 native code-mode 搬进页面。
-- `login` / `AuthManager` 支持 API key、ChatGPT OAuth token、PAT 等，ChatGPT 后端基址在代码里是
-  `https://chatgpt.com/backend-api`，刷新 token 走 `https://auth.openai.com/oauth/token`。
-  这说明账号态是 native/CLI 侧 token 管理，不应把 token 暴露给页面 JS，也不应在网页 Agent 里伪造私有客户端请求。
-- `app-server` / `app-server-protocol` 比 Ratatui TUI 更适合作为 Web UI 参考：它已经把 thread/turn、
-  approval、auth status、tool request 等抽成 JSON-RPC 式协议。做浏览器工作台时优先参考 app-server protocol，
-  而不是照搬 terminal UI 代码。
-
-### Termux 定制版的关键差异
-
-- Android 登录用 `termux-open-url` 打开授权页。
-- npm launcher 做 `LD_LIBRARY_PATH` / `CODEX_SELF_EXE` 修正，ELF 侧做 `$ORIGIN` RUNPATH hardening。
-- Android 上恢复真实 code-mode / V8，`exec`/`wait` 可用。
-- 处理 Android/Termux 的 `flock`、`openpty`、OpenSSL、TLS roots 等运行时问题。
-- 这些 patch 解决的是“Codex 在 Termux CLI 跑起来”，不是“Codex 在浏览器页面里跑起来”。浏览器方案应复用协议和调度思想，
-  不是复用 Termux native 运行时。
-
-### BrowserHelper 现有工作层映射
-
-- `app/src/main/java/org/mozilla/reference/browser/devtools/BrowserBridge.kt` 已经是本项目的本地 MCP/Agent 网关：
-  提供 `page_index`、`page_search`、`page_query`、`page_exec`、`network_*`、`intercept_*`、
-  `cookie_reveal` 等工具，并通过 bearer token 暴露给外部 Codex/MCP。
-- `app/src/main/java/org/mozilla/reference/browser/devtools/PageChannel.kt` 是 native worker thread 到当前页面 content script
-  的异步桥，负责 timeout/fail-safe，适合承接浏览器 Agent 的 page tool 调用。
-- `app/src/main/assets/extensions/devtools_injector/agent.js` 已有 `bhHandleAgentCmd(msg)`：
-  `getSource` 只返回页面元信息并缓存 512KB source，`searchSource` 返回 snippet，
-  `queryDOM` 查 live DOM，`evalJS` 在 page world 执行 JS。
-- `app/src/main/java/org/mozilla/reference/browser/devtools/AgentConfirm.kt` 是 L3 敏感工具的 native 审批闸：
-  `cookie_reveal`、`page_exec` 必须由原生 UI 确认，模型/Termux 侧不能传 `confirmed=true` 绕过。
-- 这套基础已经比“从零把 Codex 塞进浏览器”更现实：现有 APK 负责页面能力、网络能力、敏感审批；
-  Agent 只需要接上事件循环、模型循环和 UI。
-
-### 可借用 / 不要搬运
-
-**可借用：**
-- Codex 的 thread/turn 生命周期：`TurnStarted` → reasoning/tool/agent events → `TurnComplete`。
-- `Op/EventMsg` 双向事件模型，把 UI、模型 loop、工具执行彻底解耦。
-- 审批对象结构：每次敏感调用有 `call_id`、理由、可选决策、超时/拒绝/本轮允许等状态。
-- Tool router/registry 思路：工具声明、参数 schema、risk level、并行/互斥能力分开。
-- Code-mode 的 cell 语义：长任务返回 session id，后续 `wait` 拉增量结果。
-- app-server protocol 的 web-friendly 方法形状。
-
-**不要搬运：**
-- 不要搬 Ratatui terminal UI；浏览器里只复刻交互模式：timeline、tool cell、审批弹窗、命令/工具状态。
-- 不要搬 shell/fs/git/sandbox/unified exec；本项目 Agent 的工具应是浏览器/页面/网络工具。
-- 不要为手机浏览器造 Linux 容器来跑完整 Codex；性能和维护成本都不合适。
-- 不要把 rusty_v8/native code-mode 塞进页面；浏览器已有 JS runtime。
-- 不要把 ChatGPT/Codex 私有后端请求伪造成网页 Agent 客户端；账号 token 不进 content script。
-
-### 落地计划
-
-1. **先做 Browser Agent UI shell**：在工作层里做 Codex 风格的 conversation timeline、底部输入框、
-   tool call cell、approval modal、tool output 折叠块。先接本地 mock event bus，不急着接模型。
-2. **定义 Browser Agent 协议**：参考 Codex `Op/EventMsg`，但工具域换成浏览器能力：
-   `page_index/search/query/exec`、`network_list/get`、`intercept_set/pending/resolve`、
-   `storage/cookie` 等。thread/turn 可先存 IndexedDB 或 native SharedPreferences/db。
-3. **实现工具注册表**：在 JS/TS 或 Kotlin 侧做 tool registry/router，工具声明包含 schema、risk level、
-   是否可并行、timeout、输出裁剪策略。L1 只读，L2 改页面/网络配置，L3 读 cookie/auth 或执行任意 JS。
-4. **保留原生 L3 审批铁律**：`page_exec`、`cookie_reveal`、后续 auth/storage 高危工具必须走
-   `AgentConfirm` 原生弹窗。审批结果只能由 native 产生，不能由模型消息或页面 JS 伪造。
-5. **模型循环分两条路**：
-   - 外部 Codex/MCP 路线：继续用 `BrowserBridge.kt` 暴露 MCP，让现有 Codex Termux 调浏览器工具。
-   - 内置 Agent 路线：在允许的 API/auth 边界内调用模型，复用 Codex 的 event/tool/approval 模式；
-     不模拟私有 ChatGPT/Codex 内部请求，不把 refresh/access token 下放页面。
-6. **把占位插件升级为真实入口**：`extensions/presets/index.js` 里的“网页 Agent”从占位 log 变成工作台按钮/面板，
-   插件 loader 只负责启停和配置，真正执行仍走 BrowserBridge/PageChannel/AgentConfirm。
-7. **测试与验证**：
-   - 单测协议 reducer、tool schema、risk level gating。
-   - 集成测 `PageChannel` timeout/fail-safe、`AgentConfirm` deny/timeout fail-closed。
-   - 用本地测试页做 `page_query` / `page_exec` / network/intercept e2e。
-   - 验证模型 transcript 不出现原始 cookie/auth header；只能出现占位符或用户明确批准后的最小结果。
-
-### 硬边界
-
-- L3 审批只能来自 native UI；模型、页面、Termux 端都不能自证已批准。
+- L3/S3 审批只能来自 native UI（悬浮窗 `ApprovalSheet` 或外部 `AgentConfirm`）；模型、页面、Termux 端都不能自证已批准。
 - 原始 cookie/auth/header 不进模型上下文；继续用 APK 内部占位符解析，例如 `{{cookie:<flowId>}}`。
-- 页面源码仍保持“缓存 + 搜索 snippet + DOM query”，不要把整页 HTML 默认塞进模型。
-- Agent transport 尽量独立于 Eruda 注入生命周期；早期可以复用 DevTools content port，但最终工作台应避免
-  因 Eruda toggle/refresh 恢复影响 Agent 通道。
-- 任何“魔改 Codex”只应借开源架构和 UI/协议思想；OAuth/token 管理边界不碰，不做绕过认证或伪装私有客户端的实现。
+- 页面源码保持「缓存 + 搜索 snippet + DOM query」，不要把整页 HTML 默认塞进模型（要整页先 `page_save_to_container` 再分段读）。
+- Agent 通道尽量独立于 Eruda 注入生命周期，避免因 Eruda toggle/refresh 恢复影响 Agent。
+- 账号 token / OAuth 边界不碰，不做绕过认证或伪装私有客户端的实现。
 
 ## 持久化
 
@@ -483,7 +372,7 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 - **是什么**：Android GeckoView 浏览器，内置自研 DevTools 扩展（Eruda 控制台 + Network 抓包/拦截/替换/断点/Mock/弱网面板）。应用名「网络调试助手」，包名 `com.example.videodownloader.browserhelper.gecko`，扩展 id `netdebug@browserhelper.local`，版本 1.1。
 - **为什么存在**：Android 上缺少 Charles/Fiddler 级、又能在手机里直接看自己浏览器流量的工具。把本地 TLS 终止 MITM 代理塞进浏览器进程 + 页面内悬浮面板 = 移动端随身抓包/改包。
 - **核心目标**：不破坏页面加载前提下，对本机浏览器流量做抓包（请求/响应含 body）、拦截改包（请求/响应方向）、字符替换、过滤、Mock、弱网，并以插件扩展。
-- **当前阶段**：核心抓包/拦截/替换/插件框架已稳定且真机验证。本轮新增按类拦截拆分、原生 Mock、原生弱网、冷启动自动续开代理、整体改名，CI 编译通过（`77545f35`、`07fbd65a`），**待真机验证**。
+- **当前阶段**：核心抓包/拦截/替换/插件框架已稳定且真机验证；按类拦截拆分、原生 Mock、原生弱网、冷启动自动续开代理、整体改名均已落地（CI 绿）。当前主要开发线已转向原生悬浮 Agent（独立接力 `AGENT.md`）。
 
 ### 2. Architecture Overview
 ```
@@ -502,13 +391,14 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 - ✅ 真机验证：请求抓包、响应抓包、请求体、响应体（含 chunked+gzip/deflate/br）、请求拦截、响应拦截、过滤、字符替换、插件框架（截流 v0.1）。
 - ✅ 真机验证：Eruda 刷新自动恢复放大/错位已修。最终有效点是自动恢复走
   `restoreToggle -> DevToolsHelper.sendToggle(engineSession) -> content action:"toggle"`，不要改回直接 JS `toggle()`。
-- 🟡 已实现 CI 绿、待真机：按类拦截拆分（遥测/心跳/噪音/cookie 四独立开关）与前后端状态同步、原生 Mock、原生弱网、冷启动自动续开代理、改名。
+- ✅ 已落地（CI 绿）：按类拦截拆分（遥测/心跳/噪音/cookie 四独立开关）与前后端状态同步、原生 Mock、原生弱网、冷启动自动续开代理、改名「网络调试助手」。
+- ℹ️ 原生悬浮 Agent 已是当前主要开发线，独立接力文档见 `AGENT.md`。
 
 ### 4. Remaining Work
-- 真机验证本轮 5 项新特性。
 - Mock（已落地）：`pumpRequests` 拦截前 `matchMock` 子串匹配 → 抽干有界 body → `buildMockResponse`(含 `Connection: close`) 直接回写、不连上游。
 - 弱网（已落地）：`ThrottledOutputStream` 8K write-through 限速 + `pumpResponses` 逐响应 `throttleLatency()` 延迟，均不缓冲。
-- 占位插件（网页 Agent / 本地 GPT Plus-Pro）落地真实逻辑。
+- 占位插件（网页 Agent 已升级为原生悬浮 Agent，见 `AGENT.md`；本地 GPT Plus-Pro 仍占位）。
+- 后续：mock/弱网/替换沉淀为插件预设。
 
 ### 5. Critical Design Decisions
 - **MITM 代替 page-hook**：page-world hook 受 CSP、跨世界对象权限、h2/WebSocket 不可见限制；MITM 后流量全可见、与页面解耦。死全局 `__bhMockRules/__bhThrottle/__bhGlobalInterceptNoise` 勿再写。
@@ -557,18 +447,16 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 
 ### 10. Current Branch Status
 - 分支 `main`（PR→`master`），CI 仓库 `haoyangtu09-art/BrowserHelper-Gecko`。
-- 正在开发：按类拦截拆分 + 原生 Mock + 原生弱网 + 冷启动续开 + 改名（收尾）。
-- 最近成功：核心功能真机验证；Eruda 刷新自动恢复放大/错位已由 `9e6a8c15`
-  `Restore Eruda through native toggle path` 真机恢复，APK `BrowserHelper-Gecko-9e6a8c15-arm64.apk` 已下载。
-- 最近失败：无构建失败；唯一未完成=新特性待真机。
-- 最值得推进：① 真机验证 5 项新特性；② 验证后 mock/弱网做成插件预设；③ 落地占位插件。
+- 抓包/DevTools 线：按类拦截拆分 + 原生 Mock + 原生弱网 + 冷启动续开 + 改名均已落地；Eruda 刷新自动恢复放大/错位已由 `9e6a8c15` 真机恢复。
+- 当前主要开发线已转向原生悬浮 Agent（`org.mozilla.reference.browser.agent`），独立接力见 `AGENT.md`。
+- 抓包侧后续可推进：mock/弱网/替换沉淀为插件预设。
 
 ## B. 精简版 Handoff
 > 核心模型：`ProxyProbe.kt`(Kotlin object) = 本地 TLS 终止 MITM，解密+双向盲转发，绝不完整 HTTP 解析/整体缓冲（坑#4：页面加载不出来+Eruda 打不开）。功能在 pump 上旁路 tee/受控有界缓冲/fail-open 暂停增量加。数据流：请求 `Browser→MITM→ProxyProbe→DevToolsHelper→proxy-feed→panel`；响应 `Server→MITM→ProxyProbe→proxy-feed→panel`。page-world 拦截器已删，原生代理唯一数据源。
-> 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流。已实现待真机：按类拦截(遥测/心跳/噪音/cookie 四开关 gating `isLowValueUrl`)、原生 Mock(`matchMock`+`buildMockResponse`+`Connection:close`，仅有界)、原生弱网(`ThrottledOutputStream` write-through+逐响应延迟)、冷启动续开(`proxy_enabled`+新端口)、改名。
+> 已落地(CI 绿)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流、按类拦截(遥测/心跳/噪音/cookie 四开关 gating `isLowValueUrl`)、原生 Mock(`matchMock`+`buildMockResponse`+`Connection:close`，仅有界)、原生弱网(`ThrottledOutputStream` write-through+逐响应延迟)、冷启动续开(`proxy_enabled`+新端口)、改名。原生悬浮 Agent 见 `AGENT.md`。
 > 铁律：①不碰 pump 模型 ②不改请求 Accept-Encoding ③流式/SSE/WS/无 CL 一律放行不缓冲 ④叶子 issuer 用根 subject 精确 DER ⑤`reimportEnterpriseRoots` 勿删（与页面加载无关）⑥冷启动续开新端口勿改回直连 ⑦面板编辑走 light-DOM `openEditOverlay` ⑧Eruda 刷新自动恢复必须走 native `restoreToggle -> sendToggle`，勿改回 content 直接 `toggle()`。
 > 持久化：面板 `storage.local:bhNetConfig/bhNetReplaceRules/bhNetInterceptRules`；原生 `SharedPreferences("bh_devtools")`:`replace_config/intercept_config/sse_hold_config/mock_config/throttle_config/proxy_enabled`。
-> 验证：JS 跑 `node --check` 每文件 + manifest 顺序拼接；Kotlin 仅 CI 编译(allWarningsAsErrors)；APK 名带 commit SHA。下一步：真机验证 5 项新特性。
+> 验证：JS 跑 `node --check` 每文件 + manifest 顺序拼接；Kotlin 仅 CI 编译(allWarningsAsErrors)；APK 名带 commit SHA。
 
 ## C. 新对话启动 Prompt
 ```
@@ -587,8 +475,8 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 【当前状态】
 - 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流插件。
 - 已稳定(真机)：Eruda 刷新自动恢复放大/错位已修，靠 native `restoreToggle -> sendToggle` 往返。
-- 已实现待真机(77545f35/07fbd65a,CI 绿)：按类拦截拆分、原生 Mock、原生弱网、
-  冷启动自动续开代理、改名。首要任务通常是协助真机验证这 5 项，而非新开特性。
+- 已落地(CI 绿)：按类拦截拆分、原生 Mock、原生弱网、冷启动自动续开代理、改名。
+- 当前主要开发线已转向原生悬浮 Agent，独立接力文档见 `AGENT.md`；改本文件这条抓包/DevTools 线时按下面注意事项稳健小步推进。
 
 【改特定东西的注意事项】
 · 改 mitm()/pumpRequests/pumpResponses：绝不缓冲流式/SSE/WS/无 Content-Length；

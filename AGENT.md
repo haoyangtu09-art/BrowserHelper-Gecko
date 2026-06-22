@@ -3,7 +3,9 @@
 > 用途：新对话时只读这一个文件 + `CLAUDE.md`，就能立刻进入「原生悬浮 Agent 后端 + UI」工作状态。
 > 本文件覆盖 `org.mozilla.reference.browser.agent` 原生悬浮窗、内置后端、权限层、工具注册表和高级自检页。
 > 抓包代理 / DevTools 扩展那条线看 `CLAUDE.md`，两者基本独立。
-> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、网页图片上传链路重写、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截前后端状态同步、心跳/噪音拆分、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、页面工具 CSS/shadow DOM 抗干扰、P0 原生导航工具、记忆实时文件同步、每个对话独立 JSON、拓展卡片 5-6 个一排（未提交）。改 Agent 后请同步更新本文件。
+> 末次更新对应 2026-06-23（commit `fc02e603`，CI 绿 + APK 已出，真机待验）：工具卡片改 Claude-Code 风「`● name(arg)` + `⎿` 结果块」（灰框、超 6 行折叠「… +N 行」、右下角展开/收起 + 复制；写文件仍走 +/- diff）；助手文本把 `#/##/###` 行渲染成真实标题（井号不显示）；任务标记改方块（待执行=空心无圆角、执行中=实心、完成=✔ 划线）；`approvePlan` 自动转任务清单（计划/任务融合），批准并开始按钮改黑底白字去蓝色；`page_exec`(`_bhEvalInPage`) 新增内容脚本沙箱 eval 兜底（不受页面 CSP 约束），manifest 加 `unsafe-eval` 扩展 CSP。
+> 前一批 `f5974187`（已 CI 绿）：工具卡/任务列表极简化（去彩色、去 emoji、灰底代码/diff 框、报错原文直贴）、拦截前端状态同步权威化、拓展卡片放大、HTTP Agent → 0.7。
+> 再前 2026-06-22：模型 null 流式过滤、附件入口后端、网页图片上传链路重写、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、心跳/噪音拆分、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、页面工具 CSS/shadow DOM 抗干扰、P0 原生导航工具、记忆实时文件同步、每个对话独立 JSON。改 Agent 后请同步更新本文件。
 
 ---
 
@@ -28,7 +30,7 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 已用临时第三方 OpenAI-compatible 中转验证过 `/v1/models`、普通 `/v1/chat/completions`、强制 `tools` tool call；密钥没有写入源码。
 - 会话标题只生成一次：首条真实用户消息先生成本地临时标题并立刻创建 `SavedChat`；模型命名只轻量执行一次，用前一到两句用户输入替换临时标题，后续不实时更新，避免反复消耗 token。
 - 长期记忆已补齐闭环：`agent_memory/memories.json` 保存 `memorySummary` + `memories`；每次有效对话结束后后台只抽取新增长期记忆条目；记忆页「生成摘要」才会让模型把已保存记忆压缩成摘要，不把所有记忆原样塞进摘要。
-- 工具完整返回不再进入可见聊天：`Role.Tool` 仍把完整 `result.text` 回写给模型，UI `ToolCard` 只显示状态/安全摘要/diff。
+- 工具卡片是 Claude-Code 风：`● name(arg)` 头行（首参由 `argPreview` 选取并裁到 64 字）+ `⎿` 结果块。普通工具结果块走 `OutputBlock`（灰底 `CodeBg`、JSON pretty-print、超 6 行折叠成「… +N 行」、右下角展开/收起 + 复制）；写文件/改页面类走 `DiffBlock`（保留 +/- 红绿）；失败走原始错误文本块。`Role.Tool` 仍把完整 `result.text`（受 `capToolResult` 32K 上限）回写给模型。
 - `OpenAiBackend` / `AnthropicBackend` 已对 JSON `null` / `JSONObject.NULL` 做过滤，流式增量、tool call id/name/arguments、模型 id 都不会再把 `nullnull...` 拼进可见回复。
 - 工具循环上限从 6 次提高到 250 次；撞到上限时提示 `工具循环已到 250 次上限`。
 - 回合 epoch 守卫：`PanelState.turnEpoch` 在 send/stop/newChat/loadChat/approvePlan 自增，`AgentEngine` 用 `alive()` 守卫所有写回，旧/被停止回合不再串台到当前对话，方块停止后到达的回复直接丢弃。
@@ -45,7 +47,7 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 新聊天会清空本会话授权 grant。
 
 ### S1 工具（三层都可见）
-- 计划：`create_plan`、`update_plan`，会真实写入悬浮窗 PlanCard。
+- 计划：`create_plan`、`update_plan`，会真实写入悬浮窗 PlanCard。计划与任务已融合：`approvePlan()` 会先 `convertPlanToTasks()` 把计划条目转成任务卡，再退出 plan 模式开始执行；PlanCard 的「批准并开始」「继续编辑」改为黑底白字 / 白底描边按钮（去蓝色），并移除了单独的「转为任务清单」按钮。
 - 容器代码文件：`write_code_file`、`delete_code_from_file`，只操作 Agent 外部容器内相对路径。
 - 浏览器只读：`page_index`、`page_search`、`page_query`、`network_list`、`network_get`、`proxy_status`。
 - Agent 容器：`container_list`、`container_read`、`container_write`。
@@ -71,7 +73,7 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 
 ### S3 工具
 - Page-origin 请求：`page_fetch`，在当前网页 page world 执行 `fetch`，支持 `requiredPageUrlContains` 校验来源页。
-- 任意页面 JS：`page_exec`。
+- 任意页面 JS：`page_exec`。`agent.js` 的 `_bhEvalInPage` 多级兜底防页面 CSP 拦截：① page-world `wrappedJSObject.Function`（受 unsafe-eval 约束）② blob URL `<script>`（受 script-src blob: 约束）③ 内容脚本沙箱 `_bhSandboxEval`（在扩展世界 `eval`，不受页面 CSP 约束，靠 manifest `content_security_policy` 的 `unsafe-eval`）④ inline `<script>`。任一前级失败自动降级，最后 setTimeout 兜底返回沙箱结果或超时错误。
 - 敏感数据：`cookie_reveal`。
 - 浏览器私有目录：`private_file_list`、`private_file_read`、`private_file_write`、`private_batch_edit_files`。
 
@@ -102,16 +104,16 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 悬浮窗顶部蓝线/收起按钮改为透明 overlay，去掉原先保留的白色 chrome 空白条，顶部上下文能完整显示。
 - 展开后的 Agent 悬浮窗整体下移到屏高约 15% 处并按面板高度夹紧；聊天顶部按钮下移避开透明拖拽条。
 - 用户消息气泡为纯色块灰底 `0xFFE4E6EA`（无描边——描边难看），明显比面板底色 `0xFFF1F2F4` 深，避免和底色混在一起。
-- Visual Task Tracker 卡片（`TaskTrackerCard.kt`）渲染在聊天消息流内（非悬浮层），可折叠/展开，按状态显示图标/颜色，自动滚动到当前任务；任务列表随对话持久化（`SavedChat.tracker`），计划批准后可一键转任务。
+- Visual Task Tracker 卡片（`TaskTrackerCard.kt`）渲染在聊天消息流内（非悬浮层），极简扁平无边框/无背景（Claude-Code todo 风），随对话持久化（`SavedChat.tracker`），计划批准即自动转任务。任务标记：待执行=空心无圆角小方块（`border`）、执行中=实心方块（`background`）+标题加粗、完成=`✔`+删除线、失败=`✕`、取消=`–`；每组当前优先排序，完成项折叠只显示最近一条 +「… +N 已完成」。
 - 抽屉和记忆页会在打开/点击前保存当前会话快照；`SavedChat.title/titled` 改为 Compose state，记忆页新增「对话记忆」可点击恢复对应对话，恢复后会立刻刷新 `chat_index.json` 的 `currentChatId`。
 - 对话历史不再只等禁用/销毁时落盘：`AgentSettingsStore` 写 `agent_memory/chat_index.json` 和 `agent_memory/chats/<chatId>.json`；用户消息、附件、assistant 回复、工具卡、工具结果、标题变化、计划批准、权限切换、切换历史对话都会触发当前对话文件同步。`OverlayRoot.onDispose` 只保留 `saveBlocking()` 兜底。
-- 拓展面板卡片已缩小为自适应正方形，一般一行 5-6 个；插件名作为卡片主标题放大，版本号置于标题下方，HTTP Agent 版本 `0.6`。
+- 助手文本里模型常用的 `#`/`##`/`###` 行已被 `ProseText` 渲染成真实标题（`HeaderStyle`：16sp 加粗），不再把井号原样显示；非标题行仍按段落渲染。
+- 拓展面板卡片已放大为自适应正方形（`grid-template-columns:repeat(auto-fill,minmax(190px,1fr))` + `aspect-ratio:1/1`），一行约 1-2 个；插件名作为卡片主标题放大（26px），版本号置于标题下方（蓝色 18px），HTTP Agent 版本 `0.7`。
 
 ### 验证状态
-- 本轮已跑 `git diff --check` 通过。
-- 本轮已跑 `node --check app/src/main/assets/extensions/devtools_injector/agent.js` 通过。
-- 本轮已跑 `node --check app/src/main/assets/extensions/devtools_injector/extensions/index.js` 通过。
-- 本机 Gradle 用实际存在的 `:app:assembleDebug` + Java17 toolchain 参数验证，仍被环境阻塞：缺 `ANDROID_HOME` 或 `local.properties:sdk.dir`，停在 Android SDK 检查阶段，未进入源码编译。
+- `fc02e603`（工具卡 Claude-Code 风 + markdown 标题 + 方块任务标记 + 计划/任务融合 + page_exec CSP 沙箱兜底）：JS `node --check` 每文件 + manifest 顺序拼接通过；CI 绿（run 27966686149），APK `BrowserHelper-Gecko-fc02e603-arm64.apk` 已出，**真机待验**。
+- `f5974187`（工具卡/任务列表极简化、拦截前端状态同步、拓展卡片放大、HTTP Agent 0.7）：CI 绿，已下载 APK。
+- 本机 Termux 无 Java17 toolchain，Kotlin 只能靠推送 CI 编译（`-R haoyangtu09-art/BrowserHelper-Gecko`，`allWarningsAsErrors`）；本地只跑 JS `node --check`。
 
 ---
 
@@ -347,6 +349,17 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 
 > 给「全新对话（无记忆）」防回退用。改 UI 前看一眼，别把已修的坑改回去。
 > 完整 diff 用 `git show <SHA>`；未提交批次用 `git diff`。
+
+### 工具卡 Claude-Code 风 + markdown 标题 + 方块任务标记 + 计划/任务融合 + page_exec CSP 兜底 `fc02e603`（2026-06-23，CI 绿+真机待验）
+> APK `BrowserHelper-Gecko-fc02e603-arm64.apk`，真机逐项待验。
+- **工具卡片改 Claude-Code 风（`AgentEngine.kt` + `ChatScreen.kt`）**：`runningCard`/`buildToolCard` 头行改 `● name(arg)`（新增 `argPreview` 按工具挑首参裁到 64 字），结果走 `⎿` `Connector` 块。`ToolCard` 新增 `output` 字段；普通工具结果用 `OutputBlock`（灰底 `CodeBg`、`toolOutputText` JSON pretty-print + 8000 字封顶、超 `CAP_LINES=6` 行折叠成「… +N 行」、右下角展开/收起 + 复制）；写文件/改页面仍走 `DiffBlock`（+/- 红绿保留）；失败走原始错误块。删掉旧 `safeToolSummary`/`ErrorBlock`（-Werror 不留未引用私有函数）。
+- **markdown 标题渲染（`ChatScreen.kt`）**：新增 `ProseText`，用 `headerRe = ^(#{1,6})\s*(.*)$` 把模型输出的 `#/##/###` 行渲染成 `HeaderStyle`（16sp 加粗），井号不再原样显示；非标题行按段落渲染。
+- **方块任务标记（`TaskTrackerCard.kt`）**：待执行=空心无圆角方块（`border` 1.5dp）、执行中=实心方块（`background`）、终态用字形（`✔/✕/–`）+ 删除线；`SQUARE=10.dp`。
+- **计划/任务融合 + 黑白按钮（`PanelState.kt` + `AgentPanelHost.kt`）**：`approvePlan()` 先 `convertPlanToTasks()` 再退出 plan 模式；PlanCard 点改黑底白字、移除单独「转为任务清单」按钮、「继续编辑」改白底描边（去蓝色 `Accent`）。
+- **`page_exec` CSP 沙箱兜底（`agent.js` + `manifest.json`）**：`_bhEvalInPage` 在 page-world `Function` / blob `<script>` 之外，新增 `_bhSandboxEval`（扩展内容脚本世界 `eval`，不受页面 CSP 约束），manifest 加 `content_security_policy: script-src 'self' 'unsafe-eval'`。多级失败自动降级，setTimeout 兜底。
+
+### 工具卡/任务列表极简化 + 拦截前端同步 + 拓展卡片放大 `f5974187`（2026-06-22，CI 绿）
+- 工具卡/任务列表去彩色、去 emoji（含 ⚠️，报错原文直贴）、灰底代码/diff 框；拦截前端状态以 `ProxyProbe` 后台真实状态为权威（`interceptState` 回灌）；拓展卡片放大为自适应正方形；HTTP Agent 预设 → `0.7`。
 
 ### 任务追踪 + 扩充工具 + 串台/停止/上下文修复 `d56e6280`（2026-06-22，CI 绿+真机待验）
 > 这一批把下面「当前未提交批次（2026-06-22）」连同任务追踪、扩充工具一起提交进 `d56e6280` 并推 CI（编译通过，APK `BrowserHelper-Gecko-d56e6280-arm64.apk`，真机逐项待验）。
@@ -604,9 +617,9 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 
 ---
 
-## 13. 本轮待办计划（UI/后端第三轮，2026-06-21，进行中未提交）
+## 13. 历史计划存档（UI/后端第三轮，2026-06-21，已全部落地）
 
-> 用户连续三批反馈合并一次性做完（"一大堆都一次性做完 / 弄完"）。全部完成后单 commit 推 CI 出 APK 真机验。
+> 防回退用：本节是已完成的第三轮计划（#26–#40 均已实现并提交），保留作 diff 导航与设计意图存档。
 > 实现顺序按风险从低到高：先结构性修复（解锁其它项），再后端，再 UI 细节。
 
 ### A. 已确诊的结构性 Bug
@@ -655,11 +668,12 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 
 ---
 
-## 14. 浏览器工具扩展计划 + 本批 UI 微调（2026-06-22）
+## 14. 历史计划存档：浏览器工具扩展脑暴（2026-06-22，多数已落地）
 
-> 用户反馈四项 + 一次工具脑暴。本节先记本批已落地的 UI 微调，再列「浏览器 Agent 还缺哪些工具」
-> 的完整脑暴 + 分批实施计划。新工具**本节只列计划，未实现**；落地时每个工具仍是 agent.js 命令
+> 防回退/设计意图存档。本节当时的工具脑暴里 P0/P1 大部分已在后续批次（含 `d56e6280`、`fc02e603`）
+> 实现，最新工具清单以 §0.1 与 §12 为准；这里保留脑暴与分批思路。每个工具仍是 agent.js 命令
 > 处理器 + AgentTools.kt 四处接入点（approval / execute / selfTest / toolDef），按 S 层注册。
+> 注：14.A 的「拓展卡片改 4–5 格/行」已被后续「放大为自适应正方形（一行约 1–2 个）」取代，见 §0.1。
 
 ### A. 本批已落地（UI 微调）
 
