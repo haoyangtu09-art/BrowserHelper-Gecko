@@ -14,6 +14,7 @@ import org.json.JSONObject
 import org.mozilla.reference.browser.agent.core.AgentApprover
 import org.mozilla.reference.browser.agent.core.AgentConfig
 import org.mozilla.reference.browser.agent.core.AgentMessage
+import org.mozilla.reference.browser.agent.core.AgentPanelBridge
 import org.mozilla.reference.browser.agent.core.AgentPermissionTier
 import org.mozilla.reference.browser.agent.core.AgentToolRegistry
 import org.mozilla.reference.browser.agent.core.AgentToolResult
@@ -62,6 +63,7 @@ class AgentEngine(context: Context) {
                 state.planText = text
                 state.planMode = true
             },
+            panelBridge = panelBridge(state),
         )
         val toolSpecs = registry.allowedToolSpecs(state.permTier)
 
@@ -156,6 +158,65 @@ class AgentEngine(context: Context) {
                 state.generating = false
                 state.saveCurrentChat()
             }
+        }
+    }
+
+    /**
+     * Bridge the chat-history / memory tools onto [PanelState]. The registry only ever
+     * calls these on the main thread (via its runOnMainResult), so direct Compose-state
+     * access here is safe.
+     */
+    private fun panelBridge(state: PanelState): AgentPanelBridge = object : AgentPanelBridge {
+        override fun listChats(): JSONArray {
+            val arr = JSONArray()
+            state.chats.forEach { chat ->
+                arr.put(
+                    JSONObject()
+                        .put("id", chat.id)
+                        .put("title", chat.title)
+                        .put("titled", chat.titled)
+                        .put("current", chat.id == state.currentChatId),
+                )
+            }
+            return arr
+        }
+
+        override fun openChat(id: String): Boolean {
+            if (state.chats.none { it.id == id }) return false
+            state.loadChat(id)
+            return true
+        }
+
+        override fun renameChat(id: String, title: String): Boolean {
+            val chat = state.chats.firstOrNull { it.id == id } ?: return false
+            val cleaned = title.trim().replace(Regex("\\s+"), " ").take(20)
+            if (cleaned.isBlank()) return false
+            if (id == state.currentChatId) {
+                state.replaceCurrentTitle(cleaned)
+            } else {
+                chat.title = cleaned
+                state.persist()
+            }
+            return true
+        }
+
+        override fun listMemories(): JSONArray {
+            val arr = JSONArray()
+            state.memories.forEachIndexed { index, value ->
+                arr.put(JSONObject().put("index", index).put("value", value))
+            }
+            return arr
+        }
+
+        override fun addMemory(value: String): Int {
+            state.addMemory(value)
+            return state.memories.size - 1
+        }
+
+        override fun deleteMemory(index: Int): Boolean {
+            if (index !in state.memories.indices) return false
+            state.removeMemory(index)
+            return true
         }
     }
 
@@ -585,6 +646,7 @@ class AgentEngine(context: Context) {
             // would otherwise pop the plan UI mid-run and look like the plan started executing
             // before approval. Swallow the callback during self-test.
             onPlanChanged = { },
+            panelBridge = panelBridge(state),
         )
         val result = registry.selfTest(name)
         state.toolChecks[name] = ToolCheckState(if (result.ok) "OK" else "失败", result.text)

@@ -10,11 +10,13 @@ import android.os.Looper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import mozilla.components.browser.state.selector.selectedTab
 import org.json.JSONArray
 import org.json.JSONObject
 import org.mozilla.reference.browser.devtools.NetFlowStore
 import org.mozilla.reference.browser.devtools.PageChannel
 import org.mozilla.reference.browser.devtools.ProxyProbe
+import org.mozilla.reference.browser.ext.components
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
@@ -44,6 +46,20 @@ interface AgentApprover {
     suspend fun approve(request: AgentApprovalRequest): AgentApprovalDecision
 }
 
+/**
+ * Bridge from the Agent tools (running on Dispatchers.IO) to the Compose [PanelState] that
+ * owns chat history and long-term memory. Every method here touches Compose state, so the
+ * registry only ever calls them through runOnMainResult (main thread).
+ */
+interface AgentPanelBridge {
+    fun listChats(): JSONArray
+    fun openChat(id: String): Boolean
+    fun renameChat(id: String, title: String): Boolean
+    fun listMemories(): JSONArray
+    fun addMemory(value: String): Int
+    fun deleteMemory(index: Int): Boolean
+}
+
 private data class ToolDef(
     val spec: ChatToolSpec,
     val tier: AgentPermissionTier,
@@ -55,6 +71,7 @@ class AgentToolRegistry(
     private val searchKey: String = "",
     private val searchUrl: String = "",
     private val onPlanChanged: ((String) -> Unit)? = null,
+    private val panelBridge: AgentPanelBridge? = null,
 ) {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -69,11 +86,16 @@ class AgentToolRegistry(
         val def = registryFor(tier).firstOrNull { it.spec.name == name }
             ?: return AgentToolResult(false, "$name is not registered for current permission tier $tier")
         val args = parseArgs(rawArgs)
-        val request = approvalRequest(def, tier, args)
-        if (!approver.isApproved(request.scopeKey)) {
-            val approved = approver.approve(request)
-            if (approved == AgentApprovalDecision.Deny) {
-                return AgentToolResult(false, "user denied tool call: $name")
+        // S1 tools are read-only (no file writes after the write_* tools moved to S2),
+        // so they run without an approval prompt — matching the roadmap §6 rule that
+        // S1 reads need no confirmation.
+        if (def.tier != AgentPermissionTier.S1) {
+            val request = approvalRequest(def, tier, args)
+            if (!approver.isApproved(request.scopeKey)) {
+                val approved = approver.approve(request)
+                if (approved == AgentApprovalDecision.Deny) {
+                    return AgentToolResult(false, "user denied tool call: $name")
+                }
             }
         }
         return try {
@@ -221,6 +243,48 @@ class AgentToolRegistry(
                     "flowId=${args.optString("id", "")}, header=${args.optString("name", "authorization")}",
                     "允许，并且本次会话不再询问这个凭证范围",
                 )
+            "tab_switch" ->
+                req(
+                    "允许 Agent 切换浏览器标签页吗？",
+                    "tab-switch:${args.optString("id", "")}",
+                    "切换到 tab ${args.optString("id", "")}",
+                    "允许，并且本次会话不再询问切换标签页",
+                )
+            "page_click", "page_type" ->
+                req(
+                    "允许 Agent 操作当前网页元素吗？",
+                    "page-interact:$name:${args.optString("selector", "")}",
+                    "$name 当前页面 selector=${args.optString("selector", "")}",
+                    "允许，并且本次会话不再询问这个页面元素操作",
+                )
+            "dom_highlight_element", "dom_inject_css" ->
+                req(
+                    "允许 Agent 修改当前网页样式吗？",
+                    "page-style:$name:${if (name == "dom_inject_css") shortHash(args.optString("css", "")) else args.optString("selector", "")}",
+                    if (name == "dom_inject_css") "注入 CSS ${shortHash(args.optString("css", ""))}" else "高亮 selector=${args.optString("selector", "")}",
+                    "允许，并且本次会话不再询问这个页面样式改动",
+                )
+            "mock_add_rule", "replace_add_rule" ->
+                req(
+                    "允许 Agent 新增浏览器网络规则吗？",
+                    "network-rule:$name:${shortHash(args.toString())}",
+                    "$name 规则 ${shortHash(args.toString())}",
+                    "允许，并且本次会话不再询问这条网络规则",
+                )
+            "agent_history_open", "agent_history_rename" ->
+                req(
+                    "允许 Agent 操作对话历史吗？",
+                    "agent-history:$name:${args.optString("id", "")}",
+                    "$name id=${args.optString("id", "")}",
+                    "允许，并且本次会话不再询问这个对话历史操作",
+                )
+            "agent_memory_add", "agent_memory_delete" ->
+                req(
+                    "允许 Agent 修改长期记忆吗？",
+                    "agent-memory:$name:${if (name == "agent_memory_add") shortHash(args.optString("value", "")) else args.optString("index", "")}",
+                    if (name == "agent_memory_add") "新增记忆 ${shortHash(args.optString("value", ""))}" else "删除记忆 #${args.optString("index", "")}",
+                    "允许，并且本次会话不再询问这个记忆改动",
+                )
             else ->
                 req(
                     "允许 Agent 读取这些浏览器数据吗？",
@@ -324,21 +388,32 @@ class AgentToolRegistry(
                 ProxyProbe.setMockRules(JSONObject().put("rules", arr))
                 ok("mock rules set: ${arr.length()} rules")
             }
-	            "intercept_set" -> {
-	                val reqAll = if (args.has("reqAll")) args.optBoolean("reqAll", false) else true
-	                val respAll = if (args.has("respAll")) args.optBoolean("respAll", false) else true
-	                ProxyProbe.setInterceptRules(
-	                    JSONObject()
-	                        .put("reqAll", reqAll)
-	                        .put("respAll", respAll)
-	                        .put("interceptTelemetry", args.optBoolean("interceptTelemetry", false))
-	                        .put("interceptHeartbeat", args.optBoolean("interceptHeartbeat", false))
-	                        .put("interceptNoise", args.optBoolean("interceptNoise", false))
-	                        .put("interceptCookie", args.optBoolean("interceptCookie", false))
-	                        .put("rules", args.optJSONArray("rules") ?: JSONArray()),
-	                )
-	                ok("intercept rules set: reqAll=$reqAll respAll=$respAll lowValue=${if (args.optBoolean("interceptTelemetry", false)) "" else "telemetry pass; "}${if (args.optBoolean("interceptHeartbeat", false) || args.optBoolean("interceptNoise", false)) "" else "heartbeat/noise pass; "}${if (args.optBoolean("interceptCookie", false)) "" else "cookie pass"}")
-	            }
+            "intercept_set" -> {
+                // Fail-safe: omitting reqAll/respAll means "don't blanket-intercept".
+                // We also pass an explicit `enabled` so ProxyProbe never falls back to
+                // arming intercept just because intercept rules are present — otherwise a
+                // no-arg call would silently pause every outgoing request.
+                val reqAll = args.optBoolean("reqAll", false)
+                val respAll = args.optBoolean("respAll", false)
+                val rules = args.optJSONArray("rules") ?: JSONArray()
+                val hasInterceptRule = (0 until rules.length()).any { i ->
+                    val o = rules.optJSONObject(i)
+                    o != null && (o.optString("action") == "intercept" || o.optBoolean("interceptResp", false))
+                }
+                val enabled = reqAll || respAll || hasInterceptRule
+                ProxyProbe.setInterceptRules(
+                    JSONObject()
+                        .put("enabled", enabled)
+                        .put("reqAll", reqAll)
+                        .put("respAll", respAll)
+                        .put("interceptTelemetry", args.optBoolean("interceptTelemetry", false))
+                        .put("interceptHeartbeat", args.optBoolean("interceptHeartbeat", false))
+                        .put("interceptNoise", args.optBoolean("interceptNoise", false))
+                        .put("interceptCookie", args.optBoolean("interceptCookie", false))
+                        .put("rules", rules),
+                )
+                ok("intercept rules set: enabled=$enabled reqAll=$reqAll respAll=$respAll lowValue=${if (args.optBoolean("interceptTelemetry", false)) "" else "telemetry pass; "}${if (args.optBoolean("interceptHeartbeat", false) || args.optBoolean("interceptNoise", false)) "" else "heartbeat/noise pass; "}${if (args.optBoolean("interceptCookie", false)) "" else "cookie pass"}")
+            }
             "intercept_pending" -> ok(ProxyProbe.pendingInterceptList().toString())
 	            "intercept_resolve" -> {
 	                val flowId = NetFlowStore.flowIdFor(args.optString("flowId", "")) ?: args.optString("flowId", "")
@@ -464,6 +539,160 @@ class AgentToolRegistry(
             "private_batch_edit_files" -> {
                 val edits = args.optJSONArray("edits") ?: JSONArray()
                 privateBatchGuard(edits) ?: batchWriteFiles(privateRoot(), edits)
+            }
+            "tab_list" -> ok(tabListJson().toString())
+            "tab_current" -> currentTabJson()?.let { ok(it.toString()) } ?: ok("{}")
+            "tab_switch" -> {
+                val id = args.optString("id", "")
+                if (id.isBlank()) {
+                    err("id required")
+                } else if (!tabExists(id)) {
+                    err("no tab with id=$id")
+                } else {
+                    runOnMain { appContext.components.useCases.tabsUseCases.selectTab(id) }
+                    ok("switched to tab $id")
+                }
+            }
+            "page_click" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) err("selector required") else page("clickEl", JSONObject().put("selector", selector))
+            }
+            "page_type" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else {
+                    page(
+                        "typeText",
+                        JSONObject()
+                            .put("selector", selector)
+                            .put("text", args.optString("text", ""))
+                            .put("append", args.optBoolean("append", false)),
+                    )
+                }
+            }
+            "page_wait_for_element" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else {
+                    val timeoutMs = args.optLong("timeoutMs", 5_000L).coerceIn(100L, 30_000L)
+                    page(
+                        "waitForElement",
+                        JSONObject()
+                            .put("selector", selector)
+                            .put("timeoutMs", timeoutMs)
+                            .put("visible", args.optBoolean("visible", false)),
+                        timeoutMs + 3_000L,
+                    )
+                }
+            }
+            "console_list" -> page(
+                "consoleList",
+                JSONObject()
+                    .put("limit", args.optInt("limit", 50))
+                    .put("level", args.optString("level", "")),
+                8_000L,
+            )
+            "network_wait_request" -> waitForFlow(args, needResponse = false)
+            "network_wait_response" -> waitForFlow(args, needResponse = true)
+            "mock_add_rule" -> {
+                val pattern = args.optString("pattern", "")
+                if (pattern.isEmpty()) {
+                    err("pattern required")
+                } else {
+                    val rule = JSONObject()
+                        .put("pattern", pattern)
+                        .put("status", args.optInt("status", 200))
+                        .put("body", args.optString("body", ""))
+                    args.optJSONObject("headers")?.let { rule.put("headers", it) }
+                    ProxyProbe.mockAddRule(rule)
+                    ok("mock rule added: pattern=$pattern total=${ProxyProbe.mockListJson().length()}")
+                }
+            }
+            "mock_list" -> ok(ProxyProbe.mockListJson().toString())
+            "replace_add_rule" -> {
+                val from = args.optString("from", "")
+                if (from.isEmpty()) {
+                    err("from required")
+                } else {
+                    ProxyProbe.replaceAddRule(from, args.optString("to", ""), args.optString("scope", ""))
+                    ok("replace rule added: ${ProxyProbe.replaceListJson()}")
+                }
+            }
+            "replace_list" -> ok(ProxyProbe.replaceListJson().toString())
+            "dom_highlight_element" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else {
+                    page(
+                        "highlight",
+                        JSONObject()
+                            .put("selector", selector)
+                            .put("color", args.optString("color", "#ff3b30"))
+                            .put("durationMs", args.optLong("durationMs", 2_000L))
+                            .put("all", args.optBoolean("all", false)),
+                    )
+                }
+            }
+            "dom_inject_css" -> {
+                val css = args.optString("css", "")
+                if (css.isEmpty()) err("css required") else page("injectCss", JSONObject().put("css", css))
+            }
+            "agent_history_list" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                ok(runOnMainResult { bridge.listChats() }.toString())
+            }
+            "agent_history_open" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val id = args.optString("id", "")
+                if (id.isBlank()) {
+                    err("id required")
+                } else if (runOnMainResult { bridge.openChat(id) }) {
+                    ok("opened chat $id")
+                } else {
+                    err("no chat with id=$id")
+                }
+            }
+            "agent_history_rename" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val id = args.optString("id", "")
+                val title = args.optString("title", "")
+                if (id.isBlank()) {
+                    err("id required")
+                } else if (title.isBlank()) {
+                    err("title required")
+                } else if (runOnMainResult { bridge.renameChat(id, title) }) {
+                    ok("renamed chat $id to $title")
+                } else {
+                    err("no chat with id=$id")
+                }
+            }
+            "agent_memory_list" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                ok(runOnMainResult { bridge.listMemories() }.toString())
+            }
+            "agent_memory_add" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val value = args.optString("value", "")
+                if (value.isBlank()) {
+                    err("value required")
+                } else {
+                    val index = runOnMainResult { bridge.addMemory(value) }
+                    ok("memory added at index $index")
+                }
+            }
+            "agent_memory_delete" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val index = args.optInt("index", -1)
+                if (index < 0) {
+                    err("index required")
+                } else if (runOnMainResult { bridge.deleteMemory(index) }) {
+                    ok("memory $index deleted")
+                } else {
+                    err("no memory at index $index")
+                }
             }
             else -> err("unknown tool: $name")
         }
@@ -678,6 +907,144 @@ class AgentToolRegistry(
                         .put(JSONObject().put("path", "$tempDir/private_batch_b.txt").put("content", "b-$stamp")),
                 ),
             )
+            "tab_list", "tab_current" -> execute(name, JSONObject())
+            "tab_switch" -> {
+                // Switching to the already-selected tab is a no-op for the user but still
+                // exercises the use-case dispatch; never switch to a *different* tab in a test.
+                val id = currentTabJson()?.optString("id", "").orEmpty()
+                if (id.isEmpty()) ok("OK: tab_switch is callable; no tab is available to switch to")
+                else execute(name, JSONObject().put("id", id))
+            }
+            "page_wait_for_element" -> execute(name, JSONObject().put("selector", "html").put("timeoutMs", 500))
+            "console_list" -> execute(name, JSONObject().put("limit", 1))
+            "page_click" -> {
+                val id = "__bh_agent_self_test_click"
+                val setup = page(
+                    "evalJS",
+                    JSONObject().put(
+                        "code",
+                        "var el=document.getElementById('$id');" +
+                            "if(!el){el=document.createElement('button');el.id='$id';el.style.position='fixed';el.style.left='-9999px';document.documentElement.appendChild(el);}" +
+                            "return true;",
+                    ).put("timeoutMs", 5000),
+                    6000,
+                )
+                if (!setup.ok) setup else {
+                    val result = execute(name, JSONObject().put("selector", "#$id"))
+                    page(
+                        "evalJS",
+                        JSONObject().put("code", "var el=document.getElementById('$id');if(el)el.remove();return true;")
+                            .put("timeoutMs", 5000),
+                        6000,
+                    )
+                    result
+                }
+            }
+            "page_type" -> {
+                val id = "__bh_agent_self_test_type"
+                val setup = page(
+                    "evalJS",
+                    JSONObject().put(
+                        "code",
+                        "var el=document.getElementById('$id');" +
+                            "if(!el){el=document.createElement('input');el.id='$id';el.style.position='fixed';el.style.left='-9999px';document.documentElement.appendChild(el);}" +
+                            "return true;",
+                    ).put("timeoutMs", 5000),
+                    6000,
+                )
+                if (!setup.ok) setup else {
+                    val result = execute(name, JSONObject().put("selector", "#$id").put("text", "ok-$stamp"))
+                    page(
+                        "evalJS",
+                        JSONObject().put("code", "var el=document.getElementById('$id');if(el)el.remove();return true;")
+                            .put("timeoutMs", 5000),
+                        6000,
+                    )
+                    result
+                }
+            }
+            "dom_highlight_element" -> execute(name, JSONObject().put("selector", "body").put("durationMs", 0))
+            "dom_inject_css" -> execute(name, JSONObject().put("css", "/* bh agent self-test $stamp */"))
+            "network_wait_request", "network_wait_response" ->
+                execute(name, JSONObject().put("urlContains", "__bh_agent_self_test__").put("timeoutMs", 500))
+            "mock_list", "replace_list", "agent_history_list", "agent_memory_list" -> execute(name, JSONObject())
+            "mock_add_rule" -> {
+                // Append, then restore the prior mock set so the self-test leaves no rule behind.
+                val before = ProxyProbe.mockListJson()
+                val result = execute(
+                    name,
+                    JSONObject().put("pattern", "__bh_agent_self_test__/$stamp").put("status", 200).put("body", "ok"),
+                )
+                ProxyProbe.setMockRules(JSONObject().put("rules", before))
+                result
+            }
+            "replace_add_rule" -> {
+                // Snapshot, exercise the append, then restore the prior replace state.
+                val before = ProxyProbe.replaceListJson()
+                val result = execute(name, JSONObject().put("from", "__bh_agent_self_test__$stamp").put("to", "ok"))
+                val rules = ArrayList<Pair<String, String>>()
+                val arr = before.optJSONArray("rules")
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        rules.add(o.optString("from", "") to o.optString("to", ""))
+                    }
+                }
+                ProxyProbe.setReplaceRules(before.optBoolean("enabled", false), before.optString("scope", "both"), rules)
+                result
+            }
+            "agent_history_open" -> {
+                val bridge = panelBridge
+                if (bridge == null) {
+                    ok("OK: agent_history_open is callable; panel bridge unavailable in self-test")
+                } else {
+                    val id = runOnMainResult { bridge.listChats() }.optJSONObject(0)?.optString("id", "").orEmpty()
+                    if (id.isEmpty()) ok("OK: agent_history_open is callable; no saved chat to open")
+                    else execute(name, JSONObject().put("id", id))
+                }
+            }
+            "agent_history_rename" -> {
+                val bridge = panelBridge
+                if (bridge == null) {
+                    ok("OK: agent_history_rename is callable; panel bridge unavailable in self-test")
+                } else {
+                    val first = runOnMainResult { bridge.listChats() }.optJSONObject(0)
+                    val id = first?.optString("id", "").orEmpty()
+                    if (id.isEmpty()) {
+                        ok("OK: agent_history_rename is callable; no saved chat to rename")
+                    } else {
+                        // Restore the original title so the test never relabels a real chat.
+                        val originalTitle = first.optString("title", "")
+                        val result = execute(name, JSONObject().put("id", id).put("title", "自检-$stamp"))
+                        execute(name, JSONObject().put("id", id).put("title", originalTitle))
+                        result
+                    }
+                }
+            }
+            "agent_memory_add" -> {
+                val bridge = panelBridge
+                if (bridge == null) {
+                    ok("OK: agent_memory_add is callable; panel bridge unavailable in self-test")
+                } else {
+                    val result = execute(name, JSONObject().put("value", "agent 自检记忆-$stamp"))
+                    // Remove the memory we just added (it is the last index).
+                    val lastIndex = runOnMainResult { bridge.listMemories() }.length() - 1
+                    if (lastIndex >= 0) execute("agent_memory_delete", JSONObject().put("index", lastIndex))
+                    result
+                }
+            }
+            "agent_memory_delete" -> {
+                val bridge = panelBridge
+                if (bridge == null) {
+                    ok("OK: agent_memory_delete is callable; panel bridge unavailable in self-test")
+                } else {
+                    // Add a throwaway memory, then delete it by index to exercise delete safely.
+                    runOnMainResult { bridge.addMemory("agent 自检待删-$stamp") }
+                    val lastIndex = runOnMainResult { bridge.listMemories() }.length() - 1
+                    if (lastIndex < 0) ok("OK: agent_memory_delete is callable; no memory to delete")
+                    else execute(name, JSONObject().put("index", lastIndex))
+                }
+            }
             else -> err("no self-test registered for $name")
         }
     }
@@ -824,6 +1191,89 @@ class AgentToolRegistry(
                 }
             }
         }
+    }
+
+    // Marshal a value-producing block onto the main thread. The history/memory tools read
+    // and mutate Compose [PanelState], which must only be touched on the main thread.
+    private suspend fun <T> runOnMainResult(block: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return block()
+        }
+        return suspendCancellableCoroutine { cont ->
+            main.post {
+                try {
+                    cont.resume(block())
+                } catch (t: Throwable) {
+                    cont.resumeWithException(t)
+                }
+            }
+        }
+    }
+
+    // browser store snapshot reads are volatile and safe off the main thread; only the
+    // selectTab dispatch (tab_switch) is marshalled onto the main thread for safety.
+    private fun tabListJson(): JSONArray {
+        val state = appContext.components.core.store.state
+        val selectedId = state.selectedTabId
+        val arr = JSONArray()
+        for (tab in state.tabs) {
+            arr.put(
+                JSONObject()
+                    .put("id", tab.id)
+                    .put("url", tab.content.url)
+                    .put("title", tab.content.title)
+                    .put("selected", tab.id == selectedId)
+                    .put("loading", tab.content.loading)
+                    .put("private", tab.content.private),
+            )
+        }
+        return arr
+    }
+
+    private fun currentTabJson(): JSONObject? {
+        val tab = appContext.components.core.store.state.selectedTab ?: return null
+        return JSONObject()
+            .put("id", tab.id)
+            .put("url", tab.content.url)
+            .put("title", tab.content.title)
+            .put("loading", tab.content.loading)
+            .put("private", tab.content.private)
+    }
+
+    private fun tabExists(id: String): Boolean =
+        appContext.components.core.store.state.tabs.any { it.id == id }
+
+    // network_wait_request / network_wait_response: poll the read-only NetFlowStore TEE
+    // snapshot (pump-safe) for a matching flow that appeared after the call started. With
+    // needResponse, only count rows whose response has been recorded (status > 0).
+    private fun waitForFlow(args: JSONObject, needResponse: Boolean): AgentToolResult {
+        val method = args.optString("method", "")
+        val urlContains = args.optString("urlContains", "")
+        val timeoutMs = args.optLong("timeoutMs", 15_000L).coerceIn(500L, 60_000L)
+        val sinceMs = System.currentTimeMillis()
+        val deadline = sinceMs + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val rows = NetFlowStore.listJson(method = method, urlContains = urlContains, sinceMs = sinceMs, limit = 20)
+            for (i in 0 until rows.length()) {
+                val row = rows.optJSONObject(i) ?: continue
+                if (needResponse && row.optInt("status", 0) <= 0) continue
+                return ok(
+                    JSONObject()
+                        .put("found", true)
+                        .put("waitedMs", System.currentTimeMillis() - sinceMs)
+                        .put("flow", row)
+                        .toString(),
+                )
+            }
+            Thread.sleep(200)
+        }
+        return ok(
+            JSONObject()
+                .put("found", false)
+                .put("waitedMs", System.currentTimeMillis() - sinceMs)
+                .put("timeout", true)
+                .toString(),
+        )
     }
 
     private fun containerRoot(): File {
@@ -1330,14 +1780,14 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("steps", arr(str("计划步骤")))
         prop("content", str("完整计划文本；存在时优先使用"))
     }),
-    tool("write_code_file", AgentPermissionTier.S1, "一键向 Agent 外部容器内的代码文件写入完整代码或追加代码。", schema {
+    tool("write_code_file", AgentPermissionTier.S2, "一键向 Agent 外部容器内的代码文件写入完整代码或追加代码。", schema {
         prop("path", str("容器内相对文件路径"))
         prop("code", str("要写入的代码文本"))
         prop("mode", str("replace 或 append，默认 replace"))
         required("path")
         required("code")
     }),
-    tool("delete_code_from_file", AgentPermissionTier.S1, "从 Agent 外部容器内的代码文件删除指定代码片段或行范围。", schema {
+    tool("delete_code_from_file", AgentPermissionTier.S2, "从 Agent 外部容器内的代码文件删除指定代码片段或行范围。", schema {
         prop("path", str("容器内相对文件路径"))
         prop("all", bool("是否清空整个文件"))
         prop("startLine", num("起始行，1-based，和 endLine 搭配"))
@@ -1377,7 +1827,7 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("path", str("容器内相对文件路径"))
         required("path")
     }),
-    tool("container_write", AgentPermissionTier.S1, "写入 Agent 本地容器目录内的小文本文件。", schema {
+    tool("container_write", AgentPermissionTier.S2, "写入 Agent 本地容器目录内的小文本文件。", schema {
         prop("path", str("容器内相对文件路径"))
         prop("content", str("文本内容"))
         required("path")
@@ -1434,9 +1884,9 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         }))
         required("rules")
     }),
-	    tool("intercept_set", AgentPermissionTier.S2, "配置请求/响应拦截。未传 reqAll/respAll 时默认同时拦截请求和响应，但遥测、心跳/噪音、cookie/auth 类低价值流量默认自动放行。", schema {
-	        prop("reqAll", bool("拦截全部请求；缺省=true"))
-	        prop("respAll", bool("拦截全部响应；缺省=true"))
+	    tool("intercept_set", AgentPermissionTier.S2, "配置请求/响应拦截。缺省不全局拦截（reqAll/respAll 默认 false），避免误暂停所有流量；要拦全部需显式传 reqAll/respAll=true，或在 rules 里加 action=intercept 规则。遥测、心跳/噪音、cookie/auth 类低价值流量默认自动放行。", schema {
+	        prop("reqAll", bool("拦截全部请求；缺省=false"))
+	        prop("respAll", bool("拦截全部响应；缺省=false"))
 	        prop("interceptTelemetry", bool("是否拦截遥测类低价值流量"))
 	        prop("interceptHeartbeat", bool("是否拦截心跳/keepalive 类低价值流量"))
 	        prop("interceptNoise", bool("是否拦截噪音类低价值流量"))
@@ -1567,6 +2017,88 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
             required("content")
         }))
         required("edits")
+    }),
+    tool("tab_list", AgentPermissionTier.S1, "列出当前所有浏览器标签页（id、url、title、是否选中、是否加载中、是否隐私）。", emptySchema()),
+    tool("tab_current", AgentPermissionTier.S1, "读取当前选中标签页的信息；没有选中页时返回空对象。", emptySchema()),
+    tool("tab_switch", AgentPermissionTier.S2, "切换到指定 id 的浏览器标签页。", schema {
+        prop("id", str("tab_list 返回的标签页 id"))
+        required("id")
+    }),
+    tool("page_click", AgentPermissionTier.S2, "点击当前页面匹配 selector 的元素（派发指针/鼠标事件并调用原生 click）。受限 UI 操作，不执行任意 JS。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        required("selector")
+    }),
+    tool("page_type", AgentPermissionTier.S2, "向当前页面 input/textarea/contentEditable 元素填入文本并派发 input/change 事件。受限 UI 操作，不执行任意 JS。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        prop("text", str("要填入的文本"))
+        prop("append", bool("是否在原值后追加，默认覆盖"))
+        required("selector")
+    }),
+    tool("page_wait_for_element", AgentPermissionTier.S1, "在当前页面轮询等待某 selector 出现（可要求可见），命中或超时返回 found:true/false。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        prop("timeoutMs", num("最长等待 ms，默认 5000，范围 100-30000"))
+        prop("visible", bool("是否要求元素可见（有尺寸）"))
+        required("selector")
+    }),
+    tool("console_list", AgentPermissionTier.S1, "读取注入钩子捕获的 page world console 输出（best-effort：仅注入后日志，CSP 可能阻断）。", schema {
+        prop("limit", num("最多返回条数，默认 50，上限 200"))
+        prop("level", str("可选：按 log/info/warn/error/debug 过滤"))
+    }),
+    tool("network_wait_request", AgentPermissionTier.S1, "阻塞等待匹配的请求被 MITM 抓到（轮询只读 TEE 快照），命中或超时返回。", schema {
+        prop("method", str("按 HTTP method 过滤"))
+        prop("urlContains", str("按 URL 子串过滤"))
+        prop("timeoutMs", num("最长等待 ms，默认 15000，范围 500-60000"))
+    }),
+    tool("network_wait_response", AgentPermissionTier.S1, "阻塞等待匹配请求的响应被抓到（status>0），命中或超时返回。", schema {
+        prop("method", str("按 HTTP method 过滤"))
+        prop("urlContains", str("按 URL 子串过滤"))
+        prop("timeoutMs", num("最长等待 ms，默认 15000，范围 500-60000"))
+    }),
+    tool("mock_add_rule", AgentPermissionTier.S2, "追加一条 Mock 规则（URL 子串命中后返回合成响应），不覆盖现有规则。", schema {
+        prop("pattern", str("URL 子串"))
+        prop("status", num("HTTP 状态码，默认 200"))
+        prop("body", str("响应体"))
+        prop("headers", JSONObject().put("type", "object").put("description", "响应头对象"))
+        required("pattern")
+    }),
+    tool("mock_list", AgentPermissionTier.S1, "列出当前所有 Mock 规则。", emptySchema()),
+    tool("replace_add_rule", AgentPermissionTier.S2, "追加一条请求/响应文本替换规则并启用替换，不覆盖现有规则。", schema {
+        prop("from", str("查找文本"))
+        prop("to", str("替换文本"))
+        prop("scope", str("req、resp 或 both；缺省沿用当前 scope"))
+        required("from")
+    }),
+    tool("replace_list", AgentPermissionTier.S1, "读取当前替换规则、启用状态和 scope。", emptySchema()),
+    tool("dom_highlight_element", AgentPermissionTier.S2, "在当前页面给匹配元素描临时彩色边框并滚动到可见，durationMs 后还原。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        prop("color", str("边框颜色，默认 #ff3b30"))
+        prop("durationMs", num("高亮时长 ms，默认 2000，上限 20000，0=不还原"))
+        prop("all", bool("是否高亮所有匹配（上限 50），默认只第一个"))
+        required("selector")
+    }),
+    tool("dom_inject_css", AgentPermissionTier.S2, "向当前页面追加一段 <style>，restyle 实时页面。", schema {
+        prop("css", str("CSS 文本"))
+        required("css")
+    }),
+    tool("agent_history_list", AgentPermissionTier.S1, "列出悬浮 Agent 的最近对话（id、标题、是否已命名）。", emptySchema()),
+    tool("agent_history_open", AgentPermissionTier.S2, "切换悬浮 Agent 到指定 id 的历史对话。", schema {
+        prop("id", str("agent_history_list 返回的对话 id"))
+        required("id")
+    }),
+    tool("agent_history_rename", AgentPermissionTier.S2, "重命名悬浮 Agent 的某个历史对话。", schema {
+        prop("id", str("对话 id"))
+        prop("title", str("新标题"))
+        required("id")
+        required("title")
+    }),
+    tool("agent_memory_list", AgentPermissionTier.S1, "列出悬浮 Agent 已保存的长期记忆条目（带索引）。", emptySchema()),
+    tool("agent_memory_add", AgentPermissionTier.S2, "向悬浮 Agent 的长期记忆追加一条。", schema {
+        prop("value", str("记忆内容"))
+        required("value")
+    }),
+    tool("agent_memory_delete", AgentPermissionTier.S2, "按索引删除悬浮 Agent 的一条长期记忆。", schema {
+        prop("index", num("agent_memory_list 返回的索引"))
+        required("index")
     }),
 )
 
