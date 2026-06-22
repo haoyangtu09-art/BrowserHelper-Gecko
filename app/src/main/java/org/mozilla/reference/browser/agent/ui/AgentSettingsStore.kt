@@ -123,7 +123,7 @@ class AgentSettingsStore(context: Context) {
             .putString("perm_tier", state.permTier.name)
             .putBoolean("auto_approve_all", state.autoApproveAll)
             .putString("memories", JSONArray().also { arr -> state.memories.forEach { arr.put(it) } }.toString())
-            .putString("recent_chats", chatIndexJson(state).optJSONArray("chats").toString())
+            .putString("recent_chats", (chatIndexJson(state).optJSONArray("chats") ?: JSONArray()).toString())
         if (blocking) editor.commit() else editor.apply()
     }
 
