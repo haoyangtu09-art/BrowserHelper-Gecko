@@ -583,6 +583,7 @@ abstract class BaseBrowserFragment :
         return handlePromptActivityResult(requestCode, resultCode, data, "ActivityResultHandler")
     }
 
+    @Suppress("DEPRECATION")
     @Deprecated("AndroidX Fragment still delivers deprecated startActivityForResult results here.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (!handlePromptActivityResult(requestCode, resultCode, data, "Fragment")) {
