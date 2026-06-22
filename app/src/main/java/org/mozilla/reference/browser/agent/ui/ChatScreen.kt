@@ -132,7 +132,7 @@ fun ChatScreen(
                 BasicText(
                     "此聊天不会被保存",
                     style = AgentText.Label.copy(textAlign = TextAlign.Center),
-                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 60.dp),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 84.dp),
                 )
             }
             ChatTopBar(
@@ -141,7 +141,7 @@ fun ChatScreen(
                 onOpenModels = onOpenModels,
                 menuOpen = showMenu,
                 onToggleMenu = { showMenu = it },
-                modifier = Modifier.align(Alignment.TopStart),
+                modifier = Modifier.align(Alignment.TopStart).padding(top = 22.dp),
             )
             // Tap anywhere over the conversation to dismiss the overflow menu, then draw
             // the menu above that dismiss layer.
@@ -330,15 +330,17 @@ private fun MessageList(state: PanelState) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         // Clear the floating top bar so the first message isn't hidden beneath it.
-        Spacer(Modifier.height(40.dp))
+        Spacer(Modifier.height(64.dp))
         state.messages.forEach { msg ->
             if (msg.fromUser) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    val bubbleShape = RoundedCornerShape(18.dp)
                     Box(
                         modifier = Modifier
                             .widthIn(max = 240.dp)
-                            .clip(RoundedCornerShape(18.dp))
+                            .clip(bubbleShape)
                             .background(AgentColors.UserBubble)
+                            .border(1.dp, AgentColors.HairlineFaint, bubbleShape)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) { BasicText(msg.text, style = AgentText.Body) }
                 }

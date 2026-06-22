@@ -3,7 +3,7 @@
 > 用途：新对话时只读这一个文件 + `CLAUDE.md`，就能立刻进入「原生悬浮 Agent 后端 + UI」工作状态。
 > 本文件覆盖 `org.mozilla.reference.browser.agent` 原生悬浮窗、内置后端、权限层、工具注册表和高级自检页。
 > 抓包代理 / DevTools 扩展那条线看 `CLAUDE.md`，两者基本独立。
-> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强（未提交）。改 Agent 后请同步更新本文件。
+> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截主开关防误拦、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动工具（未提交）。改 Agent 后请同步更新本文件。
 
 ---
 
@@ -53,13 +53,14 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 容器批量/网页资源：`batch_edit_files`、`container_serve_url`。
 - 浏览器进程请求：`browser_request`。
 - 代理与网络规则：`proxy_start`、`proxy_stop`、`throttle_set`、`replace_set`、`mock_set`、`intercept_set`、`intercept_pending`、`intercept_resolve`、`resp_intercept_resolve`。
-- 受限页面写入：`page_set_text`、`page_set_html`、`page_set_attr`。
+- 受限页面操作：`page_set_text`、`page_set_html`、`page_set_attr`、`page_scroll`。其中 `page_scroll` 可滑动 window 或指定滚动容器，S2/S3 可见。
 
 ### 抓包/拦截工具升级
 - `network_list` 默认只返回最近 10 条，支持 `method`、`urlContains`、`sinceSeconds`、`limit`；摘要新增六位 `code`、旧 `flowId`、请求/响应大小、请求/响应 body 字节数、`latencyMs`。
 - `network_get {id,part}` 接受六位 `code` 或旧 `flowId`；`part` 可取 `summary/requestHeaders/requestBody/responseHeaders/responseBody/all`，凭证头继续脱敏。
 - `intercept_set` 未传 `reqAll/respAll` 时默认同时拦截请求和响应；遥测、心跳/噪音、cookie/auth 默认自动放行，可用 `interceptTelemetry/interceptHeartbeat/interceptNoise/interceptCookie` 显式纳入拦截。
 - `intercept_pending` 会展示 `code`；`intercept_resolve`、`resp_intercept_resolve`、`cookie_reveal` 都接受六位 `code`，内部再映射回真实 flowId。
+- 原生 `ProxyProbe` 新增 `interceptEnabled` 主闸；DevTools 面板主开关关闭时会下发 `enabled:false`，历史 `action=intercept` 规则只保存展示、不再暂停请求，冷启动也不会误拦。
 
 ### S3 工具
 - Page-origin 请求：`page_fetch`，在当前网页 page world 执行 `fetch`，支持 `requiredPageUrlContains` 校验来源页。
@@ -91,6 +92,9 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 输入栏加号/发送按钮改为垂直居中，输入框最小高度收紧，解决按钮偏下。
 - 加号菜单的相机/图片/文件/插件行已换成左侧厚图标按钮；相机、图片、文件接 `AgentAttachmentActivity` 系统选择器，插件入口提示去 DevTools「拓展」。
 - 悬浮窗顶部蓝线/收起按钮改为透明 overlay，去掉原先保留的白色 chrome 空白条，顶部上下文能完整显示。
+- 展开后的 Agent 悬浮窗整体下移到屏高约 15% 处并按面板高度夹紧；聊天顶部按钮下移避开透明拖拽条。
+- 用户消息气泡改为更明显的灰底 `#E7E8EA` + 细边，避免和面板底色混在一起。
+- 抽屉和记忆页会在打开/点击前保存当前会话快照；`SavedChat.title/titled` 改为 Compose state，记忆页新增「对话记忆」可点击恢复对应对话。
 - 拓展面板卡片当前仍是三列紧凑正方形，HTTP Agent 版本 `0.6`；用户后续要求“一行 5-6 个、更小卡片、插件名最大+版本在下”尚未在本批完成。
 
 ### 验证状态
@@ -337,6 +341,11 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 > 完整 diff 用 `git show <SHA>`；未提交批次用 `git diff`。
 
 ### 当前未提交批次（2026-06-22）
+- **页面滑动工具**：新增 `page_scroll`，最低权限 S2，S2/S3 可见；走 PageChannel `scrollPage`，支持 `direction`、`amount/pixels`、`selector`、`behavior`，不执行任意 JS。
+- **不开拦截却被拦**：`ProxyProbe` 新增 `interceptEnabled`，冷启动不自动启用持久化拦截配置；DevTools `pushInterceptRulesToNative()` 会随主开关下发 `enabled`，主开关关时历史规则不再暂停请求，并自动放行已暂停队列。
+- **Agent 顶部遮挡**：展开窗口目标 Y 从屏高 12% 下移到约 15%，且按面板高度夹紧；聊天顶部浮动按钮下移，避开透明拖拽条。
+- **对话记忆恢复**：打开抽屉/记忆页前会 `saveCurrentChat()`；`SavedChat.title/titled` 改为 Compose state；记忆页顶部新增「对话记忆」列表，点击直接 `loadChat()` 回到对应会话。
+- **用户消息气泡**：用户消息灰底加深并增加细边，恢复清晰的灰色气泡包裹。
 - **模型回复前 `nullnull...`**：`OpenAiBackend` / `AnthropicBackend` 新增 `JSONObject.optStringValue()`，所有 content、stream delta、tool call id/name/arguments、模型 id 都过滤 JSON null。
 - **工具循环上限**：`AgentEngine` 新增 `TOOL_LOOP_LIMIT = 250`，替换原先 6 次循环上限。
 - **审批卡压缩 + 自动同意 UI**：`ApprovalSheet` 预览从 360 字降到 150 字，padding 收紧；设置页新增「执行 / 自动同意所有指令」开关，持久化 `auto_approve_all`，默认关闭。
@@ -438,7 +447,7 @@ method+host、同一条拦截 flow 或同一段 JS；换资源会重新确认。
 | 级 | 含义 | 工具例子 |
 |---|---|---|
 | **S1** | 浏览器层只读 + Agent 本地容器读写 + 计划/容器代码文件工具；每次确认 | `create_plan/update_plan`、`write_code_file/delete_code_from_file`、`page_index/page_search/page_query`、`network_list/network_get`、`container_*`、`web_search` |
-| **S2** | S1 + 写当前页面 DOM + 网络改写/拦截/Mock/弱网 + 浏览器进程请求 + 批量写容器；每次确认 | `page_set_text/page_set_html/page_set_attr`、`proxy_*`、`intercept_*`、`replace_set/mock_set/throttle_set`、`batch_edit_files`、`browser_request`、`container_serve_url` |
+| **S2** | S1 + 写当前页面 DOM/滑动页面界面 + 网络改写/拦截/Mock/弱网 + 浏览器进程请求 + 批量写容器；每次确认 | `page_set_text/page_set_html/page_set_attr/page_scroll`、`proxy_*`、`intercept_*`、`replace_set/mock_set/throttle_set`、`batch_edit_files`、`browser_request`、`container_serve_url` |
 | **S3** | S2 + page-origin fetch + 任意 page world JS + 凭证明文 + 浏览器私有目录读写；每次确认 | `page_fetch`、`page_exec`、`cookie_reveal`、`private_file_*`、`private_batch_edit_files` |
 
 S1 的 `container_*` 路径限制在外部 app-files `agent_container`，优先使用
@@ -458,6 +467,7 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 - `container_serve_url {path}`（S2）— 为容器文件生成本地 `http://127.0.0.1:<port>/agent-container/...` URL。
 - `page_fetch {url,method,headers,body,credentials,mode,requiredPageUrlContains,timeoutMs}`（S3）— 在当前网页 page world 执行 `fetch`，可用 `requiredPageUrlContains` 校验来源页面。
 - `private_batch_edit_files {edits:[{path,content}]}`（S3）— 一次写多个浏览器私有目录文本文件。
+- `page_scroll {direction,amount,pixels,selector,behavior}`（S2）— 滑动当前网页 window 或第一个匹配 `selector` 的滚动容器；`direction=down/up/left/right/top/bottom`，默认 `down`，默认 600px，最大 5000px；受限 UI 操作，不暴露任意 JS。
 
 ### 12.0.2 抓包/拦截工具参数（内置 Agent）
 

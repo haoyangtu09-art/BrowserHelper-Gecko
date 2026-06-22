@@ -157,6 +157,13 @@ class AgentToolRegistry(
                     "当前页面 selector=${args.optString("selector", "")}",
                     "允许，并且本次会话不再询问这个页面选择器",
                 )
+            "page_scroll" ->
+                req(
+                    "允许 Agent 滑动当前网页界面吗？",
+                    "page-scroll:${args.optString("selector", "")}:${args.optString("direction", "down")}",
+                    "当前页面 selector=${args.optString("selector", "window")}, direction=${args.optString("direction", "down")}",
+                    "允许，并且本次会话不再询问这个滑动范围",
+                )
             "page_exec" ->
                 req(
                     "允许 Agent 在当前网页执行这段 JavaScript 吗？",
@@ -400,6 +407,15 @@ class AgentToolRegistry(
                     .put("value", args.optString("value", ""))
                     .put("all", args.optBoolean("all", false)),
             )
+            "page_scroll" -> page(
+                "scrollPage",
+                JSONObject()
+                    .put("direction", args.optString("direction", "down"))
+                    .put("amount", args.optInt("amount", args.optInt("pixels", 600)))
+                    .put("selector", args.optString("selector", ""))
+                    .put("behavior", args.optString("behavior", "auto")),
+                5_000,
+            )
             "page_fetch" -> page(
                 "pageFetch",
                 args,
@@ -576,6 +592,13 @@ class AgentToolRegistry(
                     result
                 }
             }
+            "page_scroll" -> execute(
+                name,
+                JSONObject()
+                    .put("direction", "down")
+                    .put("amount", 1)
+                    .put("behavior", "auto"),
+            )
             "page_fetch" -> {
                 writeFile(containerRoot(), "$tempDir/page_fetch.txt", "page-fetch-$stamp")
                 val url = AgentContainerServer.urlFor(containerRoot(), "$tempDir/page_fetch.txt")
@@ -1440,6 +1463,13 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         required("selector")
         required("name")
         required("value")
+    }),
+    tool("page_scroll", AgentPermissionTier.S2, "滑动当前网页窗口或指定滚动容器。受限 UI 操作，不执行任意 JS。", schema {
+        prop("direction", str("down/up/left/right/top/bottom，默认 down"))
+        prop("amount", num("滑动像素，默认 600，最大 5000"))
+        prop("pixels", num("amount 的兼容别名"))
+        prop("selector", str("可选 CSS selector；不传则滑动 window，传入则滑动第一个匹配元素"))
+        prop("behavior", str("auto、instant 或 smooth，默认 auto"))
     }),
     tool("page_fetch", AgentPermissionTier.S3, "从当前网页的 page world 发起 fetch 请求，可指定页面 URL 子串校验来源。", schema {
         prop("url", str("目标 URL"))

@@ -51,7 +51,7 @@ function pushReplaceRulesToNative() {
 // 面板 → 原生：下发拦截配置。语义＝「拦截全部，除遥测/噪音/cookie 包」：主开关开 +
 // 作用域含请求/响应时，原生暂停所有有界请求/响应（低价值上报包除外）。显式规则做覆盖：
 // action=pass 白名单放行、action=intercept 强制拦截、interceptResp 拦该流响应。规则全量
-// 下发（pass 也要发，做白名单）。主开关关 → reqAll/respAll 均 false，仅显式 intercept 规则生效。
+// 下发（pass 也要发，做白名单）。主开关关 → 原生 enabled=false，规则只保存展示，不实际暂停请求。
 function pushInterceptRulesToNative() {
   try {
     if (!port) return;
@@ -75,6 +75,7 @@ function pushInterceptRulesToNative() {
     }
     port.postMessage({
       action: 'setInterceptRules',
+      enabled: master,
       reqAll: master && scopeReq,
       respAll: master && scopeResp,
       // 三类低价值包的「一并拦截」开关；仅在主开关开启时生效。

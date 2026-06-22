@@ -88,7 +88,10 @@ fun AgentPanelHost(state: PanelState, modifier: Modifier = Modifier) {
     Box(modifier.fillMaxSize()) {
         ChatScreen(
             state = state,
-            onOpenDrawer = { state.nav = PanelNav.Drawer },
+            onOpenDrawer = {
+                state.saveCurrentChat()
+                state.nav = PanelNav.Drawer
+            },
             onOpenModels = { state.nav = PanelNav.ModelSelector },
         )
         AnimatedVisibility(
@@ -334,12 +337,16 @@ private fun DrawerSheet(state: PanelState, onClose: () -> Unit, onSettings: () -
             Spacer(Modifier.height(16.dp))
             BasicText("最近", style = AgentText.Label)
             Spacer(Modifier.height(6.dp))
-            // Created conversations live here; empty this round → only the "最近" label shows.
-            state.recentChats.forEach { title ->
+            // Created conversations live here; tapping one reopens it. Empty → only "最近" shows.
+            state.chats.forEach { chat ->
                 Box(
-                    Modifier.fillMaxWidth().clickable { }
+                    Modifier.fillMaxWidth()
+                        .clickable {
+                            state.loadChat(chat.id)
+                            onClose()
+                        }
                         .padding(horizontal = 4.dp, vertical = 12.dp),
-                ) { BasicText(title, style = AgentText.Body) }
+                ) { BasicText(chat.title, style = AgentText.Body) }
             }
             Spacer(Modifier.weight(1f))
             // Manual demo triggers for the secondary-confirmation sheet and plan-mode card.
@@ -382,7 +389,10 @@ private fun SettingsScreen(state: PanelState, onBack: () -> Unit) {
                 FaceMouthIcon(color = AgentColors.TextPrimary, size = 20.dp)
             }
             GroupDivider()
-            EntryRow("记忆", onClick = { state.nav = PanelNav.Memory }) {
+            EntryRow("记忆", onClick = {
+                state.saveCurrentChat()
+                state.nav = PanelNav.Memory
+            }) {
                 OpenBookIcon(color = AgentColors.TextPrimary, size = 20.dp)
             }
             GroupDivider()
@@ -512,6 +522,23 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().background(AgentColors.Surface).padding(16.dp).verticalScroll(rememberScrollState())) {
         ScreenHeader("记忆", onBack)
         Spacer(Modifier.height(16.dp))
+        if (state.chats.isNotEmpty()) {
+            BasicText("对话记忆", style = AgentText.Label)
+            Spacer(Modifier.height(8.dp))
+            GroupCard {
+                state.chats.forEachIndexed { i, chat ->
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .clickable { state.loadChat(chat.id) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                    ) {
+                        BasicText(chat.title, style = AgentText.Body)
+                    }
+                    if (i < state.chats.lastIndex) GroupDivider()
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
         GroupCard {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),

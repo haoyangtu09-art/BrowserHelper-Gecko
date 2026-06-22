@@ -310,6 +310,64 @@ function bhHandleAgentCmd(msg) {
         }
     }
 
+    // ── page_scroll (S2, constrained UI action) ─────────────────────────────
+    // Scrolls the page or one matched scroll container. This is a bounded UI action,
+    // not arbitrary JS; full script execution remains S3-only evalJS.
+    if (cmd === 'scrollPage') {
+        try {
+            var direction = String(args.direction || 'down').toLowerCase();
+            var amount = Math.max(1, Math.min(Number(args.amount || args.pixels || 600), 5000));
+            var behavior = String(args.behavior || 'auto').toLowerCase();
+            if (behavior !== 'smooth' && behavior !== 'instant') behavior = 'auto';
+            var selector = String(args.selector || '');
+            var target = selector ? document.querySelector(selector) : window;
+            if (!target) return Promise.resolve({ error: 'no elements matched selector', selector: selector });
+
+            var isWindow = target === window;
+            var beforeX = isWindow ? window.scrollX : target.scrollLeft;
+            var beforeY = isWindow ? window.scrollY : target.scrollTop;
+            var dx = 0;
+            var dy = 0;
+            if (direction === 'up') dy = -amount;
+            else if (direction === 'left') dx = -amount;
+            else if (direction === 'right') dx = amount;
+            else if (direction === 'top') dy = -100000000;
+            else if (direction === 'bottom') dy = 100000000;
+            else dy = amount;
+
+            if (isWindow) {
+                window.scrollBy({ left: dx, top: dy, behavior: behavior });
+            } else {
+                target.scrollBy({ left: dx, top: dy, behavior: behavior });
+            }
+
+            return new Promise(function (resolve) {
+                setTimeout(function () {
+                    var afterX = isWindow ? window.scrollX : target.scrollLeft;
+                    var afterY = isWindow ? window.scrollY : target.scrollTop;
+                    resolve({
+                        ok: true,
+                        selector: selector || null,
+                        direction: direction,
+                        amount: amount,
+                        beforeX: beforeX,
+                        beforeY: beforeY,
+                        afterX: afterX,
+                        afterY: afterY,
+                        movedX: afterX - beforeX,
+                        movedY: afterY - beforeY,
+                        viewportHeight: window.innerHeight,
+                        viewportWidth: window.innerWidth,
+                        pageHeight: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
+                        pageWidth: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
+                    });
+                }, behavior === 'smooth' ? 220 : 40);
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
     // ── page-origin fetch (S3) ─────────────────────────────────────────────
     // Runs fetch in page world, so the request originates from the current page
     // instead of the native app process.

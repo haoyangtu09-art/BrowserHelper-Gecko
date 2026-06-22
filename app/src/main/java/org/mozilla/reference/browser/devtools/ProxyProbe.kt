@@ -92,6 +92,7 @@ object ProxyProbe {
     // the panel EXCEPT low-value telemetry/noise/cookie traffic (mirrors the panel's
     // display filters). Explicit rules override: action=pass whitelists, action=
     // intercept forces, interceptResp pauses that flow's response.
+    @Volatile private var interceptEnabled = false
     @Volatile private var reqInterceptAll = false
     @Volatile private var respInterceptAll = false
     // Per-class intercept toggles: when on, the matching low-value class is NO LONGER
@@ -254,15 +255,20 @@ object ProxyProbe {
 
     /** Panel → native: install intercept config (intercept-all gates + override rules). */
     @Synchronized
-	    fun setInterceptRules(data: JSONObject) {
-	        reqInterceptAll = data.optBoolean("reqAll", false)
-	        respInterceptAll = data.optBoolean("respAll", false)
-	        interceptTelemetry = data.optBoolean("interceptTelemetry", false)
-	        interceptNoise = data.optBoolean("interceptNoise", data.optBoolean("interceptHeartbeat", false))
-	        interceptCookie = data.optBoolean("interceptCookie", false)
+    fun setInterceptRules(data: JSONObject) {
+        reqInterceptAll = data.optBoolean("reqAll", false)
+        respInterceptAll = data.optBoolean("respAll", false)
+        interceptTelemetry = data.optBoolean("interceptTelemetry", false)
+        interceptNoise = data.optBoolean("interceptNoise", data.optBoolean("interceptHeartbeat", false))
+        interceptCookie = data.optBoolean("interceptCookie", false)
         val rulesJson = data.optJSONArray("rules")
         interceptRulesList = parseInterceptRules(rulesJson)
-        saveInterceptConfig(reqInterceptAll, respInterceptAll, rulesJson)
+        interceptEnabled = data.optBoolean(
+            "enabled",
+            reqInterceptAll || respInterceptAll || interceptRulesList.any { it.action == "intercept" || it.interceptResp },
+        )
+        if (!interceptEnabled) releaseAllIntercepts(JSONObject().put("decision", "continue"))
+        saveInterceptConfig(interceptEnabled, reqInterceptAll, respInterceptAll, rulesJson)
     }
 
     private fun parseInterceptRules(rulesJson: org.json.JSONArray?): List<InterceptRule> {
@@ -285,14 +291,14 @@ object ProxyProbe {
         return list
     }
 
-    private fun saveInterceptConfig(reqAll: Boolean, respAll: Boolean, rulesJson: org.json.JSONArray?) {
+    private fun saveInterceptConfig(enabled: Boolean, reqAll: Boolean, respAll: Boolean, rulesJson: org.json.JSONArray?) {
         val ctx = appContext ?: return
         try {
-	            val obj = JSONObject().put("reqAll", reqAll).put("respAll", respAll)
-	                .put("interceptTelemetry", interceptTelemetry)
-	                .put("interceptHeartbeat", interceptNoise)
-	                .put("interceptNoise", interceptNoise)
-	                .put("interceptCookie", interceptCookie)
+            val obj = JSONObject().put("enabled", enabled).put("reqAll", reqAll).put("respAll", respAll)
+                .put("interceptTelemetry", interceptTelemetry)
+                .put("interceptHeartbeat", interceptNoise)
+                .put("interceptNoise", interceptNoise)
+                .put("interceptCookie", interceptCookie)
                 .put("rules", rulesJson ?: org.json.JSONArray())
             ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .edit().putString(INTERCEPT_PREFS_KEY, obj.toString()).apply()
@@ -306,11 +312,16 @@ object ProxyProbe {
             val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .getString(INTERCEPT_PREFS_KEY, null) ?: return
             val obj = JSONObject(s)
-	            reqInterceptAll = obj.optBoolean("reqAll", false)
-	            respInterceptAll = obj.optBoolean("respAll", false)
-	            interceptTelemetry = obj.optBoolean("interceptTelemetry", false)
-	            interceptNoise = obj.optBoolean("interceptNoise", obj.optBoolean("interceptHeartbeat", false))
-	            interceptCookie = obj.optBoolean("interceptCookie", false)
+            // 冷启动不让持久化的拦截配置立即生效。否则上次开过全局拦截或标记过
+            // action=intercept 规则时，面板尚未同步主开关状态就会暂停请求，用户感知为
+            // 「没开拦截却被拦了，得开关一次才好」。面板或 Agent 后续显式下发 enabled=true
+            // 时才重新点亮这些规则。
+            interceptEnabled = false
+            reqInterceptAll = false
+            respInterceptAll = false
+            interceptTelemetry = false
+            interceptNoise = false
+            interceptCookie = false
             interceptRulesList = parseInterceptRules(obj.optJSONArray("rules"))
         } catch (_: Throwable) {}
     }
@@ -545,6 +556,7 @@ object ProxyProbe {
     // Request paused iff: explicit pass rule → never; explicit intercept rule → always;
     // else (intercept-all on) everything bounded except low-value telemetry/noise/cookie.
     private fun shouldInterceptReq(host: String, target: String, pathOnly: String, method: String, hasBody: Boolean, reqBodyLen: Long): Boolean {
+        if (!interceptEnabled) return false
         val rule = interceptRulesList.firstOrNull { ruleMatches(it, host, pathOnly, method, hasBody) }
         if (rule != null) {
             if (rule.action == "pass") return false
@@ -558,6 +570,7 @@ object ProxyProbe {
     // rule governs fully (explicit → no blanket); else (intercept-all-resp on) every
     // bounded response except low-value telemetry/noise/cookie.
     private fun shouldInterceptResp(info: FlowInfo): Boolean {
+        if (!interceptEnabled) return false
         val pathOnly = info.target.substringBefore('?').substringBefore('#')
         val rule = interceptRulesList.firstOrNull { ruleMatches(it, info.host, pathOnly, info.method, info.hasBody) }
         if (rule != null) {
@@ -596,6 +609,11 @@ object ProxyProbe {
         reqFut?.complete(decision)
         respFut?.complete(decision)
         return true
+    }
+
+    private fun releaseAllIntercepts(decision: JSONObject) {
+        val ids = (pendingIntercepts.keys + pendingRespIntercepts.keys).toSet()
+        for (id in ids) releaseIntercept(id, decision)
     }
 
     /** Snapshot of every currently paused flow id (real flowIds), for "release all". */

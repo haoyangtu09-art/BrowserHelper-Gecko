@@ -144,6 +144,7 @@ class AgentEngine(context: Context) {
                 )
             } finally {
                 state.generating = false
+                state.saveCurrentChat()
             }
         }
     }
@@ -236,6 +237,7 @@ class AgentEngine(context: Context) {
             "intercept_pending" -> "已读取待处理拦截"
             "intercept_resolve", "resp_intercept_resolve" -> "拦截处理完成"
             "page_set_text", "page_set_html", "page_set_attr" -> "页面内容已更新"
+            "page_scroll" -> "页面已滑动"
             "page_exec" -> "页面脚本已执行，完整结果已返回给模型"
             "cookie_reveal" -> "凭据已读取，完整结果已返回给模型"
             "private_file_list" -> "列出私有目录"
@@ -623,7 +625,7 @@ class AgentEngine(context: Context) {
             # 当前权限层（实时权威，以本字段为准，忽略历史对话里对权限层的任何旧描述）
             当前权限层 = ${state.permTier.name}（${state.permTier.describe()}）
             - S1：只读浏览器层信息、读取页面源码摘要/DOM 摘要、查看抓包、读写 Agent 本地容器文件、创建/更新计划、写入/删除容器代码文件。
-            - S2：包含 S1，允许批量写 Agent 外部容器、生成容器文件 URL、从浏览器 App 进程发请求、受限写当前页面 DOM、开启/关闭代理、拦截/改请求响应、替换、Mock、弱网。
+            - S2：包含 S1，允许批量写 Agent 外部容器、生成容器文件 URL、从浏览器 App 进程发请求、受限写当前页面 DOM、滑动当前页面界面、开启/关闭代理、拦截/改请求响应、替换、Mock、弱网。
             - S3：包含 S2，允许从当前网页 page world 发起 fetch、执行任意 page world JavaScript、读取凭证明文、读写浏览器 App 私有目录文件。
             若用户要求的操作超出当前权限层，明确说明需要切换到哪一层，不要假装已经做了。
 

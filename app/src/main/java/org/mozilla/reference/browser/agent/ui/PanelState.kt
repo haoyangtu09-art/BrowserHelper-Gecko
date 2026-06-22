@@ -46,6 +46,22 @@ data class AgentAttachmentItem(
 )
 
 /**
+ * One saved conversation in the drawer. Holds both the display transcript ([messages]) and
+ * the model transcript ([convo]) so tapping a recent chat fully restores it (view + continue),
+ * not just its title. [titled] mirrors PanelState.titleGenerated for that chat.
+ */
+class SavedChat(
+    val id: String,
+    title: String,
+    titled: Boolean = false,
+    val messages: MutableList<ChatMsg> = mutableListOf(),
+    val convo: MutableList<AgentMessage> = mutableListOf(),
+) {
+    var title by mutableStateOf(title)
+    var titled by mutableStateOf(titled)
+}
+
+/**
  * UI state for the Agent panel. Conversation is in memory; provider settings, model
  * selection, permission tier, personalization, and memories are persisted by the host.
  */
@@ -67,8 +83,10 @@ class PanelState {
     var selectedModel by mutableStateOf<String?>(null)
     var modelsLoading by mutableStateOf(false)
 
-    // Recent conversations shown in the drawer; empty this round → only the "最近" label.
-    val recentChats = mutableStateListOf<String>()
+    // Recent conversations shown in the drawer. Each entry carries its full transcript so
+    // tapping it reopens that conversation. currentChatId links the live messages/convo to one.
+    val chats = mutableStateListOf<SavedChat>()
+    var currentChatId by mutableStateOf<String?>(null)
     var currentChatTitle by mutableStateOf<String?>(null)
 
     // "我的 Agent": personalization style + durable memory.
@@ -148,7 +166,8 @@ class PanelState {
         if (text.isEmpty()) return
         messages.add(ChatMsg(fromUser = true, text = text))
         convo.add(AgentMessage(Role.User, text))
-        ensureProvisionalTitle(text)
+        ensureCurrentChat(text)
+        saveCurrentChat()
         input = ""
         generating = true
         onTurn?.invoke()
@@ -161,6 +180,7 @@ class PanelState {
 
     fun newChat() {
         onStop?.invoke()
+        saveCurrentChat()
         messages.clear()
         convo.clear()
         approvalGrants.clear()
@@ -169,8 +189,52 @@ class PanelState {
         planMode = false
         planText = ""
         titleGenerated = false
+        currentChatId = null
         currentChatTitle = null
         attachments.clear()
+    }
+
+    /**
+     * Snapshot the live transcript into the current SavedChat so the drawer entry can be
+     * reopened later. No-op for temp chats or before the first message creates a chat.
+     */
+    fun saveCurrentChat() {
+        if (tempChat) return
+        val id = currentChatId ?: return
+        val chat = chats.firstOrNull { it.id == id } ?: return
+        chat.messages.clear()
+        chat.messages.addAll(messages)
+        chat.convo.clear()
+        chat.convo.addAll(convo)
+        currentChatTitle?.let { chat.title = it }
+        chat.titled = titleGenerated
+        persist()
+    }
+
+    /** Reopen a saved conversation from the drawer: persist the current one, then load it. */
+    fun loadChat(id: String) {
+        if (id == currentChatId) {
+            saveCurrentChat()
+            nav = PanelNav.Chat
+            return
+        }
+        onStop?.invoke()
+        saveCurrentChat()
+        val chat = chats.firstOrNull { it.id == id } ?: return
+        messages.clear()
+        messages.addAll(chat.messages)
+        convo.clear()
+        convo.addAll(chat.convo)
+        approvalGrants.clear()
+        currentChatId = chat.id
+        currentChatTitle = chat.title
+        titleGenerated = chat.titled
+        generating = false
+        input = ""
+        planMode = false
+        planText = ""
+        attachments.clear()
+        nav = PanelNav.Chat
     }
 
     /**
@@ -317,13 +381,15 @@ class PanelState {
         waiter?.complete(decision)
     }
 
-    private fun ensureProvisionalTitle(text: String) {
-        if (tempChat || currentChatTitle != null) return
+    private fun ensureCurrentChat(text: String) {
+        if (tempChat || currentChatId != null) return
         val title = localTitle(text)
         if (title.isBlank()) return
+        val chat = SavedChat(id = java.util.UUID.randomUUID().toString(), title = title)
+        chats.add(0, chat)
+        currentChatId = chat.id
         currentChatTitle = title
-        recentChats.add(0, title)
-        trimRecentChats()
+        trimChats()
         persist()
     }
 
@@ -331,23 +397,18 @@ class PanelState {
         if (tempChat) return
         val cleaned = title.trim().replace(Regex("\\s+"), " ").take(20)
         if (cleaned.isBlank()) return
-        val old = currentChatTitle
-        val oldIndex = if (old == null) -1 else recentChats.indexOf(old)
-        if (oldIndex >= 0) {
-            recentChats[oldIndex] = cleaned
-        } else if (!recentChats.contains(cleaned)) {
-            recentChats.add(0, cleaned)
-        }
         currentChatTitle = cleaned
-        trimRecentChats()
+        val id = currentChatId
+        val chat = if (id != null) chats.firstOrNull { it.id == id } else null
+        if (chat != null) {
+            chat.title = cleaned
+        }
+        trimChats()
         persist()
     }
 
-    private fun trimRecentChats() {
-        val seen = LinkedHashSet<String>()
-        val cleaned = recentChats.map { it.trim() }.filter { it.isNotBlank() && seen.add(it) }.take(20)
-        recentChats.clear()
-        recentChats.addAll(cleaned)
+    private fun trimChats() {
+        while (chats.size > 20) chats.removeAt(chats.size - 1)
     }
 
     private fun localTitle(text: String): String =

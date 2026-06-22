@@ -6,7 +6,11 @@ package org.mozilla.reference.browser.agent.ui
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
+import org.mozilla.reference.browser.agent.core.AgentMessage
 import org.mozilla.reference.browser.agent.core.AgentPermissionTier
+import org.mozilla.reference.browser.agent.core.ChatToolCall
+import org.mozilla.reference.browser.agent.core.Role
 
 private const val PREFS = "bh_agent_overlay"
 
@@ -35,14 +39,15 @@ class AgentSettingsStore(context: Context) {
         for (i in 0 until arr.length()) {
             arr.optString(i, "").takeIf { it.isNotBlank() }?.let { state.memories.add(it) }
         }
-        state.recentChats.clear()
+        state.chats.clear()
         val chats = try {
             JSONArray(sp.getString("recent_chats", "[]") ?: "[]")
         } catch (_: Throwable) {
             JSONArray()
         }
         for (i in 0 until chats.length()) {
-            chats.optString(i, "").takeIf { it.isNotBlank() }?.let { state.recentChats.add(it) }
+            val o = chats.optJSONObject(i) ?: continue
+            state.chats.add(chatFromJson(o))
         }
     }
 
@@ -61,8 +66,95 @@ class AgentSettingsStore(context: Context) {
             .putString("perm_tier", state.permTier.name)
             .putBoolean("auto_approve_all", state.autoApproveAll)
             .putString("memories", JSONArray().also { arr -> state.memories.forEach { arr.put(it) } }.toString())
-            .putString("recent_chats", JSONArray().also { arr -> state.recentChats.forEach { arr.put(it) } }.toString())
+            .putString("recent_chats", JSONArray().also { arr -> state.chats.forEach { arr.put(chatToJson(it)) } }.toString())
             .apply()
+    }
+
+    private fun chatToJson(chat: SavedChat): JSONObject =
+        JSONObject()
+            .put("id", chat.id)
+            .put("title", chat.title)
+            .put("titled", chat.titled)
+            .put("messages", JSONArray().also { arr -> chat.messages.forEach { arr.put(msgToJson(it)) } })
+            .put("convo", JSONArray().also { arr -> chat.convo.forEach { arr.put(convoToJson(it)) } })
+
+    private fun chatFromJson(o: JSONObject): SavedChat {
+        val chat = SavedChat(
+            id = o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+            title = o.optString("title", "新对话"),
+            titled = o.optBoolean("titled", false),
+        )
+        val msgs = o.optJSONArray("messages") ?: JSONArray()
+        for (i in 0 until msgs.length()) {
+            msgs.optJSONObject(i)?.let { chat.messages.add(msgFromJson(it)) }
+        }
+        val convo = o.optJSONArray("convo") ?: JSONArray()
+        for (i in 0 until convo.length()) {
+            convo.optJSONObject(i)?.let { chat.convo.add(convoFromJson(it)) }
+        }
+        return chat
+    }
+
+    private fun msgToJson(m: ChatMsg): JSONObject {
+        val o = JSONObject().put("u", m.fromUser).put("t", m.text)
+        m.tool?.let { card ->
+            o.put(
+                "tool",
+                JSONObject()
+                    .put("name", card.name)
+                    .put("status", card.status)
+                    .put("summary", card.summary)
+                    .put("diff", card.diff),
+            )
+        }
+        return o
+    }
+
+    private fun msgFromJson(o: JSONObject): ChatMsg {
+        val tool = o.optJSONObject("tool")?.let {
+            ToolCard(
+                name = it.optString("name"),
+                status = it.optString("status"),
+                summary = it.optString("summary"),
+                diff = it.optString("diff"),
+            )
+        }
+        return ChatMsg(fromUser = o.optBoolean("u", false), text = o.optString("t"), tool = tool)
+    }
+
+    private fun convoToJson(m: AgentMessage): JSONObject {
+        val o = JSONObject().put("role", m.role.wire).put("content", m.content)
+        m.toolCallId?.let { o.put("toolCallId", it) }
+        if (m.toolCalls.isNotEmpty()) {
+            o.put(
+                "toolCalls",
+                JSONArray().also { arr ->
+                    m.toolCalls.forEach {
+                        arr.put(
+                            JSONObject().put("id", it.id).put("name", it.name).put("arguments", it.arguments),
+                        )
+                    }
+                },
+            )
+        }
+        return o
+    }
+
+    private fun convoFromJson(o: JSONObject): AgentMessage {
+        val role = Role.values().firstOrNull { it.wire == o.optString("role") } ?: Role.User
+        val calls = ArrayList<ChatToolCall>()
+        o.optJSONArray("toolCalls")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val c = arr.optJSONObject(i) ?: continue
+                calls.add(ChatToolCall(c.optString("id"), c.optString("name"), c.optString("arguments")))
+            }
+        }
+        return AgentMessage(
+            role = role,
+            content = o.optString("content"),
+            toolCallId = o.optString("toolCallId").ifBlank { null },
+            toolCalls = calls,
+        )
     }
 
     private inline fun <reified T : Enum<T>> enumValue(raw: String?, fallback: T): T =

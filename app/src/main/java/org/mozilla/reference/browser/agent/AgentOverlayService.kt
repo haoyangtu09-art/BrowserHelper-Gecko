@@ -201,8 +201,10 @@ class AgentOverlayService : Service() {
             lp.flags = expandedFlags()
             // Open on the side the ball sits on, anchored near the top so it stays fully on screen.
             val panelW = ((PANEL_BASE_W_DP * panelScaleState.value + PANEL_PADDING_DP) * resources.displayMetrics.density).roundToInt()
+            val panelH = ((PANEL_BASE_H_DP * panelScaleState.value + PANEL_PADDING_DP) * resources.displayMetrics.density).roundToInt()
             lp.x = if (toRight) (screenW - panelW).coerceAtLeast(0) else 0
-            lp.y = (resources.displayMetrics.heightPixels * 0.12f).roundToInt()
+            val targetY = (resources.displayMetrics.heightPixels * 0.15f).roundToInt()
+            lp.y = targetY.coerceAtMost((resources.displayMetrics.heightPixels - panelH).coerceAtLeast(0))
             safeUpdate()
         } else {
             expandedState.value = false

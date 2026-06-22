@@ -31,7 +31,7 @@ object AgentColors {
     // than the heavier Hairline so it reads as a subtle inset stroke, not a hard rule.
     val HairlineFaint = Color(0x1F000000)
     val Control = Color(0xFFEAEAEA)
-    val UserBubble = Color(0xFFF2F2F2)
+    val UserBubble = Color(0xFFE7E8EA)
     val Accent = Color(0xFF4285F4)
     val Stop = Color(0xFF111111)
     // Tint behind the floating top-bar buttons' drop shadow.
