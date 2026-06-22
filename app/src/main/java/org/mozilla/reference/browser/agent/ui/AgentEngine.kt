@@ -57,7 +57,7 @@ class AgentEngine(context: Context) {
         turnJob?.cancel()
         val config = state.buildConfig()
         if (config == null) {
-            state.messages.add(ChatMsg(fromUser = false, text = "⚠️ 请先在设置里填写 API Key，并选择一个模型。"))
+            state.messages.add(ChatMsg(fromUser = false, text = "请先在设置里填写 API Key，并选择一个模型。"))
             state.saveCurrentChat()
             state.generating = false
             return
@@ -67,8 +67,7 @@ class AgentEngine(context: Context) {
         // per request so it always reflects the current permission tier / persona / memory.
         val convo = state.convo
         val backend = ChatBackend.of(config.format)
-        // Hoist the bridge so the tool loop can record each tool call against the currently
-        // active task (Visual Task Tracker → expanded card shows tool calls per task).
+        // The bridge backs the chat-history / memory / task-tracker tools the registry calls.
         val bridge = panelBridge(state)
         val registry = AgentToolRegistry(
             appContext,
@@ -155,31 +154,15 @@ class AgentEngine(context: Context) {
                             ChatMsg(fromUser = false, text = "", tool = runningCard(call)),
                         )
                         state.saveCurrentChat()
-                        // Snapshot the currently active task BEFORE the call: agent_tasks_*
-                        // tools themselves may change currentTaskId mid-call, but the call
-                        // record should be attributed to whoever was active when it started.
-                        val taskAtStart = state.tracker.currentTaskId
-                        val startMs = System.currentTimeMillis()
                         val result = registry.call(state.permTier, call.name, call.arguments)
                         // A long-running tool call may outlive a stop / chat switch; bail before
                         // writing its card or result into the chat the user moved to.
                         if (!alive()) return@launch
-                        val durationMs = System.currentTimeMillis() - startMs
                         state.messages[cardIndex] =
                             ChatMsg(fromUser = false, text = "", tool = buildToolCard(call, result))
                         state.saveCurrentChat()
-                        // Visual Task Tracker linking: each tool call appears as a sub-row
-                        // on its owning task card. Skip the agent_tasks_* tools themselves —
-                        // showing "agent_tasks_start" under the task it started would be noise.
-                        if (taskAtStart != null && !call.name.startsWith("agent_tasks_")) {
-                            bridge.taskRecordToolCall(
-                                taskId = taskAtStart,
-                                name = call.name,
-                                status = if (result.ok) "完成" else "失败",
-                                durationMs = durationMs,
-                                error = if (!result.ok) result.text.take(200) else "",
-                            )
-                        }
+                        // Tool calls are shown only here, inline in the chat stream — never
+                        // repeated as sub-rows under their task (the task list must stay short).
                         producedAnything = true
                         // The model gets the FULL tool output; the UI card only shows a summary.
                         convo.add(
@@ -207,8 +190,10 @@ class AgentEngine(context: Context) {
                 throw e
             } catch (e: Exception) {
                 if (!alive()) return@launch
+                // Paste the raw API/error text straight into the conversation (no emoji,
+                // no decoration) so failures are easy to read and debug.
                 state.messages.add(
-                    ChatMsg(fromUser = false, text = "⚠️ " + (e.message ?: e.javaClass.simpleName)),
+                    ChatMsg(fromUser = false, text = e.message ?: e.javaClass.simpleName),
                 )
                 state.saveCurrentChat()
             } finally {
@@ -336,7 +321,9 @@ class AgentEngine(context: Context) {
     private fun buildToolCard(call: ChatToolCall, result: AgentToolResult): ToolCard {
         val status = if (result.ok) "完成" else "失败"
         if (!result.ok) {
-            return ToolCard(call.name, status, "${call.name} 失败：${oneLine(result.text)}")
+            // Surface the full raw error text in the chat (not a one-line snippet) so tool
+            // failures are easy to debug. ToolCardView renders [error] as a gray text block.
+            return ToolCard(call.name, status, "${call.name} 失败", error = result.text.trim())
         }
         val args = try {
             org.json.JSONObject(call.arguments)
@@ -386,9 +373,6 @@ class AgentEngine(context: Context) {
             else -> ToolCard(call.name, status, safeToolSummary(call, args, res))
         }
     }
-
-    private fun oneLine(text: String): String =
-        text.trim().replace("\n", " ").let { if (it.length > 96) it.take(96) + "…" else it }
 
     private fun safeToolSummary(call: ChatToolCall, args: JSONObject, res: JSONObject): String =
         when (call.name) {

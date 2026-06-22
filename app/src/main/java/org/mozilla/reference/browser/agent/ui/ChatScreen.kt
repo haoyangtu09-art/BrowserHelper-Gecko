@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
@@ -92,6 +93,9 @@ data class ToolCard(
     val status: String,
     val summary: String,
     val diff: String = "",
+    // Full raw error text for a failed tool call, shown verbatim (multi-line) in the chat so
+    // failures are easy to debug. Empty for successful calls.
+    val error: String = "",
 )
 
 /** Click with no ripple/indication, so transparent dismiss layers don't gray-flash on tap. */
@@ -364,9 +368,8 @@ private fun MessageList(state: PanelState) {
                 }
             }
         }
-        // Visual Task Tracker — pinned at the bottom of the transcript so it sits just above
-        // the latest message and the streaming dot. Empty trackers self-skip; the card uses
-        // its own border/background so it visually separates from the prose above.
+        // Visual task list — a flat, borderless todo list at the bottom of the transcript, just
+        // above the latest message and the streaming dot. Empty trackers self-skip.
         if (state.tracker.groups.isNotEmpty()) {
             TaskTrackerCard(state)
         }
@@ -475,12 +478,14 @@ private fun CodeBlock(code: String) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF1E1E1E))
+            .background(CodeBg)
             .padding(12.dp),
     ) {
+        // Monospace + fillMaxWidth so multi-line code wraps to the box width and shows in full
+        // (never clipped to a single line).
         BasicText(
             code,
-            style = AgentText.Body.copy(color = Color(0xFFE6E6E6)),
+            style = AgentText.Body.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
             modifier = Modifier.fillMaxWidth().padding(end = 24.dp, top = 18.dp),
         )
         Box(
@@ -488,7 +493,7 @@ private fun CodeBlock(code: String) {
                 clipboard.setPrimaryClip(ClipData.newPlainText("code", code))
             },
             contentAlignment = Alignment.Center,
-        ) { CopyIcon(size = 15.dp, color = Color(0xFFBFBFBF)) }
+        ) { CopyIcon(size = 15.dp, color = AgentColors.TextSecondary) }
     }
 }
 
@@ -501,11 +506,9 @@ private fun CodeBlock(code: String) {
 private fun ToolCardView(tool: ToolCard) {
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            val dot = when (tool.status) {
-                "完成" -> Color(0xFF188038)
-                "失败" -> Color(0xFFB3261E)
-                else -> AgentColors.Accent
-            }
+            // Neutral marker only — no green/red/blue. The status word carries the meaning,
+            // keeping the transcript in the app's plain black/white style.
+            val dot = if (tool.status == "运行中") AgentColors.TextTertiary else AgentColors.TextSecondary
             Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
             Spacer(Modifier.width(8.dp))
             BasicText(
@@ -514,10 +517,32 @@ private fun ToolCardView(tool: ToolCard) {
                 modifier = Modifier.weight(1f),
             )
         }
+        if (tool.error.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            ErrorBlock(tool.error)
+        }
         if (tool.diff.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
             DiffBlock(tool.diff)
         }
+    }
+}
+
+/** Full raw tool-error text in a gray box (monospace, multi-line) for easy debugging. */
+@Composable
+private fun ErrorBlock(text: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(CodeBg)
+            .padding(12.dp),
+    ) {
+        BasicText(
+            text,
+            style = AgentText.Label.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -531,26 +556,28 @@ private fun DiffBlock(diff: String) {
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF1E1E1E))
+            .background(CodeBg)
             .padding(vertical = 8.dp),
     ) {
         diff.split('\n').forEach { line ->
             val marker = diffMarker(line)
             val added = marker == '+'
             val removed = marker == '-'
+            // Gray box, dark neutral text; only the +/- lines keep red/green (tints darkened so
+            // they read on the light-gray background).
             val bg = when {
-                added -> Color(0x3328A745)
-                removed -> Color(0x33D73A49)
+                added -> Color(0x1A188038)
+                removed -> Color(0x1AB3261E)
                 else -> Color.Transparent
             }
             val fg = when {
-                added -> Color(0xFF7EE787)
-                removed -> Color(0xFFFFA198)
-                else -> Color(0xFFE6E6E6)
+                added -> Color(0xFF188038)
+                removed -> Color(0xFFB3261E)
+                else -> AgentColors.TextPrimary
             }
             BasicText(
                 line.ifEmpty { " " },
-                style = AgentText.Label.copy(color = fg),
+                style = AgentText.Label.copy(color = fg, fontFamily = FontFamily.Monospace),
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(bg)
@@ -559,6 +586,9 @@ private fun DiffBlock(diff: String) {
         }
     }
 }
+
+/** Shared light-gray background for code / diff / error boxes (replaces the old near-black). */
+private val CodeBg = Color(0xFFEDEEF0)
 
 private fun diffMarker(line: String): Char? {
     if (line.startsWith("+")) return '+'

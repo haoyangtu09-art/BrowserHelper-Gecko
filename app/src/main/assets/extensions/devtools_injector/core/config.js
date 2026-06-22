@@ -58,31 +58,37 @@ function loadNetConfig(cb) {
     st.get(NET_CONFIG_KEY).then(function (res) {
       var cfg = res && res[NET_CONFIG_KEY];
       if (cfg) {
-        if ('interceptMaster' in cfg || 'scopeReq' in cfg) {
-          netInterceptMaster = !!cfg.interceptMaster;
-          netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
-          netScopeResp = !!cfg.scopeResp;
-          // 迁移：旧 scopeNoise（心跳/遥测合一）→ 遥测+心跳+噪音三个新开关。cookie 为新增，默认关。
-          if ('scopeTelemetry' in cfg || 'scopeHeartbeat' in cfg || 'scopeCookie' in cfg) {
-            netScopeTelemetry = !!cfg.scopeTelemetry;
-            netScopeHeartbeat = !!cfg.scopeHeartbeat;
-            netScopeNoise = !!cfg.scopeNoise;
-            netScopeCookie = !!cfg.scopeCookie;
+        // 原生（ProxyProbe）是拦截开关/作用域的唯一权威：只要本会话已收到过一次
+        // interceptState（含 Agent 调 intercept_set 触发的推送），就绝不用 storage 里
+        // 的旧拦截配置回写主开关/作用域，否则 storage 的「关」会把 Agent 刚打开的拦截
+        // 在前端显示成关闭，造成「没开拦截却在拦响应」的前后端不同步。
+        if (!netNativeInterceptStateReceived) {
+          if ('interceptMaster' in cfg || 'scopeReq' in cfg) {
+            netInterceptMaster = !!cfg.interceptMaster;
+            netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
+            netScopeResp = !!cfg.scopeResp;
+            // 迁移：旧 scopeNoise（心跳/遥测合一）→ 遥测+心跳+噪音三个新开关。cookie 为新增，默认关。
+            if ('scopeTelemetry' in cfg || 'scopeHeartbeat' in cfg || 'scopeCookie' in cfg) {
+              netScopeTelemetry = !!cfg.scopeTelemetry;
+              netScopeHeartbeat = !!cfg.scopeHeartbeat;
+              netScopeNoise = !!cfg.scopeNoise;
+              netScopeCookie = !!cfg.scopeCookie;
+            } else {
+              netScopeTelemetry = !!cfg.scopeNoise;
+              netScopeHeartbeat = !!cfg.scopeNoise;
+              netScopeNoise = !!cfg.scopeNoise;
+              netScopeCookie = false;
+            }
           } else {
-            netScopeTelemetry = !!cfg.scopeNoise;
-            netScopeHeartbeat = !!cfg.scopeNoise;
-            netScopeNoise = !!cfg.scopeNoise;
+            // 兼容旧配置：旧版无主开关，req/resp 各自即开即拦
+            netInterceptMaster = !!cfg.globalIntercept || !!cfg.globalRespIntercept;
+            netScopeReq = !!cfg.globalIntercept;
+            netScopeResp = !!cfg.globalRespIntercept;
+            netScopeTelemetry = !!cfg.globalInterceptNoise;
+            netScopeHeartbeat = !!cfg.globalInterceptNoise;
+            netScopeNoise = !!cfg.globalInterceptNoise;
             netScopeCookie = false;
           }
-        } else {
-          // 兼容旧配置：旧版无主开关，req/resp 各自即开即拦
-          netInterceptMaster = !!cfg.globalIntercept || !!cfg.globalRespIntercept;
-          netScopeReq = !!cfg.globalIntercept;
-          netScopeResp = !!cfg.globalRespIntercept;
-          netScopeTelemetry = !!cfg.globalInterceptNoise;
-          netScopeHeartbeat = !!cfg.globalInterceptNoise;
-          netScopeNoise = !!cfg.globalInterceptNoise;
-          netScopeCookie = false;
         }
         if (Array.isArray(cfg.mockRules)) netMockRules = cfg.mockRules;
         if (cfg.throttle && typeof cfg.throttle === 'object') netThrottle = cfg.throttle;
@@ -122,7 +128,8 @@ function loadNetConfigFromCache() {
   try {
     var cfg = JSON.parse(sessionStorage.getItem('__bhNetConfigCache') || 'null');
     if (!cfg) return;
-    if ('interceptMaster' in cfg) {
+    // 同 loadNetConfig：原生已推送过拦截状态时不让 sessionStorage 旧快照回写主开关/作用域。
+    if ('interceptMaster' in cfg && !netNativeInterceptStateReceived) {
       netInterceptMaster = !!cfg.interceptMaster;
       netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
       netScopeResp = !!cfg.scopeResp;

@@ -31,6 +31,8 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 工具完整返回不再进入可见聊天：`Role.Tool` 仍把完整 `result.text` 回写给模型，UI `ToolCard` 只显示状态/安全摘要/diff。
 - `OpenAiBackend` / `AnthropicBackend` 已对 JSON `null` / `JSONObject.NULL` 做过滤，流式增量、tool call id/name/arguments、模型 id 都不会再把 `nullnull...` 拼进可见回复。
 - 工具循环上限从 6 次提高到 250 次；撞到上限时提示 `工具循环已到 250 次上限`。
+- 回合 epoch 守卫：`PanelState.turnEpoch` 在 send/stop/newChat/loadChat/approvePlan 自增，`AgentEngine` 用 `alive()` 守卫所有写回，旧/被停止回合不再串台到当前对话，方块停止后到达的回复直接丢弃。
+- 上下文爆炸防护：`capToolResult()` 把喂模型的工具结果上限压到 32K 字符并提示分段查询；systemPrompt 禁止 `page_exec` 返回整页 `outerHTML/innerHTML`，要先 `page_index` 再 `page_search/page_query` 或先 `page_save_to_container` 存容器再 `container_grep` 分段。
 
 ### 权限层与审批
 - `AgentToolRegistry` 是 APK 内部工具层，原生悬浮窗不依赖外部 MCP；`BrowserBridge` 只保留给外部 bhcodex 兼容。
@@ -50,6 +52,9 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 搜索：`web_search`，使用用户配置的搜索 API。
 
 ### S2 工具
+- 任务追踪：`agent_tasks_*`（创建组/任务、开始/完成、改名、删除），经 `AgentPanelBridge` 操作悬浮窗任务卡。
+- 整页存档：`page_save_to_container`，把当前页完整 HTML 直接写进容器文件（不进上下文），配合 `container_grep/sed/head` 分段读。
+- 容器 shell：`container_grep`、`container_sed`、`container_head` 等约 20 个分段检索工具。
 - 容器批量/网页资源：`batch_edit_files`、`container_serve_url`。
 - 浏览器进程请求：`browser_request`。
 - 代理与网络规则：`proxy_start`、`proxy_stop`、`throttle_set`、`replace_set`、`mock_set`、`intercept_set`、`intercept_pending`、`intercept_resolve`、`resp_intercept_resolve`。
@@ -80,6 +85,7 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 点单个工具会调用 `AgentEngine.testTool()` → `AgentToolRegistry.selfTest(name)`，不走模型；用户点击即视为本次测试授权。
 - 「全部自检」按注册顺序逐个真实调用工具；失败时直接显示原始工具错误文本。
 - 所有注册工具都有 `selfTest` 分支；代码级检查命令已确认没有漏项。
+- 高级页「全部自检」旁新增「复制错误」按钮：`buildToolCheckErrorReport()` 把失败项（含权限层 + 原始错误文本）拼成报告写入剪贴板；无失败或未运行时给出友好提示。
 - 自检使用 `.agent_self_test/*` 临时文件；页面工具会真实走 PageChannel，没有活动页面时显示 PageChannel 原始错误；网络规则类工具用空/禁用规则最小调用，`proxy_start/proxy_stop` 尽量恢复测试前状态。
 
 ### UI 与交互修复
@@ -95,7 +101,8 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 加号菜单的相机/图片/文件/插件行已换成左侧厚图标按钮；相机、图片、文件接 `AgentAttachmentActivity` 系统选择器，插件入口提示去 DevTools「拓展」。
 - 悬浮窗顶部蓝线/收起按钮改为透明 overlay，去掉原先保留的白色 chrome 空白条，顶部上下文能完整显示。
 - 展开后的 Agent 悬浮窗整体下移到屏高约 15% 处并按面板高度夹紧；聊天顶部按钮下移避开透明拖拽条。
-- 用户消息气泡改为更明显的灰底 `#E7E8EA` + 细边，避免和面板底色混在一起。
+- 用户消息气泡为纯色块灰底 `0xFFE4E6EA`（无描边——描边难看），明显比面板底色 `0xFFF1F2F4` 深，避免和底色混在一起。
+- Visual Task Tracker 卡片（`TaskTrackerCard.kt`）渲染在聊天消息流内（非悬浮层），可折叠/展开，按状态显示图标/颜色，自动滚动到当前任务；任务列表随对话持久化（`SavedChat.tracker`），计划批准后可一键转任务。
 - 抽屉和记忆页会在打开/点击前保存当前会话快照；`SavedChat.title/titled` 改为 Compose state，记忆页新增「对话记忆」可点击恢复对应对话，恢复后会立刻刷新 `chat_index.json` 的 `currentChatId`。
 - 对话历史不再只等禁用/销毁时落盘：`AgentSettingsStore` 写 `agent_memory/chat_index.json` 和 `agent_memory/chats/<chatId>.json`；用户消息、附件、assistant 回复、工具卡、工具结果、标题变化、计划批准、权限切换、切换历史对话都会触发当前对话文件同步。`OverlayRoot.onDispose` 只保留 `saveBlocking()` 兜底。
 - 拓展面板卡片已缩小为自适应正方形，一般一行 5-6 个；插件名作为卡片主标题放大，版本号置于标题下方，HTTP Agent 版本 `0.6`。
@@ -341,7 +348,20 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 > 给「全新对话（无记忆）」防回退用。改 UI 前看一眼，别把已修的坑改回去。
 > 完整 diff 用 `git show <SHA>`；未提交批次用 `git diff`。
 
+### 任务追踪 + 扩充工具 + 串台/停止/上下文修复 `d56e6280`（2026-06-22，CI 绿+真机待验）
+> 这一批把下面「当前未提交批次（2026-06-22）」连同任务追踪、扩充工具一起提交进 `d56e6280` 并推 CI（编译通过，APK `BrowserHelper-Gecko-d56e6280-arm64.apk`，真机逐项待验）。
+- **Visual Task Tracker（Claude-Code 风任务列表）**：新增 `TaskTrackerModels.kt`（`TaskStatus/TaskItem/TaskGroup/TaskTrackerState`）+ `TaskTrackerManager.kt`（创建组/任务、开始/完成自动计时、当前任务指针、tool call 记录）+ `TaskTrackerCard.kt`（折叠/展开、图标/颜色、自动滚动）。状态随对话持久化（`SavedChat.tracker`），卡片渲染在聊天消息流里（不是悬浮层）。计划批准后可一键把计划转成任务（`PanelState.convertPlanToTasks()`）；工具调用挂到当前任务作为子行。
+- **新增 `agent_tasks_*` 工具**：经 `AgentPanelBridge`（`AgentEngine` 用 `state` 实现）操作任务列表，4 集成点齐全，含改名/删除子任务。
+- **新增容器 shell 工具组**：`container_grep/container_sed/container_head/...` 等约 20 个，分段检索容器文件，配合 `page_save_to_container` 避免整页源码进上下文。
+- **新增凭证/拦截/插件 P2 工具**：见 §0.1 对应分组与 systemPrompt。
+- **回合 epoch 守卫（修旧响应串台 + 停止真生效）**：`PanelState` 新增单调 `turnEpoch`，在 `send/stop/newChat/loadChat/approvePlan` 自增；`AgentEngine.start()` 捕获自身 epoch，`alive()` 守卫拦住流式回调、流结束提交、每个工具卡写入、循环结束收尾、异常分支、`finally`。被取代/已停止的回合绝不写进当前对话；方块停止后后端仍返回的回复直接丢弃，`finally` 也不会替新回合误关 `generating`。
+- **`page_save_to_container`（S2）**：`agent.js` 新增 `getSourceRaw` 命令（页面侧上限 4MB），工具把整页 HTML 直接写进容器文件（不进对话上下文），返回 `{path,bytes,chars,url,title,truncated}`；自检写临时路径。
+- **上下文爆炸防护**：`AgentEngine` 新增 `TOOL_RESULT_CAP = 32_000` + `capToolResult()`，喂模型的工具结果超长即截断并提示改用 `page_search/page_query/container_grep` 或先存容器；systemPrompt 明确禁止用 `page_exec` 返回整页 `outerHTML/innerHTML`，要先 `page_index` 再分段取。
+- **高级页「复制错误」**：`AdvancedScreen` 在「全部自检」旁加「复制错误」按钮，`buildToolCheckErrorReport()` 把失败项（含 tier + 原始错误文本）拼成报告写剪贴板；无失败/未运行给出友好提示。
+- **用户气泡纯色块**：`Theme.kt` `UserBubble` 加深到 `0xFFE4E6EA`（之前几乎和面板底色 `0xFFF1F2F4` 同色看不见）；纯色块、无描边（描边难看）。
+
 ### 当前未提交批次（2026-06-22）
+> 已随 `d56e6280` 提交（标题保留作 diff 导航）。
 - **记忆/历史实时文件同步**：`AgentSettingsStore` 新增 `files/agent_memory/`；长期记忆写 `memories.json`，索引写 `chat_index.json`，每个对话独立写 `chats/<chatId>.json`。每新增用户消息、附件、assistant 回复、工具卡/工具结果、标题变化、计划批准、权限切换、切换历史对话都会同步文件；`OverlayRoot.onDispose` 的 `saveBlocking()` 只作为禁用/销毁兜底。
 - **页面滑动/定位工具**：新增并优化 `page_scroll`，最低权限 S2，S2/S3 可见；走 PageChannel `scrollPage`，支持 `direction`、`amount/pixels`、`pages`、`selector`、`toSelector`、`block`、`inline`、`behavior`、`waitMs`、`nearestScrollable`，不执行任意 JS。
 - **不开拦截却被拦**：`ProxyProbe` 新增 `interceptEnabled`，冷启动不自动启用持久化拦截配置；DevTools `pushInterceptRulesToNative()` 会随主开关下发 `enabled`，主开关关时历史规则不再暂停请求，并自动放行已暂停队列。
