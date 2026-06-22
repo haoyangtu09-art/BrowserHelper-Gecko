@@ -117,6 +117,7 @@ abstract class BaseBrowserFragment :
     private lateinit var requestDownloadPermissionsLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var requestSitePermissionsLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var requestPromptsPermissionsLauncher: ActivityResultLauncher<Array<String>>
+    private var activePromptFeature: PromptFeature? = null
 
     // Registers a photo picker activity launcher in single-select mode.
     private val singleMediaPicker =
@@ -134,7 +135,7 @@ abstract class BaseBrowserFragment :
 
     private fun getFragment(): Fragment = this
 
-    private fun getPromptsFeature(): PromptFeature? = promptsFeature.get()
+    private fun getPromptsFeature(): PromptFeature? = activePromptFeature ?: promptsFeature.get()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -289,23 +290,25 @@ abstract class BaseBrowserFragment :
             view = view,
         )
 
-        promptsFeature.set(
-            feature = PromptFeature(
-                fragment = this,
-                store = requireComponents.core.store,
-                tabsUseCases = requireComponents.useCases.tabsUseCases,
-                customTabId = sessionId,
-                fileUploadsDirCleaner = requireComponents.core.fileUploadsDirCleaner,
-                fragmentManager = parentFragmentManager,
-                onNeedToRequestPermissions = { permissions ->
-                    requestPromptsPermissionsLauncher.launch(permissions)
-                },
-                androidPhotoPicker = AndroidPhotoPicker(
-                    requireContext(),
-                    singleMediaPicker,
-                    multipleMediaPicker,
-                ),
+        val promptFeature = PromptFeature(
+            fragment = this,
+            store = requireComponents.core.store,
+            tabsUseCases = requireComponents.useCases.tabsUseCases,
+            customTabId = sessionId,
+            fileUploadsDirCleaner = requireComponents.core.fileUploadsDirCleaner,
+            fragmentManager = parentFragmentManager,
+            onNeedToRequestPermissions = { permissions ->
+                requestPromptsPermissionsLauncher.launch(permissions)
+            },
+            androidPhotoPicker = AndroidPhotoPicker(
+                requireContext(),
+                singleMediaPicker,
+                multipleMediaPicker,
             ),
+        )
+        activePromptFeature = promptFeature
+        promptsFeature.set(
+            feature = promptFeature,
             owner = this,
             view = view,
         )
@@ -442,6 +445,12 @@ abstract class BaseBrowserFragment :
             composeView.setContent { BrowserToolbar() }
 
         }
+    }
+
+    @CallSuper
+    override fun onDestroyView() {
+        activePromptFeature = null
+        super.onDestroyView()
     }
 
     private fun fullScreenChanged(enabled: Boolean) {
