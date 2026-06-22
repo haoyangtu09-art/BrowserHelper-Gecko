@@ -4,8 +4,10 @@
 
 package org.mozilla.reference.browser.browser
 
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -13,10 +15,13 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.CallSuper
 import androidx.compose.ui.platform.ComposeView
 import androidx.coordinatorlayout.widget.CoordinatorLayout
+import mozilla.components.browser.state.action.ContentAction
+import mozilla.components.browser.state.selector.findCustomTabOrSelectedTab
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
@@ -24,6 +29,7 @@ import mozilla.components.browser.state.selector.selectedTab
 import mozilla.components.browser.toolbar.BrowserToolbar
 import mozilla.components.compose.browser.toolbar.BrowserToolbar
 import mozilla.components.concept.engine.EngineView
+import mozilla.components.concept.engine.prompt.PromptRequest
 import mozilla.components.feature.app.links.AppLinksFeature
 import mozilla.components.feature.downloads.DownloadsFeature
 import mozilla.components.feature.downloads.manager.FetchDownloadManager
@@ -46,6 +52,7 @@ import mozilla.components.support.base.feature.ViewBoundFeatureWrapper
 import mozilla.components.support.base.log.logger.Logger
 import mozilla.components.support.ktx.android.view.enterImmersiveMode
 import mozilla.components.support.ktx.android.view.exitImmersiveMode
+import mozilla.components.support.ktx.android.net.isUnderPrivateAppDirectory
 import mozilla.components.support.utils.DefaultDownloadFileUtils
 import mozilla.components.ui.widgets.behavior.EngineViewClippingBehavior
 import org.mozilla.reference.browser.BuildConfig
@@ -58,6 +65,7 @@ import org.mozilla.reference.browser.pip.PictureInPictureIntegration
 import org.mozilla.reference.browser.tabs.LastTabFeature
 
 private const val BOTTOM_TOOLBAR_HEIGHT = 0
+private const val FILE_PICKER_ACTIVITY_REQUEST_CODE = 7113
 
 /**
  * Base fragment extended by [BrowserFragment] and [ExternalAppBrowserFragment].
@@ -119,23 +127,15 @@ abstract class BaseBrowserFragment :
     private lateinit var requestPromptsPermissionsLauncher: ActivityResultLauncher<Array<String>>
     private var activePromptFeature: PromptFeature? = null
 
-    // Registers a photo picker activity launcher in single-select mode.
-    private val singleMediaPicker =
-        AndroidPhotoPicker.singleMediaPicker(
-            { getFragment() },
-            { getPromptsFeature() },
-        )
+    private val singleMediaPicker: ActivityResultLauncher<PickVisualMediaRequest> =
+        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            handleBrowserMediaPickerResult(uri?.let { arrayOf(it) } ?: emptyArray())
+        }
 
-    // Registers a photo picker activity launcher in multi-select mode.
-    private val multipleMediaPicker =
-        AndroidPhotoPicker.multipleMediaPicker(
-            { getFragment() },
-            { getPromptsFeature() },
-        )
-
-    private fun getFragment(): Fragment = this
-
-    private fun getPromptsFeature(): PromptFeature? = activePromptFeature ?: promptsFeature.get()
+    private val multipleMediaPicker: ActivityResultLauncher<PickVisualMediaRequest> =
+        registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris ->
+            handleBrowserMediaPickerResult(uris.toTypedArray())
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -453,6 +453,70 @@ abstract class BaseBrowserFragment :
         super.onDestroyView()
     }
 
+    private data class ActiveFilePrompt(
+        val tabId: String,
+        val request: PromptRequest.File,
+    )
+
+    private fun handleBrowserMediaPickerResult(uris: Array<Uri>) {
+        val prompt = activeFilePrompt()
+        if (prompt == null) {
+            activePromptFeature?.onAndroidPhotoPickerResult(uris)
+            return
+        }
+        consumeFilePrompt(prompt, uris)
+    }
+
+    private fun handleBrowserFilePickerResult(
+        requestCode: Int,
+        resultCode: Int,
+        intent: Intent?,
+    ): Boolean {
+        if (requestCode != FILE_PICKER_ACTIVITY_REQUEST_CODE) return false
+        val prompt = activeFilePrompt() ?: return false
+        val uris = if (resultCode == Activity.RESULT_OK) {
+            collectFilePickerUris(intent, prompt.request)
+        } else {
+            emptyArray()
+        }
+        consumeFilePrompt(prompt, uris)
+        return true
+    }
+
+    private fun activeFilePrompt(): ActiveFilePrompt? {
+        val store = requireComponents.core.store
+        val tab = store.state.findCustomTabOrSelectedTab(sessionId) ?: return null
+        val request = tab.content.promptRequests.lastOrNull { it is PromptRequest.File } as? PromptRequest.File
+            ?: return null
+        return ActiveFilePrompt(tab.id, request)
+    }
+
+    private fun collectFilePickerUris(intent: Intent?, request: PromptRequest.File): Array<Uri> {
+        val clipData = intent?.clipData
+        if (clipData != null && clipData.itemCount > 0) {
+            val count = if (request.isMultipleFilesSelection) clipData.itemCount else 1
+            return Array(count) { index -> clipData.getItemAt(index).uri }
+        }
+        return intent?.data?.let { arrayOf(it) } ?: emptyArray()
+    }
+
+    private fun consumeFilePrompt(prompt: ActiveFilePrompt, uris: Array<Uri>) {
+        val context = context ?: return
+        val safeUris = uris
+            .filterNot { it.isUnderPrivateAppDirectory(context) }
+            .toTypedArray()
+        if (safeUris.isEmpty()) {
+            prompt.request.onDismiss()
+        } else if (prompt.request.isMultipleFilesSelection) {
+            prompt.request.onMultipleFilesSelected(context, safeUris)
+        } else {
+            prompt.request.onSingleFileSelected(context, safeUris.first())
+        }
+        requireComponents.core.store.dispatch(
+            ContentAction.ConsumePromptRequestAction(prompt.tabId, prompt.request),
+        )
+    }
+
     private fun fullScreenChanged(enabled: Boolean) {
         if (enabled) {
             activity?.enterImmersiveMode()
@@ -520,6 +584,10 @@ abstract class BaseBrowserFragment :
             "Fragment onActivityResult received with " +
                 "requestCode: $requestCode, resultCode: $resultCode, data: $data",
         )
+
+        if (handleBrowserFilePickerResult(requestCode, resultCode, data)) {
+            return true
+        }
 
         return activityResultHandler.any { it.onActivityResult(requestCode, data, resultCode) }
     }

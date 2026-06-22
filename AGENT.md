@@ -3,7 +3,7 @@
 > 用途：新对话时只读这一个文件 + `CLAUDE.md`，就能立刻进入「原生悬浮 Agent 后端 + UI」工作状态。
 > 本文件覆盖 `org.mozilla.reference.browser.agent` 原生悬浮窗、内置后端、权限层、工具注册表和高级自检页。
 > 抓包代理 / DevTools 扩展那条线看 `CLAUDE.md`，两者基本独立。
-> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、网页图片上传 PhotoPicker 回调补强、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截主开关防误拦、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、记忆实时文件同步、每个对话独立 JSON、拓展卡片 5-6 个一排（未提交）。改 Agent 后请同步更新本文件。
+> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、网页图片上传链路重写、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截主开关防误拦、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、记忆实时文件同步、每个对话独立 JSON、拓展卡片 5-6 个一排（未提交）。改 Agent 后请同步更新本文件。
 
 ---
 
@@ -351,7 +351,7 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 - **审批卡压缩 + 自动同意 UI**：`ApprovalSheet` 预览从 360 字降到 150 字，padding 收紧；设置页新增「执行 / 自动同意所有指令」开关，持久化 `auto_approve_all`，默认关闭。
 - **输入栏和加号菜单**：`ChatScreen.InputBar` 改为按钮垂直居中、输入框最小高度收窄；`UploadSheet` 四项改为带左侧厚图标按钮的行，分别使用相机、图片、螺旋曲别针、插件插头图标。
 - **附件后端**：新增 `AgentAttachmentActivity` / `AgentAttachmentBridge`，相机走 `MediaStore.ACTION_IMAGE_CAPTURE`，图片走 Android 13+ Photo Picker 或 `ACTION_OPEN_DOCUMENT image/*`，文件走 `ACTION_OPEN_DOCUMENT */*`；选择结果写入 `PanelState.attachments` 和结构化 `convo`。
-- **网页图片上传 PhotoPicker 回调**：`19a9f71d` 已按 android-components 153.x 要求给 `PromptFeature` 注入 `AndroidPhotoPicker`；本批进一步在 `BaseBrowserFragment` 保留 `activePromptFeature`，PhotoPicker launcher 返回 URI 时优先调用这个活跃实例，避免系统 picker 返回时 `ViewBoundFeatureWrapper.get()` 处在 stop/恢复边界导致 file prompt 继续挂起。
+- **网页图片上传链路重写**：`19a9f71d` 已按 android-components 153.x 要求给 `PromptFeature` 注入 `AndroidPhotoPicker`；本批进一步不再使用 AC companion 注册 PhotoPicker launcher，改由 `BaseBrowserFragment` 自己注册 single/multiple `ActivityResultLauncher`，返回后直接查当前 `PromptRequest.File`，调用 `onSingleFileSelected/onMultipleFilesSelected` 并 dispatch `ContentAction.ConsumePromptRequestAction`。旧 `startActivityForResult` 文件选择器的 `7113` 结果也先由浏览器层兜底处理，防止 AC 内部 `FilePicker.currentRequest` 或 wrapper 生命周期边界丢结果导致 file prompt 挂起。
 - **最近聊天不再空**：发送首条真实用户消息时 `ensureCurrentChat()` 先创建 `SavedChat` 并写本地标题；一次性 AI 标题完成后 `replaceCurrentTitle()` 替换，不重复命名。
 - **聊天自动滚动**：消息列表在接近底部时自动追踪最新消息；检测到用户向上滚动后停止追踪。
 - **顶部白条修复**：`OverlayRoot` 移除原 26dp chrome 占位，蓝色拖拽线和收起按钮改为透明 overlay，避免遮住顶部上下文。
