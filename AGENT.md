@@ -720,3 +720,98 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 - **凭证铁律不变**：原始 cookie/auth 不进模型；`cookie_reveal` 等仍走 `AgentConfirm` 原生审批。
 - **CI `-Werror`**：本地无 Java17，可空接收者直接 `.toString()`、未用 import / 弃用 API 都会 fail，
   推 CI 前自查；JS 跑 `node --check` 每文件 + manifest 顺序拼接。
+
+---
+
+## 15. 用户原始提示词：工具系统扩展方案（2026-06-22，逐字归档）
+
+> 用户要求把这份完整提示词原样写入 AGENT.md，作为「工具系统扩展 roadmap」的权威需求来源。
+> 落地产物是 `docs/AGENT_TOOLS_ROADMAP.md`（§14 已先给出一版脑暴 + 计划，本节是用户的完整规格）。
+> 开头两段是用户从截图粘贴的观察（含 OCR 噪声），保留要点；其后是结构化需求 1–8 节。
+
+### 用户的两点观察 / 已知边界
+
+- 你这个 BrowserHelper 现在已经从「带悬浮窗的浏览器」进化成「带浏览器的 Agent」了。这两者听起来像一句话，但方向完全不一样。
+- 两个已知边界行为：
+  - `page_exec`：代码正常执行但返回值始终为 `null`（沙箱限制）。
+  - `page_fetch`：同源正常，跨域（如 httpbin.org）失败，属浏览器安全策略。
+- 还有：用这种符号包裹的 `''` 相应的效果要做出来（指工具调用 UI 折叠卡片 / 代码块展示规范，见第 5 节）。
+
+### 任务：为 BrowserHelper Agent 设计一份完整的工具系统扩展方案，并为每个工具标注权限层级 S1 / S2 / S3
+
+**项目背景**：BrowserHelper 是运行在 Android GeckoView 浏览器内部的 Agent 平台，已有：悬浮窗 Agent UI、AgentEngine、AgentToolRegistry / AgentTools、BrowserBridge、PageChannel、ProxyProbe、AgentConfirm、S1 / S2 / S3 权限体系、DOM 读取、page_exec / JS 注入、page_fetch、网络抓包、Mock / 弱网 / Replace / Intercept、工具审批、Plan Mode、历史记录/记忆 UI。
+
+现在目标不是马上全部实现，而是先把"值得新增的工具"系统化整理出来，方便后续分阶段实现。
+
+**权限层级定义**：
+
+- **S1：低风险只读工具**——只能观察当前浏览器状态、当前页面信息、脱敏后的网络信息、普通日志。不能修改页面，不能执行 JS，不能读取 Cookie / Token / Authorization，不能发起敏感请求。默认可用。
+- **S2：中风险调试/操作工具**——可以操作当前页面、点击、输入、滚动、修改普通 DOM、设置 Mock / 弱网 / Replace、读取普通 storage、执行受限 JS。需要用户主动切换到 S2。部分操作仍然需要确认。
+- **S3：高风险 Root Agent 工具**——可以执行 page-world JS、读取 Cookie / Authorization / Set-Cookie、修改请求/响应、自动提交表单、跨站读取、写 App 私有目录、安装/启用高权限插件。必须走 AgentConfirm 原生确认，允许一次或本会话记住，但确认状态不能由模型伪造。
+
+**先读取现有代码，重点检查**：
+
+- `app/src/main/java/org/mozilla/reference/browser/agent/core/AgentEngine.kt`
+- `app/src/main/java/org/mozilla/reference/browser/agent/core/AgentTools.kt`
+- `app/src/main/java/org/mozilla/reference/browser/agent/ui/PanelState.kt`
+- `app/src/main/java/org/mozilla/reference/browser/agent/ui/AgentPanelHost.kt`
+- `app/src/main/java/org/mozilla/reference/browser/devtools/BrowserBridge.kt`
+- `app/src/main/java/org/mozilla/reference/browser/devtools/PageChannel.kt`
+- `app/src/main/java/org/mozilla/reference/browser/devtools/ProxyProbe.kt`
+- `app/src/main/java/org/mozilla/reference/browser/devtools/AgentConfirm.kt`
+- `app/src/main/assets/extensions/devtools_injector/agent.js`
+- `app/src/main/assets/extensions/devtools_injector/extensions/`
+
+然后输出一份 `docs/AGENT_TOOLS_ROADMAP.md`，内容包括：
+
+**BrowserHelper Agent Tools Roadmap**
+
+**1. 当前已有工具清单**——列出当前已经实现的工具。每个工具必须包含：工具名 / 功能 / 当前权限层级 / 是否已经接入 AgentEngine / 是否已经走审批 / 是否需要修复 / 底层实现来源（BrowserBridge / PageChannel / ProxyProbe / AgentTools）。格式：`Tool | 功能 | 权限 | 状态 | 审批 | 底层实现 | 备注`。
+
+**2. 建议新增工具清单**——按下面分类整理工具，并给每个工具标注 S1 / S2 / S3：
+
+- **页面信息工具**：`browser.page.get_url`、`browser.page.get_title`、`browser.page.get_text`、`browser.page.get_html_summary`、`browser.page.screenshot`、`browser.page.element_screenshot`、`browser.page.get_selection`。
+- **DOM 工具**：`browser.dom.snapshot`、`browser.dom.query`、`browser.dom.find_by_text`、`browser.dom.get_attributes`、`browser.dom.highlight_element`、`browser.dom.hide_element`、`browser.dom.replace_text`、`browser.dom.inject_css`、`browser.dom.exec_js`。
+- **页面操作工具**：`browser.page.click`、`browser.page.type`、`browser.page.clear`、`browser.page.scroll`、`browser.page.select`、`browser.page.wait_for_element`、`browser.page.wait_for_text`、`browser.page.wait_for_navigation`、`browser.page.submit_form`。
+- **标签页工具**：`browser.tabs.list`、`browser.tabs.open`、`browser.tabs.switch`、`browser.tabs.close`、`browser.tabs.current`、`browser.tabs.rename`、`browser.tabs.group`。
+- **网络工具**：`browser.network.list`、`browser.network.get`、`browser.network.search`、`browser.network.clear`、`browser.network.export_har`、`browser.network.wait_for_request`、`browser.network.wait_for_response`、`browser.network.replay`、`browser.network.page_fetch`。
+- **DevTools 工具**：`browser.console.list`、`browser.console.clear`、`browser.console.subscribe`、`browser.storage.local_list`、`browser.storage.local_get`、`browser.storage.local_set`、`browser.storage.session_list`、`browser.storage.session_get`、`browser.storage.indexeddb_list`。
+- **代理/调试工具**：`browser.mock.add_rule`、`browser.mock.remove_rule`、`browser.mock.list_rules`、`browser.throttle.set`、`browser.throttle.disable`、`browser.replace.add_rule`、`browser.replace.remove_rule`、`browser.intercept.request_enable`、`browser.intercept.response_enable`、`browser.intercept.resolve_request`、`browser.intercept.resolve_response`、`browser.intercept.release_all`。
+- **敏感凭证工具**：`browser.cookie.list_redacted`、`browser.cookie.reveal`、`browser.cookie.set`、`browser.cookie.delete`、`browser.auth.headers_redacted`、`browser.auth.reveal`、`browser.set_cookie_headers_reveal`。
+- **Agent 自身工具**：`agent.plan.create`、`agent.plan.update`、`agent.plan.approve`、`agent.memory.list`、`agent.memory.add`、`agent.memory.delete`、`agent.history.list`、`agent.history.open`、`agent.history.rename`、`agent.settings.get`、`agent.settings.set`。
+- **插件/扩展工具**：`plugin.list`、`plugin.create`、`plugin.preview`、`plugin.enable`、`plugin.disable`、`plugin.delete`、`plugin.update`、`plugin.get_permissions`、`plugin.request_permission`、`plugin.run_tool`。
+- **文件/项目工具**：`file.read`、`file.write`、`file.append`、`file.list`、`file.search`、`file.diff`、`file.apply_patch`、`file.delete`。注意：如果 file 工具只能操作 Agent 私有工作区，通常是 S2；如果能写 App 私有目录、覆盖配置、修改插件运行代码，则是 S3。
+
+**3. 权限层级表**——输出一张总表，按 S1 / S2 / S3 分组。格式：`S1 工具：Tool | 说明 | 为什么是 S1`；`S2 工具：Tool | 说明 | 为什么是 S2`；`S3 工具：Tool | 说明 | 为什么是 S3 | 必须确认的原因`。
+
+**4. 工具实现优先级**——按 P0 / P1 / P2 / P3 排序。P0：马上值得做，能明显提升 Agent 可用性；P1：重要，但可以等 P0 稳定后；P2：高级能力；P3：未来插件生态/长期能力。优先考虑：
+
+- **P0**：`browser.page.click`、`browser.page.type`、`browser.page.scroll`、`browser.page.wait_for_element`、`browser.tabs.list`、`browser.tabs.switch`、`browser.network.wait_for_request`、`browser.network.wait_for_response`、`browser.page.screenshot`、`browser.console.list`。
+- **P1**：`browser.mock.add_rule`、`browser.throttle.set`、`browser.replace.add_rule`、`browser.dom.highlight_element`、`browser.dom.inject_css`、`agent.history.*`、`agent.memory.*`。
+- **P2**：`browser.intercept.*`、`browser.cookie.reveal`、`browser.auth.reveal`、`browser.page.exec_js`、`plugin.create`、`plugin.preview`。
+- **P3**：plugin marketplace、workflow automation、scheduled tasks、MCP client/server interoperability。
+
+**5. 工具调用显示规范**——定义 Agent UI 里工具调用如何展示：默认不要把完整 JSON 直接塞进对话；工具调用显示为折叠卡片；成功显示绿色点；失败显示红色点；工具原始结果放详情页；敏感字段必须脱敏；大结果必须截断；代码/JSON 用代码块显示。示例：
+
+```
+正在读取页面信息...
+✓ 已读取页面标题
+
+正在执行页面脚本...
+✓ 已完成
+
+详情：
+browser.dom.snapshot
+耗时：320ms
+权限：S1
+```
+
+**6. 审批规则**——定义审批规则：
+
+- **S1**：默认允许；不弹确认；结果必须脱敏。
+- **S2**：用户切到 S2 后允许；对明显修改页面/发送请求的操作可以弹轻量确认；不得读取 Cookie / Token / Authorization。
+- **S3**：每次必须原生确认；可以选择"允许一次"或"本会话允许"；模型不能传 `confirmed=true` 绕过确认；确认 scope 必须包括 tool name、origin、tab、host 或 flow id；用户拒绝后必须返回工具错误，而不是继续执行。
+
+**7. 先不要实现全部工具**——本轮只输出 roadmap 文档，不要一次性实现全部工具。如果要实现，只能先实现 P0 中最小闭环：`browser.tabs.list`、`browser.tabs.current`、`browser.page.click`、`browser.page.type`、`browser.page.wait_for_element`。并且每个工具都必须：有 schema、有权限层级、有错误返回、有 UI 展示摘要、有测试/自检方式。
+
+**8. 验证要求**——完成后运行：JS `node --check`；Kotlin 编译或 GitHub Actions CI；检查 `allWarningsAsErrors`；检查没有未用 import；检查工具权限表和 AgentToolRegistry 一致。输出最后总结：新增/整理了哪些工具；每个工具属于哪个权限层级；哪些工具已有底层实现；哪些工具需要新建 PageChannel/ProxyProbe 支持；下一步建议先做哪个工具，如果已经有就不用加了。
