@@ -200,6 +200,38 @@ object ProxyProbe {
         saveReplaceConfig(enabled, scope, rules)
     }
 
+    private fun currentReplaceScope(): String = when {
+        replaceReqScope && replaceRespScope -> "both"
+        replaceReqScope -> "req"
+        replaceRespScope -> "resp"
+        else -> "both"
+    }
+
+    /**
+     * Agent → native: append ONE replace rule on top of the current set and arm replace.
+     * Pump-safe: only reassigns the @Volatile rule list (same as setReplaceRules); never
+     * touches the pump. Empty `scope` preserves the current scope.
+     */
+    @Synchronized
+    fun replaceAddRule(from: String, to: String, scope: String) {
+        if (from.isEmpty()) return
+        val rules = ArrayList<Pair<String, String>>()
+        for (r in replaceRulesList) rules.add(r.fromStr to r.toStr)
+        rules.add(from to to)
+        setReplaceRules(true, scope.ifEmpty { currentReplaceScope() }, rules)
+    }
+
+    /** Snapshot of current replace state (for the agent's replace_list tool). */
+    @Synchronized
+    fun replaceListJson(): JSONObject {
+        val arr = org.json.JSONArray()
+        for (r in replaceRulesList) arr.put(JSONObject().put("from", r.fromStr).put("to", r.toStr))
+        return JSONObject()
+            .put("enabled", replaceEnabled)
+            .put("scope", currentReplaceScope())
+            .put("rules", arr)
+    }
+
     // Persist the replace config natively so it survives page reloads AND cold
     // restarts: the panel restarts on every navigation and re-pushes asynchronously,
     // but the native proxy keeps the last-known rules as the source of truth so
@@ -336,6 +368,38 @@ object ProxyProbe {
         mockRulesList = parseMockRules(data.optJSONArray("rules"))
         saveMockConfig(data.optJSONArray("rules"))
     }
+
+    private fun mockRulesToJson(): org.json.JSONArray {
+        val arr = org.json.JSONArray()
+        for (r in mockRulesList) {
+            val h = JSONObject()
+            for ((k, v) in r.headers) h.put(k, v)
+            arr.put(
+                JSONObject()
+                    .put("pattern", r.pattern)
+                    .put("status", r.status)
+                    .put("headers", h)
+                    .put("body", r.body),
+            )
+        }
+        return arr
+    }
+
+    /**
+     * Agent → native: append ONE mock rule on top of the current set. Pump-safe: only
+     * reassigns the @Volatile list (same as setMockRules); never touches the pump.
+     */
+    @Synchronized
+    fun mockAddRule(rule: JSONObject) {
+        val arr = mockRulesToJson()
+        arr.put(rule)
+        mockRulesList = parseMockRules(arr)
+        saveMockConfig(arr)
+    }
+
+    /** Snapshot of current mock rules (for the agent's mock_list tool). */
+    @Synchronized
+    fun mockListJson(): org.json.JSONArray = mockRulesToJson()
 
     private fun parseMockRules(arr: org.json.JSONArray?): List<MockRule> {
         val list = ArrayList<MockRule>()
