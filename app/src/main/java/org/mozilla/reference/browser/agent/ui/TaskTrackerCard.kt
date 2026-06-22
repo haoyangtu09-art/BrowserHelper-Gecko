@@ -4,6 +4,8 @@
 
 package org.mozilla.reference.browser.agent.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
@@ -92,23 +95,23 @@ private fun TaskLine(task: TaskItem) {
         TaskStatus.PENDING -> AgentColors.TextSecondary
         else -> AgentColors.TextTertiary
     }
-    val marker = when (task.status) {
-        TaskStatus.ACTIVE -> "▸"
+    // PENDING = hollow square, ACTIVE = filled square (a "drawn" checkbox that fills in once a
+    // task starts); terminal states use a glyph (✔ done / ✕ failed / – cancelled).
+    val terminalMarker = when (task.status) {
         TaskStatus.DONE -> "✔"
         TaskStatus.FAILED -> "✕"
         TaskStatus.CANCELLED -> "–"
-        TaskStatus.PENDING -> ""
+        else -> ""
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
         Box(Modifier.width(MARKER_WIDTH)) {
-            if (marker.isNotEmpty()) {
-                BasicText(
-                    marker,
-                    style = AgentText.Body.copy(
-                        color = color,
-                        fontWeight = if (task.status == TaskStatus.ACTIVE) FontWeight.Bold else FontWeight.Normal,
-                    ),
-                )
+            when (task.status) {
+                TaskStatus.PENDING ->
+                    Box(Modifier.padding(top = 3.dp).size(SQUARE).border(1.5.dp, AgentColors.TextSecondary))
+                TaskStatus.ACTIVE ->
+                    Box(Modifier.padding(top = 3.dp).size(SQUARE).background(AgentColors.TextPrimary))
+                else ->
+                    BasicText(terminalMarker, style = AgentText.Body.copy(color = color))
             }
         }
         BasicText(
@@ -123,3 +126,4 @@ private fun TaskLine(task: TaskItem) {
 }
 
 private val MARKER_WIDTH = 18.dp
+private val SQUARE = 10.dp

@@ -54,9 +54,29 @@ function _bhRunInPage(code) {
     }
 }
 
+// Run [code] (a function body, may use `return`) in the CONTENT-SCRIPT sandbox via
+// eval. The page's CSP does NOT govern the extension's content-script world, so this
+// executes even when the page forbids inline / blob / unsafe-eval. It runs in the
+// isolated world with Xray access to the live DOM (document/window/location are Xray
+// wrappers of the page), so DOM-oriented scripts work; only page-defined JS expandos
+// are out of reach here. Returns the result envelope on success, or null if blocked
+// (extension CSP without 'unsafe-eval', or a runtime throw — caller falls back).
+function _bhSandboxEval(code) {
+    try {
+        // eslint-disable-next-line no-eval
+        var r = eval('(function(){' + code + '\n})()');
+        var s;
+        try { s = JSON.stringify(r); } catch (_) { s = null; }
+        if (s === undefined || s === null) s = '"' + String(r) + '"';
+        return { ok: true, value: s, world: 'content' };
+    } catch (_) {
+        return null;
+    }
+}
+
 function _bhEvalInPage(code, timeoutMs) {
     // Primary path: use Gecko's wrappedJSObject to call page-world Function()
-    // constructor — synchronous, works through Xray, no CSP restriction.
+    // constructor — synchronous, works through Xray, full page-world fidelity.
     try {
         var pw = window.wrappedJSObject;
         if (pw && pw.Function) {
@@ -68,22 +88,27 @@ function _bhEvalInPage(code, timeoutMs) {
             return Promise.resolve({ ok: true, value: s });
         }
     } catch (_cspErr) {
-        // wrappedJSObject.Function blocked by CSP (e.g. ChatGPT strict policy).
-        // Fall through to blob URL injection — treated as external script so it
-        // bypasses inline-script / unsafe-eval restrictions on most pages.
+        // wrappedJSObject.Function blocked by page CSP (no 'unsafe-eval', e.g. ChatGPT).
+        // Fall through to blob URL injection — treated as external script so it bypasses
+        // inline-script / unsafe-eval restrictions on most pages; sandbox eval is the
+        // last-resort bypass for pages (like ChatGPT) that forbid blob+inline too.
     }
 
-    // Fallback A: blob URL injection (external script, bypasses inline-script CSP).
-    // Fallback B: inline <script> textContent (last resort, works on permissive pages).
+    // Fallback A: blob URL injection (external script, page world, bypasses inline-script CSP).
+    // Fallback B: content-script sandbox eval (immune to page CSP, Xray DOM) — the robust
+    //             bypass when the page blocks blob+inline script-src entirely.
+    // Fallback C: inline <script> textContent (last resort, permissive pages only).
     return new Promise(function (resolve) {
         var evtName = '__bhEval' + (++_bhEvalSeq) + '_' + Date.now();
         var done = false;
-        function handler(e) {
+        function finish(detail) {
             if (done) return;
             done = true;
-            resolve(e.detail || { error: 'no detail' });
+            document.removeEventListener(evtName, handler);
+            resolve(detail || { error: 'no detail' });
         }
-        document.addEventListener(evtName, handler, { once: true });
+        function handler(e) { finish(e.detail); }
+        document.addEventListener(evtName, handler);
 
         var scriptCode =
             '(function(){try{var __r=(function(){' + code + '})();' +
@@ -95,7 +120,7 @@ function _bhEvalInPage(code, timeoutMs) {
         ;
 
         var injected = false;
-        // Fallback A: blob URL
+        // Fallback A: blob URL (preferred — keeps page-world fidelity).
         try {
             var blob = new Blob([scriptCode], { type: 'application/javascript' });
             var blobUrl = URL.createObjectURL(blob);
@@ -104,22 +129,29 @@ function _bhEvalInPage(code, timeoutMs) {
             blobScript.onerror = function () {
                 URL.revokeObjectURL(blobUrl);
                 blobScript.remove();
-                // Fallback B: inline textContent
-                if (!done) _bhRunInPage(scriptCode);
+                if (done) return;
+                // blob blocked → page-world injection is gone; the content-script sandbox
+                // still runs regardless of page CSP, so prefer it over a doomed inline retry.
+                var sv = _bhSandboxEval(code);
+                if (sv) { finish(sv); return; }
+                _bhRunInPage(scriptCode);
             };
             blobScript.onload = function () { URL.revokeObjectURL(blobUrl); blobScript.remove(); };
             (document.head || document.documentElement).appendChild(blobScript);
             injected = true;
         } catch (_) {}
 
-        // Fallback B directly if blob injection failed to start
-        if (!injected && !done) _bhRunInPage(scriptCode);
+        // Fallback C directly if blob injection failed to even start.
+        if (!injected && !done) {
+            var sv0 = _bhSandboxEval(code);
+            if (sv0) { finish(sv0); return; }
+            _bhRunInPage(scriptCode);
+        }
 
         setTimeout(function () {
             if (done) return;
-            done = true;
-            document.removeEventListener(evtName, handler);
-            resolve({ error: 'evalJS timeout — CSP may be blocking all script execution on this page' });
+            // Last-resort sandbox eval before reporting a CSP timeout.
+            finish(_bhSandboxEval(code) || { error: 'evalJS timeout — CSP may be blocking all script execution on this page' });
         }, timeoutMs || 10000);
     });
 }

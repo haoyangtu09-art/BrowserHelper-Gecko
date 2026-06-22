@@ -269,6 +269,10 @@ class PanelState {
      * having to re-send). Injects an approval note into the transcript and starts a turn.
      */
     fun approvePlan() {
+        // Fuse plan → tasks: approving a plan always materializes it as the working task list
+        // (a no-op when the plan has no parseable steps), so the model starts executing against
+        // a live checklist instead of just prose.
+        convertPlanToTasks()
         planMode = false
         saveCurrentChat()
         if (generating) return

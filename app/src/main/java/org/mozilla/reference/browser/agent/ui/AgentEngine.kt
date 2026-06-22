@@ -309,8 +309,33 @@ class AgentEngine(context: Context) {
     }
 
     /** Card shown while a tool call is executing (before the result/approval resolves). */
-    private fun runningCard(call: ChatToolCall): ToolCard =
-        ToolCard(name = call.name, status = "运行中", summary = "${call.name} 运行中…")
+    private fun runningCard(call: ChatToolCall): ToolCard {
+        val args = try { JSONObject(call.arguments) } catch (_: Exception) { JSONObject() }
+        return ToolCard(name = call.name, status = "运行中", summary = "${call.name}(${argPreview(call.name, args)})")
+    }
+
+    /**
+     * The single most meaningful argument for a tool, shown in the `name(arg)` header (agent
+     * standard format). Collapsed to one line and clipped so the header never wraps.
+     */
+    private fun argPreview(name: String, args: JSONObject): String {
+        val v = when (name) {
+            "page_exec" -> args.optString("code")
+            "write_code_file", "delete_code_from_file", "container_read", "container_write",
+            "container_list", "container_serve_url", "private_file_read", "private_file_write",
+            "private_file_list",
+            -> args.optString("path")
+            "page_search", "web_search" -> args.optString("query")
+            "page_query", "page_click", "page_set_text", "page_set_html", "page_set_attr",
+            "page_wait_for_element", "dom_highlight_element",
+            -> args.optString("selector")
+            "network_list" -> args.optString("urlContains")
+            "page_navigate", "browser_request", "page_fetch" -> args.optString("url")
+            else -> ""
+        }
+        val one = v.replace('\n', ' ').replace('\r', ' ').trim()
+        return if (one.length > 64) one.take(64) + "…" else one
+    }
 
     /**
      * Builds the compact, agent-style result card for one finished tool call. write_code_file /
@@ -320,15 +345,18 @@ class AgentEngine(context: Context) {
      */
     private fun buildToolCard(call: ChatToolCall, result: AgentToolResult): ToolCard {
         val status = if (result.ok) "完成" else "失败"
-        if (!result.ok) {
-            // Surface the full raw error text in the chat (not a one-line snippet) so tool
-            // failures are easy to debug. ToolCardView renders [error] as a gray text block.
-            return ToolCard(call.name, status, "${call.name} 失败", error = result.text.trim())
-        }
         val args = try {
             org.json.JSONObject(call.arguments)
         } catch (_: Exception) {
             org.json.JSONObject()
+        }
+        // Agent-standard header: ● name(arg). Edit/write tools below override it with a
+        // "Edited <path> (+N -M)" line since the +/- diff carries the same intent.
+        val header = "${call.name}(${argPreview(call.name, args)})"
+        if (!result.ok) {
+            // Surface the full raw error text in the chat (not a one-line snippet) so tool
+            // failures are easy to debug. ToolCardView renders [error] as a gray text block.
+            return ToolCard(call.name, status, header, error = result.text.trim())
         }
         val res = try {
             org.json.JSONObject(result.text)
@@ -370,43 +398,31 @@ class AgentEngine(context: Context) {
             )
             "create_plan" -> ToolCard(call.name, status, "创建计划")
             "update_plan" -> ToolCard(call.name, status, "更新计划")
-            else -> ToolCard(call.name, status, safeToolSummary(call, args, res))
+            // Every other tool: agent-standard header + the raw result shown in the ⎿ block
+            // (capped/expandable by ToolCardView). Empty/`{}` results show just the header.
+            else -> ToolCard(call.name, status, header, output = toolOutputText(result.text))
         }
     }
 
-    private fun safeToolSummary(call: ChatToolCall, args: JSONObject, res: JSONObject): String =
-        when (call.name) {
-            "container_read" -> "读取 ${args.optString("path", "")}，完整结果已返回给模型"
-            "container_write" -> "写入 ${res.optString("path", args.optString("path", ""))}"
-            "container_list" -> "列出容器目录"
-            "page_index", "page_search", "page_query" -> "已读取页面信息，完整结果已返回给模型"
-            "network_list", "network_get" -> "已读取网络记录，完整结果已返回给模型"
-            "proxy_status" -> "已读取代理状态"
-            "web_search" -> "已完成搜索，完整结果已返回给模型"
-            "batch_edit_files", "private_batch_edit_files" -> "批量编辑完成"
-            "container_serve_url" -> "生成容器资源地址"
-            "browser_request", "page_fetch" -> "请求完成，响应正文已返回给模型"
-            "proxy_start" -> "代理已开启"
-            "proxy_stop" -> "代理已关闭"
-            "throttle_set" -> "弱网规则已更新"
-            "replace_set" -> "替换规则已更新"
-            "mock_set" -> "Mock 规则已更新"
-            "intercept_set" -> "拦截规则已更新"
-            "intercept_pending" -> "已读取待处理拦截"
-            "intercept_resolve", "resp_intercept_resolve" -> "拦截处理完成"
-            "page_set_text", "page_set_html", "page_set_attr" -> "页面内容已更新"
-            "page_scroll" -> "页面已滑动"
-            "page_navigate" -> "当前标签页已发起导航"
-            "page_reload" -> "当前标签页已刷新"
-            "page_back" -> "当前标签页已后退"
-            "page_forward" -> "当前标签页已前进"
-            "page_exec" -> "页面脚本已执行，完整结果已返回给模型"
-            "cookie_reveal" -> "凭据已读取，完整结果已返回给模型"
-            "private_file_list" -> "列出私有目录"
-            "private_file_read" -> "读取私有文件，完整结果已返回给模型"
-            "private_file_write" -> "写入私有文件"
-            else -> "${call.name} 完成，完整结果已返回给模型"
+    /**
+     * The raw tool result shown in the ⎿ block, pretty-printed when it is JSON so it reads like
+     * a real command output. Empty / `{}` results return "" (header-only card). Capped so a huge
+     * result never bloats a card — the model still gets the full untruncated text separately.
+     */
+    private fun toolOutputText(raw: String): String {
+        val t = raw.trim()
+        if (t.isEmpty() || t == "{}" || t == "null") return ""
+        val pretty = try {
+            when {
+                t.startsWith("{") -> JSONObject(t).toString(2)
+                t.startsWith("[") -> JSONArray(t).toString(2)
+                else -> t
+            }
+        } catch (_: Exception) {
+            t
         }
+        return if (pretty.length > 8000) pretty.take(8000) + "\n…" else pretty
+    }
 
     private fun batchEditCard(name: String, status: String, args: JSONObject, res: JSONObject): ToolCard {
         val edits = args.optJSONArray("edits") ?: JSONArray()

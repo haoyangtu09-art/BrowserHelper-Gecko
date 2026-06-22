@@ -283,7 +283,7 @@ private fun PlanCard(state: PanelState) {
             .padding(14.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(AgentColors.Accent))
+            Box(Modifier.size(8.dp).clip(CircleShape).background(AgentColors.TextPrimary))
             Spacer(Modifier.width(8.dp))
             BasicText("计划模式", style = AgentText.Title)
         }
@@ -293,21 +293,17 @@ private fun PlanCard(state: PanelState) {
             style = AgentText.Body,
         )
         Spacer(Modifier.height(12.dp))
+        // Black/white buttons only (no blue accent). "批准并开始" also converts the plan into the
+        // working task list (see PanelState.approvePlan), so the standalone convert button is gone.
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(
-                Modifier.clip(AgentShapes.Pill).background(AgentColors.Accent)
+                Modifier.clip(AgentShapes.Pill).background(AgentColors.TextPrimary)
                     .clickable { state.approvePlan() }
                     .padding(horizontal = 16.dp, vertical = 9.dp),
             ) { BasicText("批准并开始", style = AgentText.Body.copy(color = Color.White)) }
-            // Plan → Tasks: parses the plan body into a new task group below, but leaves
-            // the plan card up so the user can still hit "批准并开始" / "继续编辑".
             Box(
-                Modifier.clip(AgentShapes.Pill).background(AgentColors.Bg)
-                    .clickable { state.convertPlanToTasks() }
-                    .padding(horizontal = 16.dp, vertical = 9.dp),
-            ) { BasicText("转为任务清单", style = AgentText.Body) }
-            Box(
-                Modifier.clip(AgentShapes.Pill).background(AgentColors.Bg)
+                Modifier.clip(AgentShapes.Pill).background(Color.White)
+                    .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Pill)
                     .clickable { state.planMode = false }
                     .padding(horizontal = 16.dp, vertical = 9.dp),
             ) { BasicText("继续编辑", style = AgentText.Body) }

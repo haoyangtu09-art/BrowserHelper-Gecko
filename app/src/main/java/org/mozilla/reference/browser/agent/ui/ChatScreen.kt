@@ -69,6 +69,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.mozilla.reference.browser.agent.AgentAttachmentKind
 import org.mozilla.reference.browser.agent.ui.theme.AgentColors
 import org.mozilla.reference.browser.agent.ui.theme.AgentShapes
@@ -91,8 +92,12 @@ data class ChatMsg(
 data class ToolCard(
     val name: String,
     val status: String,
+    // Agent-standard header rendered after the ● bullet, e.g. "page_exec(document.title)".
     val summary: String,
     val diff: String = "",
+    // Raw tool result shown in the ⎿ block (capped to 6 lines, expandable, copyable). Used by
+    // non-edit tools; edit/write tools use [diff] instead. Empty → header-only card.
+    val output: String = "",
     // Full raw error text for a failed tool call, shown verbatim (multi-line) in the chat so
     // failures are easy to debug. Empty for successful calls.
     val error: String = "",
@@ -396,11 +401,48 @@ private fun AssistantContent(text: String) {
             if (isCode) {
                 CodeBlock(body)
             } else {
-                BasicText(mdInline(body.trim()), style = AgentText.Body)
+                ProseText(body.trim())
             }
         }
     }
 }
+
+/**
+ * Renders prose, turning `#`..`######` header lines into real bold headings (the leading hashes
+ * are stripped, never shown). Consecutive non-header lines stay grouped as one wrapping
+ * paragraph; `**bold**`/stray `*` are handled by [mdInline].
+ */
+@Composable
+private fun ProseText(body: String) {
+    val headerRe = remember { Regex("^(#{1,6})\\s*(.*)$") }
+    val blocks = remember(body) {
+        val out = ArrayList<Pair<Boolean, String>>()
+        val buf = StringBuilder()
+        fun flush() {
+            if (buf.isNotBlank()) out.add(false to buf.toString().trimEnd('\n'))
+            buf.setLength(0)
+        }
+        body.split('\n').forEach { line ->
+            val m = headerRe.matchEntire(line.trimStart())
+            if (m != null && m.groupValues[2].isNotBlank()) {
+                flush()
+                out.add(true to m.groupValues[2].trim())
+            } else {
+                buf.append(line).append('\n')
+            }
+        }
+        flush()
+        out
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        blocks.forEach { (isHeader, t) ->
+            BasicText(mdInline(t), style = if (isHeader) HeaderStyle else AgentText.Body)
+        }
+    }
+}
+
+/** Bold, slightly larger style for markdown headers (replaces the raw `###` the model emits). */
+private val HeaderStyle = AgentText.Body.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold)
 
 /**
  * Unescapes the common backslash escapes (`\n` `\t` `\r` `\"` `\\`) that some providers leak
@@ -498,53 +540,101 @@ private fun CodeBlock(code: String) {
 }
 
 /**
- * Agent-style tool result: a one-line status (colored dot + summary like "wrote app/x.kt
- * +12 -3"), optionally followed by a diff code frame. The model's full raw output is never
- * shown here — it only flows back to the model — so the transcript stays compact.
+ * Agent-standard tool result: a header line "● name(arg)" followed by a "⎿"-connected result
+ * block. Non-edit tools show their raw output (capped to 6 lines, expandable + copyable);
+ * edit/write tools show a +/- diff; failures show the full raw error. The result block sits in
+ * a plain gray frame with NO +/- coloring (that is reserved for file-write diffs).
  */
 @Composable
 private fun ToolCardView(tool: ToolCard) {
     Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Neutral marker only — no green/red/blue. The status word carries the meaning,
-            // keeping the transcript in the app's plain black/white style.
-            val dot = if (tool.status == "运行中") AgentColors.TextTertiary else AgentColors.TextSecondary
-            Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+        Row(verticalAlignment = Alignment.Top) {
+            // Plain black bullet — the app's minimal black/white style, no status colors.
+            BasicText(
+                "●",
+                style = AgentText.Body.copy(
+                    color = if (tool.status == "运行中") AgentColors.TextTertiary else AgentColors.TextPrimary,
+                ),
+            )
             Spacer(Modifier.width(8.dp))
             BasicText(
                 tool.summary.ifBlank { tool.name },
-                style = AgentText.Secondary.copy(color = AgentColors.TextPrimary),
+                style = AgentText.Body.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
                 modifier = Modifier.weight(1f),
             )
         }
-        if (tool.error.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            ErrorBlock(tool.error)
-        }
-        if (tool.diff.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            DiffBlock(tool.diff)
+        when {
+            tool.error.isNotBlank() -> Connector { OutputBlock(tool.error, capped = false) }
+            tool.diff.isNotBlank() -> Connector { DiffBlock(tool.diff) }
+            tool.output.isNotBlank() -> Connector { OutputBlock(tool.output, capped = true) }
         }
     }
 }
 
-/** Full raw tool-error text in a gray box (monospace, multi-line) for easy debugging. */
+/** Lays out the "⎿" connector glyph beside an indented result block. */
 @Composable
-private fun ErrorBlock(text: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(CodeBg)
-            .padding(12.dp),
+private fun Connector(content: @Composable () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(top = 3.dp)) {
+        BasicText(
+            "⎿",
+            style = AgentText.Body.copy(color = AgentColors.TextTertiary),
+            modifier = Modifier.padding(start = 3.dp, end = 6.dp),
+        )
+        Box(Modifier.weight(1f)) { content() }
+    }
+}
+
+/**
+ * Tool output / raw error in a plain gray box (monospace, no +/- coloring). When [capped] the
+ * box shows the first [CAP_LINES] lines with a "… +N 行" hint, plus a 展开/收起 toggle; a copy
+ * button always sits at the bottom-right so the full text is one tap away.
+ */
+@Composable
+private fun OutputBlock(text: String, capped: Boolean) {
+    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    var expanded by remember(text) { mutableStateOf(false) }
+    val lines = text.split('\n')
+    val overflow = capped && lines.size > CAP_LINES
+    val shown = if (overflow && !expanded) lines.take(CAP_LINES).joinToString("\n") else text
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(CodeBg).padding(12.dp),
     ) {
         BasicText(
-            text,
+            shown,
             style = AgentText.Label.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
             modifier = Modifier.fillMaxWidth(),
         )
+        if (overflow && !expanded) {
+            BasicText(
+                "… +${lines.size - CAP_LINES} 行",
+                style = AgentText.Label.copy(color = AgentColors.TextTertiary),
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (overflow || expanded) {
+                BasicText(
+                    if (expanded) "收起" else "展开",
+                    style = AgentText.Label.copy(color = AgentColors.TextSecondary),
+                    modifier = Modifier.noRippleClickable { expanded = !expanded }.padding(end = 12.dp),
+                )
+            }
+            Box(
+                Modifier.size(22.dp).clip(CircleShape).noRippleClickable {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("tool", text))
+                },
+                contentAlignment = Alignment.Center,
+            ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
+        }
     }
 }
+
+/** Max lines a capped tool-output block shows before folding the rest behind "… +N 行". */
+private const val CAP_LINES = 6
 
 /**
  * A dark code frame rendering a unified-style diff: lines starting with `+` get a green tint
