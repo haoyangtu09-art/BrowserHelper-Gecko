@@ -580,8 +580,24 @@ abstract class BaseBrowserFragment :
         data: Intent?,
         resultCode: Int,
     ): Boolean {
+        return handlePromptActivityResult(requestCode, resultCode, data, "ActivityResultHandler")
+    }
+
+    @Deprecated("AndroidX Fragment still delivers deprecated startActivityForResult results here.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (!handlePromptActivityResult(requestCode, resultCode, data, "Fragment")) {
+            super.onActivityResult(requestCode, resultCode, data)
+        }
+    }
+
+    private fun handlePromptActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+        source: String,
+    ): Boolean {
         Logger.info(
-            "Fragment onActivityResult received with " +
+            "$source onActivityResult received with " +
                 "requestCode: $requestCode, resultCode: $resultCode, data: $data",
         )
 
