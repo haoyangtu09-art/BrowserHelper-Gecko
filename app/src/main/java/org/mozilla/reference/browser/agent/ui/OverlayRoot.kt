@@ -109,6 +109,8 @@ fun OverlayRoot(
     DisposableEffect(state) {
         AgentAttachmentBridge.listener = { result -> state.addAttachment(result) }
         onDispose {
+            state.saveCurrentChat()
+            settings.saveBlocking(state)
             if (AgentAttachmentBridge.listener != null) AgentAttachmentBridge.listener = null
         }
     }

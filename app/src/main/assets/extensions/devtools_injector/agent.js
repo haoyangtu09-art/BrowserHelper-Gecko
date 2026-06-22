@@ -316,12 +316,39 @@ function bhHandleAgentCmd(msg) {
     if (cmd === 'scrollPage') {
         try {
             var direction = String(args.direction || 'down').toLowerCase();
-            var amount = Math.max(1, Math.min(Number(args.amount || args.pixels || 600), 5000));
             var behavior = String(args.behavior || 'auto').toLowerCase();
             if (behavior !== 'smooth' && behavior !== 'instant') behavior = 'auto';
+            var actualBehavior = behavior === 'smooth' ? 'smooth' : 'auto';
             var selector = String(args.selector || '');
+            var toSelector = String(args.toSelector || args.intoViewSelector || '');
+            var block = String(args.block || 'center');
+            var inline = String(args.inline || 'nearest');
+            var waitMs = Math.max(20, Math.min(Number(args.waitMs || (behavior === 'smooth' ? 240 : 60)), 1000));
+            var pageFactor = Number(args.pages || 0);
+            var baseAmount = pageFactor ? Math.round(window.innerHeight * pageFactor) : Number(args.amount || args.pixels || 600);
+            if (!isFinite(baseAmount) || baseAmount <= 0) baseAmount = 600;
+            var amount = Math.max(1, Math.min(baseAmount, 5000));
+            function isScrollable(el) {
+                if (!el || el === window || el === document || el === document.documentElement || el === document.body) return false;
+                var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+                var oy = style ? style.overflowY : '';
+                var ox = style ? style.overflowX : '';
+                return ((el.scrollHeight > el.clientHeight + 1) && /(auto|scroll|overlay)/.test(oy)) ||
+                    ((el.scrollWidth > el.clientWidth + 1) && /(auto|scroll|overlay)/.test(ox));
+            }
+            function nearestScrollable(el) {
+                var cur = el;
+                while (cur && cur !== document.body && cur !== document.documentElement) {
+                    if (isScrollable(cur)) return cur;
+                    cur = cur.parentElement;
+                }
+                return window;
+            }
             var target = selector ? document.querySelector(selector) : window;
             if (!target) return Promise.resolve({ error: 'no elements matched selector', selector: selector });
+            if (target !== window && !isScrollable(target) && args.nearestScrollable !== false) {
+                target = nearestScrollable(target);
+            }
 
             var isWindow = target === window;
             var beforeX = isWindow ? window.scrollX : target.scrollLeft;
@@ -335,33 +362,178 @@ function bhHandleAgentCmd(msg) {
             else if (direction === 'bottom') dy = 100000000;
             else dy = amount;
 
-            if (isWindow) {
-                window.scrollBy({ left: dx, top: dy, behavior: behavior });
+            var intoViewEl = toSelector ? document.querySelector(toSelector) : null;
+            if (toSelector && !intoViewEl) return Promise.resolve({ error: 'no elements matched toSelector', toSelector: toSelector });
+            if (intoViewEl) {
+                intoViewEl.scrollIntoView({ behavior: actualBehavior, block: block, inline: inline });
+            } else if (isWindow) {
+                window.scrollBy({ left: dx, top: dy, behavior: actualBehavior });
             } else {
-                target.scrollBy({ left: dx, top: dy, behavior: behavior });
+                target.scrollBy({ left: dx, top: dy, behavior: actualBehavior });
             }
 
             return new Promise(function (resolve) {
                 setTimeout(function () {
                     var afterX = isWindow ? window.scrollX : target.scrollLeft;
                     var afterY = isWindow ? window.scrollY : target.scrollTop;
+                    var rect = null;
+                    if (intoViewEl) {
+                        var r = intoViewEl.getBoundingClientRect();
+                        rect = { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+                    }
                     resolve({
                         ok: true,
                         selector: selector || null,
+                        toSelector: toSelector || null,
                         direction: direction,
                         amount: amount,
+                        pages: pageFactor || null,
+                        target: isWindow ? 'window' : 'element',
                         beforeX: beforeX,
                         beforeY: beforeY,
                         afterX: afterX,
                         afterY: afterY,
                         movedX: afterX - beforeX,
                         movedY: afterY - beforeY,
+                        moved: beforeX !== afterX || beforeY !== afterY,
+                        elementRect: rect,
                         viewportHeight: window.innerHeight,
                         viewportWidth: window.innerWidth,
                         pageHeight: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
                         pageWidth: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
                     });
                 }, behavior === 'smooth' ? 220 : 40);
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_long_press (S2, constrained UI gesture) ────────────────────────
+    // Holds a pointer/mouse/touch down on an element (or x/y point) for a duration,
+    // then releases + fires contextmenu — enough to trigger timer-based long-press
+    // handlers. Bounded gesture; arbitrary JS stays S3-only evalJS.
+    if (cmd === 'longPress') {
+        try {
+            var lpSel = String(args.selector || '');
+            var durationMs = Math.max(100, Math.min(Number(args.durationMs || args.duration || 600), 5000));
+            var lpEl = lpSel ? document.querySelector(lpSel) : null;
+            if (lpSel && !lpEl) return Promise.resolve({ error: 'no elements matched selector', selector: lpSel });
+            var px;
+            var py;
+            if (lpEl) {
+                try { lpEl.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+                var lr = lpEl.getBoundingClientRect();
+                px = (typeof args.x === 'number') ? args.x : Math.round(lr.left + lr.width / 2);
+                py = (typeof args.y === 'number') ? args.y : Math.round(lr.top + lr.height / 2);
+            } else {
+                px = Math.round(Number(args.x || 0));
+                py = Math.round(Number(args.y || 0));
+            }
+            var lpTgt = lpEl || document.elementFromPoint(px, py) || document.body;
+            var lpBase = { bubbles: true, cancelable: true, view: window, clientX: px, clientY: py, button: 0 };
+            var lpPtr = { bubbles: true, cancelable: true, view: window, clientX: px, clientY: py, pointerId: 1, pointerType: 'touch', isPrimary: true };
+            function lpFireMouse(type) { try { lpTgt.dispatchEvent(new MouseEvent(type, lpBase)); } catch (e) {} }
+            function lpFirePtr(type) { try { if (window.PointerEvent) lpTgt.dispatchEvent(new PointerEvent(type, lpPtr)); } catch (e) {} }
+            function lpFireTouch(type, active) {
+                try {
+                    var t = new Touch({ identifier: 1, target: lpTgt, clientX: px, clientY: py, pageX: px, pageY: py });
+                    lpTgt.dispatchEvent(new TouchEvent(type, {
+                        bubbles: true, cancelable: true, view: window,
+                        touches: active ? [t] : [], targetTouches: active ? [t] : [], changedTouches: [t],
+                    }));
+                } catch (e) {}
+            }
+            lpFirePtr('pointerdown');
+            lpFireTouch('touchstart', true);
+            lpFireMouse('mousedown');
+            return new Promise(function (resolve) {
+                setTimeout(function () {
+                    lpFireTouch('touchend', false);
+                    lpFirePtr('pointerup');
+                    lpFireMouse('mouseup');
+                    try { lpTgt.dispatchEvent(new MouseEvent('contextmenu', lpBase)); } catch (e) {}
+                    resolve({ ok: true, selector: lpSel || null, x: px, y: py, durationMs: durationMs, tag: lpTgt.tagName });
+                }, durationMs);
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_swipe (S3) ─────────────────────────────────────────────────────
+    // Continuous / long-distance swipe: repeats a directional scroll (and optionally
+    // emits a pointer drag gesture) so long pages and carousels can be driven far in
+    // one call. scrollBy is the reliable scroller; the gesture is a best-effort bonus
+    // for widgets that listen to pointer drags.
+    if (cmd === 'swipePage') {
+        try {
+            var sdir = String(args.direction || 'down').toLowerCase();
+            var sSel = String(args.selector || '');
+            var distance = Number(args.distance || args.amount || args.pixels || 800);
+            if (!isFinite(distance) || distance <= 0) distance = 800;
+            distance = Math.max(1, Math.min(distance, 100000));
+            var repeat = Math.max(1, Math.min(Number(args.repeat || 1), 100));
+            var stepDelayMs = Math.max(0, Math.min(Number(args.stepDelayMs || 120), 2000));
+            var doGesture = args.gesture !== false;
+            var swBehavior = (String(args.behavior || 'auto').toLowerCase() === 'smooth') ? 'smooth' : 'auto';
+            var swTarget = sSel ? document.querySelector(sSel) : window;
+            if (sSel && !swTarget) return Promise.resolve({ error: 'no elements matched selector', selector: sSel });
+            var swIsWindow = swTarget === window;
+            var unitX = 0;
+            var unitY = 0;
+            if (sdir === 'up') unitY = -1;
+            else if (sdir === 'left') unitX = -1;
+            else if (sdir === 'right') unitX = 1;
+            else unitY = 1;
+            var swStartX = swIsWindow ? window.scrollX : swTarget.scrollLeft;
+            var swStartY = swIsWindow ? window.scrollY : swTarget.scrollTop;
+            function swGesture(stepDx, stepDy) {
+                if (!doGesture || !window.PointerEvent) return;
+                try {
+                    var cx = Math.round(window.innerWidth / 2);
+                    var cy = Math.round(window.innerHeight / 2);
+                    var fdx = -(stepDx === 0 ? 0 : (stepDx > 0 ? 1 : -1)) * Math.min(Math.abs(stepDx), Math.round(window.innerWidth * 0.6));
+                    var fdy = -(stepDy === 0 ? 0 : (stepDy > 0 ? 1 : -1)) * Math.min(Math.abs(stepDy), Math.round(window.innerHeight * 0.6));
+                    var gt = document.elementFromPoint(cx, cy) || document.body;
+                    function gp(extra) {
+                        var o = { bubbles: true, cancelable: true, view: window, pointerId: 1, pointerType: 'touch', isPrimary: true };
+                        for (var k in extra) o[k] = extra[k];
+                        return o;
+                    }
+                    gt.dispatchEvent(new PointerEvent('pointerdown', gp({ clientX: cx, clientY: cy })));
+                    for (var s = 1; s <= 4; s++) {
+                        gt.dispatchEvent(new PointerEvent('pointermove', gp({ clientX: cx + fdx * s / 4, clientY: cy + fdy * s / 4 })));
+                    }
+                    gt.dispatchEvent(new PointerEvent('pointerup', gp({ clientX: cx + fdx, clientY: cy + fdy })));
+                } catch (e) {}
+            }
+            return new Promise(function (resolve) {
+                var done = 0;
+                function swStep() {
+                    if (done >= repeat) {
+                        var endX = swIsWindow ? window.scrollX : swTarget.scrollLeft;
+                        var endY = swIsWindow ? window.scrollY : swTarget.scrollTop;
+                        resolve({
+                            ok: true, selector: sSel || null, direction: sdir,
+                            distance: distance, repeat: repeat, target: swIsWindow ? 'window' : 'element',
+                            startX: swStartX, startY: swStartY, endX: endX, endY: endY,
+                            movedX: endX - swStartX, movedY: endY - swStartY,
+                            moved: (endX !== swStartX) || (endY !== swStartY),
+                            pageHeight: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
+                            viewportHeight: window.innerHeight,
+                        });
+                        return;
+                    }
+                    var dx = unitX * distance;
+                    var dy = unitY * distance;
+                    swGesture(dx, dy);
+                    if (swIsWindow) window.scrollBy({ left: dx, top: dy, behavior: swBehavior });
+                    else swTarget.scrollBy({ left: dx, top: dy, behavior: swBehavior });
+                    done++;
+                    setTimeout(swStep, stepDelayMs);
+                }
+                swStep();
             });
         } catch (e) {
             return Promise.resolve({ error: String(e) });

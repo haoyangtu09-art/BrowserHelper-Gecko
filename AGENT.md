@@ -3,7 +3,7 @@
 > 用途：新对话时只读这一个文件 + `CLAUDE.md`，就能立刻进入「原生悬浮 Agent 后端 + UI」工作状态。
 > 本文件覆盖 `org.mozilla.reference.browser.agent` 原生悬浮窗、内置后端、权限层、工具注册表和高级自检页。
 > 抓包代理 / DevTools 扩展那条线看 `CLAUDE.md`，两者基本独立。
-> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截主开关防误拦、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动工具（未提交）。改 Agent 后请同步更新本文件。
+> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截主开关防误拦、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、记忆实时文件同步、每个对话独立 JSON、拓展卡片 5-6 个一排（未提交）。改 Agent 后请同步更新本文件。
 
 ---
 
@@ -13,8 +13,8 @@
 ChatGPT 风格聊天面板（可拖动 / 等比缩放 / 收起）。当前已接入内置模型后端：
 OpenAI 兼容 Chat Completions 支持 tool calls，Anthropic 格式支持普通对话；工具执行走
 APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 S1 读取）都通过悬浮窗
-`ApprovalSheet` 二次确认，用户可按“工具 + 具体资源/请求范围”在本会话记住授权；API 设置 / 模型 / 权限层 / 个性化 / 记忆持久化到 App 私有
-`SharedPreferences("bh_agent_overlay")`。
+`ApprovalSheet` 二次确认，用户可按“工具 + 具体资源/请求范围”在本会话记住授权；API 设置 / 模型 / 权限层 / 个性化仍持久化到 App 私有
+`SharedPreferences("bh_agent_overlay")`，记忆和对话另实时同步到 App 私有文件 `files/agent_memory/`。
 
 ## 0.1 最新功能接力总表（必读）
 
@@ -24,10 +24,10 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 原生悬浮窗已接 `AgentEngine`，不再只是 UI 外壳：发送消息会组 system prompt、调用后端、处理 OpenAI `tool_calls`、执行内部工具，并把 tool result 回写模型继续对话。
 - `OpenAiBackend` 支持 OpenAI-compatible Chat Completions、`tools`、`tool_choice=auto`、`tool_calls`、`max_tokens` 和模型列表。
 - `AnthropicBackend` 当前支持普通 Messages 对话和模型列表，内部工具只在 OpenAI 格式启用。
-- 设置持久化到 `SharedPreferences("bh_agent_overlay")`：API key/url、搜索 API、模型、S1/S2/S3 权限层、推理档、个性化、记忆。
+- 设置持久化到 `SharedPreferences("bh_agent_overlay")`：API key/url、搜索 API、模型、S1/S2/S3 权限层、推理档、个性化；记忆/对话实时写入 `files/agent_memory/`。
 - 已用临时第三方 OpenAI-compatible 中转验证过 `/v1/models`、普通 `/v1/chat/completions`、强制 `tools` tool call；密钥没有写入源码。
 - 会话标题只生成一次：首条真实用户消息先生成本地临时标题并立刻创建 `SavedChat`；模型命名只轻量执行一次，用前一到两句用户输入替换临时标题，后续不实时更新，避免反复消耗 token。
-- 长期记忆已补齐闭环：`memorySummary` + `memories` 持久化；每次有效对话结束后后台只抽取新增长期记忆条目；记忆页「生成摘要」才会让模型把已保存记忆压缩成摘要，不把所有记忆原样塞进摘要。
+- 长期记忆已补齐闭环：`agent_memory/memories.json` 保存 `memorySummary` + `memories`；每次有效对话结束后后台只抽取新增长期记忆条目；记忆页「生成摘要」才会让模型把已保存记忆压缩成摘要，不把所有记忆原样塞进摘要。
 - 工具完整返回不再进入可见聊天：`Role.Tool` 仍把完整 `result.text` 回写给模型，UI `ToolCard` 只显示状态/安全摘要/diff。
 - `OpenAiBackend` / `AnthropicBackend` 已对 JSON `null` / `JSONObject.NULL` 做过滤，流式增量、tool call id/name/arguments、模型 id 都不会再把 `nullnull...` 拼进可见回复。
 - 工具循环上限从 6 次提高到 250 次；撞到上限时提示 `工具循环已到 250 次上限`。
@@ -53,7 +53,7 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 容器批量/网页资源：`batch_edit_files`、`container_serve_url`。
 - 浏览器进程请求：`browser_request`。
 - 代理与网络规则：`proxy_start`、`proxy_stop`、`throttle_set`、`replace_set`、`mock_set`、`intercept_set`、`intercept_pending`、`intercept_resolve`、`resp_intercept_resolve`。
-- 受限页面操作：`page_set_text`、`page_set_html`、`page_set_attr`、`page_scroll`。其中 `page_scroll` 可滑动 window 或指定滚动容器，S2/S3 可见。
+- 受限页面操作：`page_set_text`、`page_set_html`、`page_set_attr`、`page_scroll`。其中 `page_scroll` 可滑动 window/指定滚动容器，也可用 `toSelector` 定位到元素，S2/S3 可见。
 
 ### 抓包/拦截工具升级
 - `network_list` 默认只返回最近 10 条，支持 `method`、`urlContains`、`sinceSeconds`、`limit`；摘要新增六位 `code`、旧 `flowId`、请求/响应大小、请求/响应 body 字节数、`latencyMs`。
@@ -87,22 +87,22 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - assistant 消息复制按钮和代码块右上复制已接 Android `ClipboardManager`。
 - `pageFetch` 已加入 `agent.js`，从 page world 发请求；`page_exec` 注释已同步为“悬浮窗 S3 ApprovalSheet 或外部 BrowserBridge AgentConfirm”。
 - 审批 sheet 长详情会按 150 字预览截断并提供「详情」全屏可滚动页，避免长命令把按钮挤出屏幕。
-- 记忆页现在支持直接编辑摘要、点击「生成摘要」、直接编辑每条记忆、新增空记忆、删除记忆；摘要/条目/开关都会立即持久化。
+- 记忆页现在支持直接编辑摘要、点击「生成摘要」、直接编辑每条记忆、新增空记忆、删除记忆；摘要/条目/开关都会立即写入 `agent_memory/memories.json`。
 - 聊天列表在用户停留底部时自动追踪最新消息；检测到用户向上滚动会停止自动追踪，避免抢滚动。
 - 输入栏加号/发送按钮改为垂直居中，输入框最小高度收紧，解决按钮偏下。
 - 加号菜单的相机/图片/文件/插件行已换成左侧厚图标按钮；相机、图片、文件接 `AgentAttachmentActivity` 系统选择器，插件入口提示去 DevTools「拓展」。
 - 悬浮窗顶部蓝线/收起按钮改为透明 overlay，去掉原先保留的白色 chrome 空白条，顶部上下文能完整显示。
 - 展开后的 Agent 悬浮窗整体下移到屏高约 15% 处并按面板高度夹紧；聊天顶部按钮下移避开透明拖拽条。
 - 用户消息气泡改为更明显的灰底 `#E7E8EA` + 细边，避免和面板底色混在一起。
-- 抽屉和记忆页会在打开/点击前保存当前会话快照；`SavedChat.title/titled` 改为 Compose state，记忆页新增「对话记忆」可点击恢复对应对话。
-- 拓展面板卡片当前仍是三列紧凑正方形，HTTP Agent 版本 `0.6`；用户后续要求“一行 5-6 个、更小卡片、插件名最大+版本在下”尚未在本批完成。
+- 抽屉和记忆页会在打开/点击前保存当前会话快照；`SavedChat.title/titled` 改为 Compose state，记忆页新增「对话记忆」可点击恢复对应对话，恢复后会立刻刷新 `chat_index.json` 的 `currentChatId`。
+- 对话历史不再只等禁用/销毁时落盘：`AgentSettingsStore` 写 `agent_memory/chat_index.json` 和 `agent_memory/chats/<chatId>.json`；用户消息、附件、assistant 回复、工具卡、工具结果、标题变化、计划批准、权限切换、切换历史对话都会触发当前对话文件同步。`OverlayRoot.onDispose` 只保留 `saveBlocking()` 兜底。
+- 拓展面板卡片已缩小为自适应正方形，一般一行 5-6 个；插件名作为卡片主标题放大，版本号置于标题下方，HTTP Agent 版本 `0.6`。
 
 ### 验证状态
-- DevTools 扩展 JS 单文件 `node --check` 通过。
-- manifest 顺序拼接后的 content scripts `node --check` 通过。
-- 代码级自检确认所有注册工具都有 `selfTest` 覆盖。
-- 本机 Gradle 仍被环境阻塞：缺 `ANDROID_HOME` 或 `local.properties:sdk.dir`，所以 `:app:compileDebugKotlin` 停在 Android SDK 检查阶段，未进入 Kotlin 编译。
-- 本批文档更新前已跑 `git diff --check` 通过；当前 Kotlin 编译仍未跑到源码阶段。
+- 本轮已跑 `git diff --check` 通过。
+- 本轮已跑 `node --check app/src/main/assets/extensions/devtools_injector/agent.js` 通过。
+- 本轮已跑 `node --check app/src/main/assets/extensions/devtools_injector/extensions/index.js` 通过。
+- 本机 Gradle 用实际存在的 `:app:assembleDebug` + Java17 toolchain 参数验证，仍被环境阻塞：缺 `ANDROID_HOME` 或 `local.properties:sdk.dir`，停在 Android SDK 检查阶段，未进入源码编译。
 
 ---
 
@@ -122,7 +122,7 @@ DevTools「拓展」面板点「HTTP Agent」启用
 
 - 插件描述符在 `app/src/main/assets/extensions/devtools_injector/extensions/presets/index.js`，
   id=`web-agent`，name=`HTTP Agent`，version=`0.6`，带 `detail`/`usage` 字段供详情弹窗读。
-- 卡片 UI 在 `extensions/index.js`（三列紧凑方形卡 + 详情弹窗），属于 DevTools 扩展那条线，非 Compose。
+- 卡片 UI 在 `extensions/index.js`（5-6 个一排的紧凑方形卡 + 详情弹窗），属于 DevTools 扩展那条线，非 Compose。
 
 ---
 
@@ -254,7 +254,7 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 | R10 | 设置重排 | `AgentPanelHost.SettingsScreen` | 「我的 Agent」(个性化/记忆)置顶，API key/url/搜索/请求格式置底；加 verticalScroll |
 | R11 | 记忆 UI 做全 | `AgentPanelHost.MemoryScreen` + `AgentEngine.maybeExtractMemories/generateMemorySummary` | 启用开关 + 可编辑记忆摘要 +「生成摘要」按需模型压缩 + 可编辑「已保存的记忆」列表(增删 ×) + 自动长期记忆条目抽取/合并 + 空态「还没有记忆」 |
 | R12 | 改名 HTTP Agent | `presets/index.js` | `name:'网页 Agent'→'HTTP Agent'` |
-| R13 | 三列方形卡+版本+详情+0.6 | `extensions/index.js` + `presets/index.js` | `.bh-ext-card aspect-ratio:1/1`；`#bh-ext-body` 三列 `repeat(3,minmax(0,1fr))`；版本占描述位；`showExtDetailDialog`；v0.6 + detail/usage |
+| R13 | 紧凑方形卡+版本+详情+0.6 | `extensions/index.js` + `presets/index.js` | `.bh-ext-card aspect-ratio:1/1`；`#bh-ext-body` 自适应 `repeat(auto-fill,minmax(46px,1fr))`，典型宽度一行 5-6 个；插件名为主标题，版本置下；`showExtDetailDialog`；v0.6 + detail/usage |
 | R14 | 小尺寸 resize 手柄不消失/不飞出 | `OverlayRoot.ResizeHandle` + `AgentOverlayService.resizePanelBy` | 左右底角固定 30dp 隐形触摸区 + 细灰弧线；锚在缩放后面板的圆角内，使用 inverse scale 保持触摸尺寸，Service 每次 scale 变化后 `requestLayout()+updateViewLayout()`。 |
 
 > R6 Plan 卡片仍是手动入口/展示态；R5/R7/R8/R9 已接真实后端或系统能力。
@@ -328,7 +328,6 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 
 - Plan 模式已由 `create_plan` / `update_plan` 工具写入；后续可继续接成更完整的“计划批准后批处理”。
 - 上传菜单相机/照片/文件已接系统能力；插件入口目前只提示到 DevTools「拓展」，后续如要在悬浮窗内直接装/启插件，还需要继续接插件后端。
-- 拓展卡片进一步缩小到一行 5-6 个、插件名最大/版本置下仍是待做项。
 - 如需更强密钥保护，可把 `AgentSettingsStore` 从普通 App 私有 `SharedPreferences` 换成
   EncryptedSharedPreferences。
 - 详见 CLAUDE.md「Codex 源码分析与浏览器 Agent 计划」与「落地计划」。
@@ -341,7 +340,8 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 > 完整 diff 用 `git show <SHA>`；未提交批次用 `git diff`。
 
 ### 当前未提交批次（2026-06-22）
-- **页面滑动工具**：新增 `page_scroll`，最低权限 S2，S2/S3 可见；走 PageChannel `scrollPage`，支持 `direction`、`amount/pixels`、`selector`、`behavior`，不执行任意 JS。
+- **记忆/历史实时文件同步**：`AgentSettingsStore` 新增 `files/agent_memory/`；长期记忆写 `memories.json`，索引写 `chat_index.json`，每个对话独立写 `chats/<chatId>.json`。每新增用户消息、附件、assistant 回复、工具卡/工具结果、标题变化、计划批准、权限切换、切换历史对话都会同步文件；`OverlayRoot.onDispose` 的 `saveBlocking()` 只作为禁用/销毁兜底。
+- **页面滑动/定位工具**：新增并优化 `page_scroll`，最低权限 S2，S2/S3 可见；走 PageChannel `scrollPage`，支持 `direction`、`amount/pixels`、`pages`、`selector`、`toSelector`、`block`、`inline`、`behavior`、`waitMs`、`nearestScrollable`，不执行任意 JS。
 - **不开拦截却被拦**：`ProxyProbe` 新增 `interceptEnabled`，冷启动不自动启用持久化拦截配置；DevTools `pushInterceptRulesToNative()` 会随主开关下发 `enabled`，主开关关时历史规则不再暂停请求，并自动放行已暂停队列。
 - **Agent 顶部遮挡**：展开窗口目标 Y 从屏高 12% 下移到约 15%，且按面板高度夹紧；聊天顶部浮动按钮下移，避开透明拖拽条。
 - **对话记忆恢复**：打开抽屉/记忆页前会 `saveCurrentChat()`；`SavedChat.title/titled` 改为 Compose state；记忆页顶部新增「对话记忆」列表，点击直接 `loadChat()` 回到对应会话。
@@ -356,7 +356,8 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 - **顶部白条修复**：`OverlayRoot` 移除原 26dp chrome 占位，蓝色拖拽线和收起按钮改为透明 overlay，避免遮住顶部上下文。
 - **抓包展示升级**：`NetFlowStore` 为每条 flow 生成六位 `code`，记录请求/响应头体字节数、响应时间和 `latencyMs`；`network_list` 默认 10 条，`network_get` 支持按 `code`/`flowId` + `part` 读取局部详情。
 - **拦截工具升级**：`intercept_set` 缺省同时拦截请求/响应，但遥测、心跳/噪音、cookie/auth 默认放行；新增 `interceptHeartbeat`；pending/resolve/cookie 工具均支持六位 `code`。
-- **验证状态**：`git diff --check` 已通过；本地 `:app:compileDebugKotlin` 仍因缺 Android SDK / `local.properties:sdk.dir` 停在环境检查，未进入 Kotlin 编译。
+- **拓展卡片缩小**：`extensions/index.js` 把拓展卡片改成 `minmax(46px,1fr)` 的自适应正方形，一行约 5-6 个；插件名作为最大标题，版本号放在下方。
+- **验证状态**：`git diff --check`、改动的两个 DevTools JS `node --check` 已通过；本地 `:app:assembleDebug` 仍因缺 Android SDK / `local.properties:sdk.dir` 停在环境检查，未进入源码编译。
 
 ### 本轮后端补齐（2026-06-21，未提交）
 - 原生悬浮窗接入 `AgentEngine`：OpenAI 兼容 Chat Completions 支持 tool calls，Anthropic 当前普通对话。
@@ -367,7 +368,7 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 - 新增内部工具：`batch_edit_files`、`browser_request`、`page_fetch`、`container_serve_url`、`private_batch_edit_files`。
 - 新增全权限工具：`create_plan`、`update_plan`、`write_code_file`、`delete_code_from_file`；四个工具注册为 S1，因此 S1/S2/S3 都可见。代码文件写删只作用于 Agent 外部容器。
 - 设置页新增「高级」子页：展示所有内部工具、最低权限层和自检状态；点工具会用固定测试参数真实调用后端工具，OK 显示 OK，失败直接显示原始失败文本；支持「全部自检」。
-- 记忆持久化补齐：`AgentSettingsStore` 新增 `memory_summary`；`MemoryScreen` 支持摘要/条目编辑和「生成摘要」；`AgentEngine` 每轮结束后调用 `maybeExtractMemories()` 只提炼新增长期记忆条目，`generateMemorySummary()` 按需把已有记忆压缩进 `memorySummary` 并持久化。
+- 记忆持久化补齐：`AgentSettingsStore` 新增 `memory_summary`，当前已升级为 `agent_memory/memories.json` + 每对话独立 JSON 文件实时同步；`MemoryScreen` 支持摘要/条目编辑和「生成摘要」；`AgentEngine` 每轮结束后调用 `maybeExtractMemories()` 只提炼新增长期记忆条目，`generateMemorySummary()` 按需把已有记忆压缩进 `memorySummary` 并持久化。
 - Agent 容器改到外部 app-files `agent_container`，不再用 `/data/data` 下的容器目录；`container_serve_url` 启动 `127.0.0.1` 只读文件服务供网页加载容器资源。
 - 修复设置/设置子页 overlay 左右互换和露底闪一下的问题：抽屉仍从左出，设置与子页共用右侧全屏层；返回箭头左移。
 - 修复 resize 手柄缩小时飞出圆角：左右底角手柄锚在缩放后面板内部，手柄自身 inverse scale，视觉改为细灰弧线。
@@ -422,7 +423,7 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 
 > 注：拓展插件框架本身（`81378531` 方块卡 + 生命周期、`f8fed3bf`「拓展」升为顶级 Eruda tool、
 > 截流插件 `2effaa19`/`8d1d4175`）属于 DevTools 扩展那条线，细节看 CLAUDE.md。本轮只把
-> 拓展卡片改三列紧凑方形 + 详情弹窗、把 web-agent 改名 HTTP Agent + v0.6。
+> 拓展卡片改为一行 5-6 个的紧凑方形 + 详情弹窗、把 web-agent 改名 HTTP Agent + v0.6。
 
 ---
 
@@ -467,7 +468,7 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 - `container_serve_url {path}`（S2）— 为容器文件生成本地 `http://127.0.0.1:<port>/agent-container/...` URL。
 - `page_fetch {url,method,headers,body,credentials,mode,requiredPageUrlContains,timeoutMs}`（S3）— 在当前网页 page world 执行 `fetch`，可用 `requiredPageUrlContains` 校验来源页面。
 - `private_batch_edit_files {edits:[{path,content}]}`（S3）— 一次写多个浏览器私有目录文本文件。
-- `page_scroll {direction,amount,pixels,selector,behavior}`（S2）— 滑动当前网页 window 或第一个匹配 `selector` 的滚动容器；`direction=down/up/left/right/top/bottom`，默认 `down`，默认 600px，最大 5000px；受限 UI 操作，不暴露任意 JS。
+- `page_scroll {direction,amount,pixels,pages,selector,toSelector,block,inline,behavior,waitMs,nearestScrollable}`（S2）— 滑动当前网页 window 或第一个匹配 `selector` 的滚动容器；`direction=down/up/left/right/top/bottom`，默认 `down`，默认 600px，最大 5000px；`pages` 可按视口倍数滚动，`toSelector` 可定位到目标元素；受限 UI 操作，不暴露任意 JS。
 
 ### 12.0.2 抓包/拦截工具参数（内置 Agent）
 

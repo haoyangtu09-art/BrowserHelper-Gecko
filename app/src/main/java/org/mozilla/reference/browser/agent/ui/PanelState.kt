@@ -192,6 +192,7 @@ class PanelState {
         currentChatId = null
         currentChatTitle = null
         attachments.clear()
+        persist()
     }
 
     /**
@@ -235,6 +236,7 @@ class PanelState {
         planText = ""
         attachments.clear()
         nav = PanelNav.Chat
+        persist()
     }
 
     /**
@@ -244,8 +246,10 @@ class PanelState {
      */
     fun approvePlan() {
         planMode = false
+        saveCurrentChat()
         if (generating) return
         convo.add(AgentMessage(Role.User, "我已批准上面的计划，请按计划继续执行，不需要再次确认计划本身。"))
+        saveCurrentChat()
         generating = true
         onTurn?.invoke()
     }
@@ -300,6 +304,7 @@ class PanelState {
     fun pickAttachment(kind: AgentAttachmentKind) {
         if (kind == AgentAttachmentKind.Plugin) {
             messages.add(ChatMsg(fromUser = false, text = "插件入口在网页 DevTools 的「拓展」面板里，当前悬浮窗已保留这个入口。"))
+            saveCurrentChat()
             return
         }
         onPickAttachment?.invoke(kind)
@@ -346,6 +351,7 @@ class PanelState {
         permTier = tier
         if (convo.isNotEmpty()) {
             convo.add(AgentMessage(Role.User, "（系统提示）当前权限层已切换为 ${tier.name}，后续一律以 ${tier.name} 为准。"))
+            saveCurrentChat()
         }
         persist()
     }
@@ -386,6 +392,8 @@ class PanelState {
         val title = localTitle(text)
         if (title.isBlank()) return
         val chat = SavedChat(id = java.util.UUID.randomUUID().toString(), title = title)
+        chat.messages.addAll(messages)
+        chat.convo.addAll(convo)
         chats.add(0, chat)
         currentChatId = chat.id
         currentChatTitle = title
@@ -402,6 +410,7 @@ class PanelState {
         val chat = if (id != null) chats.firstOrNull { it.id == id } else null
         if (chat != null) {
             chat.title = cleaned
+            chat.titled = titleGenerated
         }
         trimChats()
         persist()

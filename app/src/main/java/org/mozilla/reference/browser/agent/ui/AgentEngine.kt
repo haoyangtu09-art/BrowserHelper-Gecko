@@ -39,6 +39,7 @@ class AgentEngine(context: Context) {
         val config = state.buildConfig()
         if (config == null) {
             state.messages.add(ChatMsg(fromUser = false, text = "⚠️ 请先在设置里填写 API Key，并选择一个模型。"))
+            state.saveCurrentChat()
             state.generating = false
             return
         }
@@ -84,6 +85,7 @@ class AgentEngine(context: Context) {
                         if (streamIndex < 0) {
                             streamIndex = state.messages.size
                             state.messages.add(ChatMsg(fromUser = false, text = frag))
+                            state.saveCurrentChat()
                         } else {
                             val cur = state.messages[streamIndex]
                             state.messages[streamIndex] = cur.copy(text = cur.text + frag)
@@ -102,11 +104,13 @@ class AgentEngine(context: Context) {
                             state.messages[streamIndex] =
                                 state.messages[streamIndex].copy(text = reply.content.trim())
                         }
+                        state.saveCurrentChat()
                         producedAnything = true
                     }
                     // Persist the assistant turn (text + any tool calls) into the transcript.
                     if (reply.content.isNotBlank() || reply.toolCalls.isNotEmpty()) {
                         convo.add(AgentMessage(Role.Assistant, reply.content, toolCalls = reply.toolCalls))
+                        state.saveCurrentChat()
                     }
                     if (reply.toolCalls.isEmpty()) break
                     for (call in reply.toolCalls) {
@@ -114,9 +118,11 @@ class AgentEngine(context: Context) {
                         state.messages.add(
                             ChatMsg(fromUser = false, text = "", tool = runningCard(call)),
                         )
+                        state.saveCurrentChat()
                         val result = registry.call(state.permTier, call.name, call.arguments)
                         state.messages[cardIndex] =
                             ChatMsg(fromUser = false, text = "", tool = buildToolCard(call, result))
+                        state.saveCurrentChat()
                         producedAnything = true
                         // The model gets the FULL tool output; the UI card only shows a summary.
                         convo.add(
@@ -126,13 +132,16 @@ class AgentEngine(context: Context) {
                                 toolCallId = call.id,
                             ),
                         )
+                        state.saveCurrentChat()
                     }
                 }
                 if (loops >= TOOL_LOOP_LIMIT) {
                     state.messages.add(ChatMsg(fromUser = false, text = "工具循环已到 ${TOOL_LOOP_LIMIT} 次上限，已停止继续调用。"))
+                    state.saveCurrentChat()
                 }
                 if (!producedAnything) {
                     state.messages.add(ChatMsg(fromUser = false, text = "(无内容)"))
+                    state.saveCurrentChat()
                 }
                 maybeGenerateTitle(config, backend, state)
                 maybeExtractMemories(config, backend, state)
@@ -142,6 +151,7 @@ class AgentEngine(context: Context) {
                 state.messages.add(
                     ChatMsg(fromUser = false, text = "⚠️ " + (e.message ?: e.javaClass.simpleName)),
                 )
+                state.saveCurrentChat()
             } finally {
                 state.generating = false
                 state.saveCurrentChat()

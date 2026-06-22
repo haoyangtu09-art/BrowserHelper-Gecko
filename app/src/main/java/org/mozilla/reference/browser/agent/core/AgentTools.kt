@@ -164,6 +164,20 @@ class AgentToolRegistry(
                     "当前页面 selector=${args.optString("selector", "window")}, direction=${args.optString("direction", "down")}",
                     "允许，并且本次会话不再询问这个滑动范围",
                 )
+            "page_long_press" ->
+                req(
+                    "允许 Agent 长按当前网页元素吗？",
+                    "page-longpress:${args.optString("selector", "")}",
+                    "当前页面 selector=${args.optString("selector", "")}, durationMs=${args.optString("durationMs", "600")}",
+                    "允许，并且本次会话不再询问这个长按目标",
+                )
+            "page_swipe" ->
+                req(
+                    "允许 Agent 连续滑动当前网页吗？",
+                    "page-swipe:${args.optString("selector", "")}:${args.optString("direction", "down")}",
+                    "当前页面 selector=${args.optString("selector", "window")}, direction=${args.optString("direction", "down")}, repeat=${args.optString("repeat", "1")}",
+                    "允许，并且本次会话不再询问这个连续滑动范围",
+                )
             "page_exec" ->
                 req(
                     "允许 Agent 在当前网页执行这段 JavaScript 吗？",
@@ -409,12 +423,19 @@ class AgentToolRegistry(
             )
             "page_scroll" -> page(
                 "scrollPage",
-                JSONObject()
-                    .put("direction", args.optString("direction", "down"))
-                    .put("amount", args.optInt("amount", args.optInt("pixels", 600)))
-                    .put("selector", args.optString("selector", ""))
-                    .put("behavior", args.optString("behavior", "auto")),
-                5_000,
+                args,
+                args.optLong("waitMs", 240L).coerceIn(20L, 1_000L) + 2_000L,
+            )
+            "page_long_press" -> page(
+                "longPress",
+                args,
+                args.optLong("durationMs", 600L).coerceIn(100L, 5_000L) + 2_000L,
+            )
+            "page_swipe" -> page(
+                "swipePage",
+                args,
+                args.optLong("repeat", 1L).coerceIn(1L, 100L) *
+                    args.optLong("stepDelayMs", 120L).coerceIn(0L, 2_000L) + 4_000L,
             )
             "page_fetch" -> page(
                 "pageFetch",
@@ -598,6 +619,18 @@ class AgentToolRegistry(
                     .put("direction", "down")
                     .put("amount", 1)
                     .put("behavior", "auto"),
+            )
+            "page_long_press" -> execute(
+                name,
+                JSONObject().put("selector", "body").put("durationMs", 100),
+            )
+            "page_swipe" -> execute(
+                name,
+                JSONObject()
+                    .put("direction", "down")
+                    .put("distance", 1)
+                    .put("repeat", 1)
+                    .put("stepDelayMs", 0),
             )
             "page_fetch" -> {
                 writeFile(containerRoot(), "$tempDir/page_fetch.txt", "page-fetch-$stamp")
@@ -1468,8 +1501,29 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("direction", str("down/up/left/right/top/bottom，默认 down"))
         prop("amount", num("滑动像素，默认 600，最大 5000"))
         prop("pixels", num("amount 的兼容别名"))
+        prop("pages", num("按视口高度倍数滑动，例如 1 表示一屏；传入时优先于 amount"))
         prop("selector", str("可选 CSS selector；不传则滑动 window，传入则滑动第一个匹配元素"))
+        prop("toSelector", str("可选 CSS selector；传入时滚动到该元素可见"))
+        prop("block", str("toSelector 的垂直对齐：start/center/end/nearest，默认 center"))
+        prop("inline", str("toSelector 的水平对齐：start/center/end/nearest，默认 nearest"))
         prop("behavior", str("auto、instant 或 smooth，默认 auto"))
+        prop("waitMs", num("等待滚动完成后取位置的毫秒数，默认 smooth=240/auto=60，上限 1000"))
+        prop("nearestScrollable", bool("selector 命中的元素本身不可滚时是否自动找最近可滚父级，默认 true"))
+    }),
+    tool("page_long_press", AgentPermissionTier.S2, "长按当前网页的某个元素（模拟指针/鼠标/触摸按住并释放）。受限 UI 操作，不执行任意 JS。", schema {
+        prop("selector", str("目标元素 CSS selector；不传则按 x/y 坐标"))
+        prop("x", num("可选：视口 X 坐标（不传 selector 时使用）"))
+        prop("y", num("可选：视口 Y 坐标（不传 selector 时使用）"))
+        prop("durationMs", num("按住时长 ms，默认 600，范围 100-5000"))
+    }),
+    tool("page_swipe", AgentPermissionTier.S3, "连续/长距离滑动当前网页或指定滚动容器：可重复多次、单次大距离，并尽力派发指针拖拽手势。", schema {
+        prop("direction", str("down/up/left/right，默认 down"))
+        prop("distance", num("单次滑动像素，默认 800，最大 100000（支持长距离）"))
+        prop("repeat", num("连续滑动次数，默认 1，最大 100（支持连续滑动）"))
+        prop("stepDelayMs", num("每次滑动之间的间隔 ms，默认 120，最大 2000"))
+        prop("selector", str("可选：滚动容器 CSS selector；不传则滑动窗口"))
+        prop("gesture", bool("是否同时派发指针拖拽手势事件，默认 true"))
+        prop("behavior", str("auto 或 smooth，默认 auto"))
     }),
     tool("page_fetch", AgentPermissionTier.S3, "从当前网页的 page world 发起 fetch 请求，可指定页面 URL 子串校验来源。", schema {
         prop("url", str("目标 URL"))

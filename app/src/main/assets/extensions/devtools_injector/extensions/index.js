@@ -10,19 +10,19 @@ var EXT_STYLE = [
   '#bh-ext-head{display:flex;align-items:center;gap:8px;padding:10px 12px;',
   '  border-bottom:1px solid #d0d7de;background:#f6f8fa;}',
   '#bh-ext-title{flex:1;font-size:15px;font-weight:700;}',
-  '#bh-ext-body{flex:1;overflow:auto;padding:8px;display:grid;',
-  '  grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;align-content:start;}',
-  // Compact square cards: three fit across the extension panel.
-  '.bh-ext-card{display:flex;flex-direction:column;gap:6px;padding:8px;',
-  '  border:1px solid #d0d7de;border-radius:12px;background:#fff;',
-  '  box-shadow:0 1px 3px rgba(0,0,0,.06);aspect-ratio:1/1;}',
-  '.bh-ext-card-info{flex:1;min-width:0;overflow:hidden;}',
-  '.bh-ext-card-name{font-size:12px;line-height:1.25;font-weight:700;color:#111;}',
-  // Version now occupies the old description slot.
-  '.bh-ext-card-ver{margin-top:5px;font-size:11px;font-weight:600;color:#2563eb;}',
-  '.bh-ext-actions{display:flex;gap:5px;}',
-  '.bh-ext-btn{flex:1;padding:6px 0;border:none;border-radius:8px;',
-  '  font-size:11px;font-weight:700;text-align:center;white-space:nowrap;}',
+  '#bh-ext-body{flex:1;overflow:auto;padding:6px;display:grid;',
+  '  grid-template-columns:repeat(auto-fill,minmax(46px,1fr));gap:6px;align-content:start;}',
+  // Compact square cards: five to six fit across a typical extension panel.
+  '.bh-ext-card{display:flex;flex-direction:column;gap:2px;padding:5px;',
+  '  border:1px solid #d0d7de;border-radius:8px;background:#fff;aspect-ratio:1/1;min-width:0;}',
+  '.bh-ext-card-info{flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column;',
+  '  justify-content:center;text-align:center;}',
+  '.bh-ext-card-name{font-size:13px;line-height:1.05;font-weight:800;color:#111;',
+  '  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+  '.bh-ext-card-ver{margin-top:2px;font-size:9.5px;line-height:1;font-weight:700;color:#2563eb;}',
+  '.bh-ext-actions{display:flex;gap:2px;}',
+  '.bh-ext-btn{flex:1;padding:2px 0;border:none;border-radius:5px;',
+  '  font-size:9.5px;line-height:1.1;font-weight:800;text-align:center;white-space:nowrap;}',
   '.bh-ext-detail{background:#eef2f7;color:#333;}',
   '.bh-ext-toggle{color:#fff;}',
   '.bh-ext-toggle.on{background:#16a34a;}',
@@ -46,7 +46,7 @@ var EXT_STYLE = [
 function syncExtToggleBtn(btn, id) {
   var on = (typeof isPluginEnabled === 'function') && isPluginEnabled(id);
   btn.className = 'bh-ext-btn bh-ext-toggle ' + (on ? 'on' : 'off');
-  btn.textContent = on ? '● 已启用' : '○ 已禁用';
+  btn.textContent = on ? '开' : '关';
 }
 
 // 居中详情弹窗：标题 + 版本 + 介绍 + 使用说明 + 关闭。叠在 #bh-ext 之上。
@@ -114,7 +114,7 @@ function buildExtCard(p) {
   actions.className = 'bh-ext-actions';
   var detail = document.createElement('button');
   detail.className = 'bh-ext-btn bh-ext-detail';
-  detail.textContent = '详情';
+  detail.textContent = '详';
   detail.addEventListener('click', function () { showExtDetailDialog(p); });
   actions.appendChild(detail);
   var btn = document.createElement('button');
