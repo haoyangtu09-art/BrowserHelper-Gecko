@@ -22,6 +22,8 @@ import org.mozilla.reference.browser.agent.core.AgentMessage
 import org.mozilla.reference.browser.agent.core.AgentPermissionTier
 import org.mozilla.reference.browser.agent.core.ApiFormat
 import org.mozilla.reference.browser.agent.core.Role
+import org.mozilla.reference.browser.agent.core.TaskTrackerManager
+import org.mozilla.reference.browser.agent.core.TaskTrackerState
 
 enum class PanelNav { Chat, Drawer, Settings, ModelSelector, Personalization, Memory, Advanced }
 
@@ -56,9 +58,13 @@ class SavedChat(
     titled: Boolean = false,
     val messages: MutableList<ChatMsg> = mutableListOf(),
     val convo: MutableList<AgentMessage> = mutableListOf(),
+    tracker: TaskTrackerState = TaskTrackerState(),
 ) {
     var title by mutableStateOf(title)
     var titled by mutableStateOf(titled)
+    // Per-chat Visual Task Tracker snapshot. Persisted alongside messages/convo so closing
+    // the overlay, killing the app, or reopening a history entry restores the live task list.
+    var tracker by mutableStateOf(tracker)
 }
 
 /**
@@ -74,6 +80,12 @@ class PanelState {
     val convo = mutableListOf<AgentMessage>()
     var input by mutableStateOf("")
     var generating by mutableStateOf(false)
+
+    // Monotonic turn id. Bumped whenever the "live turn" boundary changes — a new send, an
+    // explicit stop, opening a new chat, or switching chats. AgentEngine captures this value
+    // when a turn starts and refuses to write into shared state once it no longer matches, so a
+    // superseded / stopped reply can never bleed into the chat the user is now looking at.
+    var turnEpoch = 0
     var tempChat by mutableStateOf(false)
     var nav by mutableStateOf(PanelNav.Chat)
     var tier by mutableStateOf(ReasonTier.Middle)
@@ -125,6 +137,11 @@ class PanelState {
     var planMode by mutableStateOf(false)
     var planText by mutableStateOf("")
 
+    // Visual Task Tracker — Claude-Code-style task list shown inline in the chat stream.
+    // Mutations go through TaskTrackerManager which assigns a new TaskTrackerState copy()
+    // here to drive Compose recomposition; persisted per chat by AgentSettingsStore.
+    var tracker by mutableStateOf(TaskTrackerState())
+
     // Provider/settings fields persisted by AgentSettingsStore.
     var apiKey by mutableStateOf("")
     var apiUrl by mutableStateOf("")
@@ -170,16 +187,19 @@ class PanelState {
         saveCurrentChat()
         input = ""
         generating = true
+        turnEpoch += 1
         onTurn?.invoke()
     }
 
     fun stop() {
         generating = false
+        turnEpoch += 1
         onStop?.invoke()
     }
 
     fun newChat() {
         onStop?.invoke()
+        turnEpoch += 1
         saveCurrentChat()
         messages.clear()
         convo.clear()
@@ -192,6 +212,7 @@ class PanelState {
         currentChatId = null
         currentChatTitle = null
         attachments.clear()
+        tracker = TaskTrackerState()
         persist()
     }
 
@@ -209,6 +230,7 @@ class PanelState {
         chat.convo.addAll(convo)
         currentChatTitle?.let { chat.title = it }
         chat.titled = titleGenerated
+        chat.tracker = tracker
         persist()
     }
 
@@ -220,6 +242,7 @@ class PanelState {
             return
         }
         onStop?.invoke()
+        turnEpoch += 1
         saveCurrentChat()
         val chat = chats.firstOrNull { it.id == id } ?: return
         messages.clear()
@@ -235,6 +258,7 @@ class PanelState {
         planMode = false
         planText = ""
         attachments.clear()
+        tracker = chat.tracker
         nav = PanelNav.Chat
         persist()
     }
@@ -251,7 +275,45 @@ class PanelState {
         convo.add(AgentMessage(Role.User, "我已批准上面的计划，请按计划继续执行，不需要再次确认计划本身。"))
         saveCurrentChat()
         generating = true
+        turnEpoch += 1
         onTurn?.invoke()
+    }
+
+    /**
+     * Plan → Tasks: parses [planText] (format: "Title\n1. step\n2. step\n...") into a fresh
+     * task group + N child tasks, mutating [tracker] via a local TaskTrackerManager. Returns
+     * the new groupId, or null when the plan text has no parseable steps.
+     *
+     * The plan card stays visible after conversion (so the user can also choose
+     * "批准并开始" if they want); the tasks just appear in the tracker card. This is the
+     * "one-button convert" affordance from the spec — the plan card now offers a third
+     * action besides 批准/编辑.
+     */
+    fun convertPlanToTasks(): String? {
+        val raw = planText.trim()
+        if (raw.isEmpty()) return null
+        val lines = raw.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return null
+        // Treat the first non-empty line as the title only when at least one numbered/bulleted
+        // step follows. Otherwise the entire plan body becomes a single task.
+        val stepRegex = Regex("^(?:\\d+[.、)]|[-*•])\\s*(.+)")
+        val titleLine = lines.first()
+        val candidateSteps = lines.drop(1).mapNotNull { line ->
+            stepRegex.matchEntire(line)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        val (groupTitle, steps) = if (candidateSteps.isNotEmpty()) {
+            titleLine to candidateSteps
+        } else {
+            "Plan" to listOf(titleLine)
+        }
+        val mgr = TaskTrackerManager(
+            read = { tracker },
+            write = { tracker = it },
+            persist = { saveCurrentChat() },
+        )
+        val groupId = mgr.createGroup(groupTitle)
+        steps.forEach { mgr.addTask(groupId, it) }
+        return groupId
     }
 
     fun persist() {
@@ -394,6 +456,7 @@ class PanelState {
         val chat = SavedChat(id = java.util.UUID.randomUUID().toString(), title = title)
         chat.messages.addAll(messages)
         chat.convo.addAll(convo)
+        chat.tracker = tracker
         chats.add(0, chat)
         currentChatId = chat.id
         currentChatTitle = title

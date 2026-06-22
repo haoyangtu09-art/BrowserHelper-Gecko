@@ -152,14 +152,15 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - **abort**：给浏览器写合成 `403 + Connection: close` 后 `return`（断连，等价 Charles abort）。
 - 暂停的请求体先缓冲（`readExact`，有界）才上报面板;二进制体上报为空（仅文本 API 可编辑）。
 - 面板侧复用既有「请求拦截」队列 UI：`proxy-feed.js` 收 `reqIntercept`→postMessage `{type:'req'}`+`{type:'breakpoint',mode:'intercept'}`;`bpResolve` 按 `proxyFlowIdForReqId(reqId)` 反查 flowId 回 native。规则下发 `pushInterceptRulesToNative()`（含 `netInterceptRulesLoaded` 守卫，仿 replace），原生 `loadInterceptConfig()` 冷启动恢复。
-- **响应方向拦截（Phase 2）尚未实现**：将在 `pumpResponses` 复用 replace 的解码/identity 重组加同款暂停（`respIntercept`/`resolveRespIntercept`）。
+- **响应方向拦截已实现**：`pumpResponses` 只对有界、可解码、非流式响应进入 `awaitRespIntercept()`，复用 replace 的解码/identity 重组和 `respIntercept`/`resolveRespIntercept` 队列；超时/断开同样 fail-open 放行原响应。
 
-#### 按类拦截（遥测 / 噪音 / cookie 三个独立开关）
+#### 按类拦截（遥测 / 心跳 / 噪音 / cookie 四个独立开关）
 
-「拦截全部低价值流量」的反向开关。原生 `isLowValueUrl(host,target,method,reqBodyLen)` 用 `telemetryRe`/`noiseRe`/`cookieRe` 三条正则 + 小体积/GET 护栏判定某请求是否「低价值」（默认低价值 = 不暂停、直接放行）。三个 `@Volatile` 开关 `interceptTelemetry`/`interceptNoise`/`interceptCookie` 由面板下发：**某类开关打开 → 该类不再算低价值 → 会被拦截暂停**。
+「拦截全部低价值流量」的反向开关。原生 `isLowValueUrl(host,target,method,reqBodyLen)` 用 `telemetryRe`/`heartbeatRe`/`noiseRe`/`cookieRe` 四条正则 + 小体积/GET 护栏判定某请求是否「低价值」（默认低价值 = 不暂停、直接放行）。四个 `@Volatile` 开关 `interceptTelemetry`/`interceptHeartbeat`/`interceptNoise`/`interceptCookie` 由面板或 Agent 下发：**某类开关打开 → 该类不再算低价值 → 会被拦截暂停**。
 
-- 下发链路：面板「长按拦截配置」勾选 → `pushInterceptRulesToNative()` 带 `interceptTelemetry/Noise/Cookie:(master && netScope*)` → `DevToolsHelper` → `ProxyProbe.setInterceptRules()`。
-- 持久化：`saveInterceptConfig()`/`loadInterceptConfig()` 一并存这三个布尔（`intercept_config`）。
+- 下发链路：面板「长按拦截配置」勾选 → `pushInterceptRulesToNative()` 带 `interceptTelemetry/Heartbeat/Noise/Cookie:(master && netScope*)` → `DevToolsHelper` → `ProxyProbe.setInterceptRules()`。
+- 前后端同步：`ProxyProbe.notifyInterceptState()` 发 `interceptState`；`DevToolsHelper` 在 content port 连接、面板 `requestInterceptState`、`setInterceptRules`、resolve 后主动推真实状态；`proxy-feed.js` 回灌前端按钮/作用域/规则列表，避免 Agent 打开拦截后前台仍显示关闭。
+- 持久化：`saveInterceptConfig()`/`loadInterceptConfig()` 一并存这四个布尔（`intercept_config`）。
 - 默认全 off = 旧行为（所有低价值流量都放行）。**坑#4 安全**：只改「是否进入既有暂停分支」的判定，不新增缓冲。
 
 #### 原生 Mock（合成响应，复用 abort 模型）
@@ -177,6 +178,49 @@ Phase 1（已回退的 commit `a7220126`）把 `mitm()` 的「解密 + 盲转发
 - **限速**：`mitm()` 用 `throttleWrap(tlsClient.outputStream)` 包下行方向。`ThrottledOutputStream` 按 8K 分片**边读边写**（write-through），片间 `sleep` 把速率压到 `throttleKbps*1024 B/s`；关闭时纯透传，永不整体缓冲。
 - **延迟**：`pumpResponses` 在处理完 1xx、取 `flowQueue.poll()` 之前调 `throttleLatency()`，按 `throttleLatencyMs` 给每个响应注入延迟。
 - 面板下发：`pushThrottleToNative()` → `setThrottle` → `applyThrottleConfig`/`saveThrottleConfig`（`throttle_config`）。字段 `throttleEnabled/throttleLatencyMs/throttleKbps`。
+
+### 5. ✅ 网页图片上传失败：不是网络/内核，漏接 Fragment 文件选择回调
+
+> **最终真机验证已恢复（2026-06-22）**：有效修复是 commit `4e1d8b74`
+> `允许旧文件选择回调编译`，核心业务修复在 `a5ae7ed6`
+> `修复网页文件选择结果回调`。不要再把这类症状优先判成 MITM/Eruda/Gecko 内核 bug。
+
+#### 原症状（已修）
+
+- 网页 `<input type=file>` 选图后没有附加成功；ChatGPT 选一张约 500KB 图片后没有出现附件。
+- 抓包里没有对应上传请求，只有「打开了文件选择器」之类埋点。
+- 重复一次上传流程后，连图片选择器都可能不再弹出。
+- 代理开/关一样、Eruda 开/关一样、多个网页都一样。
+
+#### 排查过程 / 误判点
+
+- 一开始怀疑 MITM 代理把上传请求拦截或卡住，但「不开代理也失败」直接排除网络代理层。
+- 又怀疑 Eruda / chobitsu patch XHR/fetch，但「不开 Eruda 也失败」排除页面注入层。
+- 看到「没有上传请求，只有打开文件选择器埋点」后才把方向转到 file prompt：这说明网页已经触发选择器，但选择结果没有交回 GeckoView，网络层自然不会产生上传。
+- `19a9f71d` 按 android-components 153.x 给 `PromptFeature` 注入 `AndroidPhotoPicker`，但仍不够；AC 153 的 `FilePicker` 里 Photo Picker 只是权限失败后的 fallback，不一定是实际主路径。
+- `699ef6ae` 让 `BaseBrowserFragment` 自己注册 Photo Picker launcher 并直接消费 `PromptRequest.File`，仍不够；因为旧 chooser 路径不是从 Activity handler 这一条路稳定回来。
+
+#### 最终根因 / 有效修复
+
+- android-components `PromptContainer.Fragment.startActivityForResult()` 是从 Fragment 发起文件 chooser。
+- 项目原来只实现了 `mozilla.components.support.base.feature.ActivityResultHandler.onActivityResult(requestCode,data,resultCode)`，靠 `BrowserActivity.onActivityResult()` 手动转发。
+- 但 Fragment 发起的旧式 `startActivityForResult` 结果可能先进 AndroidX Fragment 自己的系统回调
+  `Fragment.onActivityResult(requestCode,resultCode,data)`；`BaseBrowserFragment` 没覆写这个 deprecated 系统入口时，文件选择结果会绕过我们自己的 prompt 完成逻辑。
+- 最终修复：`BaseBrowserFragment` 同时实现两个入口：
+  - AC handler：`onActivityResult(requestCode, data, resultCode): Boolean`
+  - Fragment 系统入口：`onActivityResult(requestCode, resultCode, data)`
+  两者统一调用 `handlePromptActivityResult()`，再走同一套 `PromptRequest.File` 完成/消费逻辑。
+- 因项目开启 Kotlin `-Werror`，覆写 deprecated 回调时必须局部 `@Suppress("DEPRECATION")`，否则 CI 编译失败。
+
+#### 经验教训
+
+- 「选了文件但网页没收到、抓不到上传请求」优先怀疑 **file prompt 没被完成**，不要先追网络上传、证书、代理或 fetch/XHR。
+- Android 文件上传链路至少有三层：网页/Gecko file prompt、android-components `PromptFeature/FilePicker`、Android Activity/Fragment result API。症状像网页问题，根因可能在结果回调入口。
+- 对 android-components snapshot 版本（这里是 `153.0.20260614093100`）要直接查 sources jar；不要只看旧经验。AC main 与 snapshot 里的 `FilePicker` 可能不同。
+- Photo Picker、`ACTION_GET_CONTENT`、`ACTION_OPEN_DOCUMENT`、相机 capture 是多条路径；只修 Photo Picker launcher 不等于修了完整网页上传。
+- 旧式 `Fragment.startActivityForResult()` 和项目自定义 `ActivityResultHandler` 并不是同一个入口。只接 Activity 转发不够时，要同时接 Fragment 的系统回调。
+- 若第二次点击文件选择器不弹，通常是上一次 prompt 没有 `confirm`/`dismiss`，仍挂在 Gecko 侧；必须消费 prompt，不能只拿到 Uri。
+- CI 是必要验证：本地 Termux 无 Android SDK 时，`@Deprecated`/`-Werror` 这类 Kotlin 编译问题只能由 GitHub Action 暴露。
 
 ## ✅ 已解决 Bug：开 Eruda 后刷新页面 → 整页放大一圈 + 错位（APZ 跳变）
 
@@ -389,7 +433,7 @@ Eruda v3.4.3 的 `init()` 默认 `autoScale=true`；移动端会读取 `<meta na
   - `__bhErudaActive`
   - `__bhNetConfigCache`
 - 原生 `SharedPreferences("bh_devtools")`（`REPLACE_PREFS`）—— 代理侧配置冷启动恢复：
-  - `replace_config` / `intercept_config`（含按类拦截三开关）/ `sse_hold_config`
+  - `replace_config` / `intercept_config`（含按类拦截四开关）/ `sse_hold_config`
   - `mock_config` / `throttle_config`
   - `proxy_enabled`（「监听」意图，冷启动按此自动续开新端口）
 
@@ -458,7 +502,7 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 - ✅ 真机验证：请求抓包、响应抓包、请求体、响应体（含 chunked+gzip/deflate/br）、请求拦截、响应拦截、过滤、字符替换、插件框架（截流 v0.1）。
 - ✅ 真机验证：Eruda 刷新自动恢复放大/错位已修。最终有效点是自动恢复走
   `restoreToggle -> DevToolsHelper.sendToggle(engineSession) -> content action:"toggle"`，不要改回直接 JS `toggle()`。
-- 🟡 已实现 CI 绿、待真机：按类拦截拆分（遥测/噪音/cookie 三独立开关）、原生 Mock、原生弱网、冷启动自动续开代理、改名。
+- 🟡 已实现 CI 绿、待真机：按类拦截拆分（遥测/心跳/噪音/cookie 四独立开关）与前后端状态同步、原生 Mock、原生弱网、冷启动自动续开代理、改名。
 
 ### 4. Remaining Work
 - 真机验证本轮 5 项新特性。
@@ -521,7 +565,7 @@ node --check /data/data/com.termux/files/usr/tmp/devtools_injector_bundle_check.
 
 ## B. 精简版 Handoff
 > 核心模型：`ProxyProbe.kt`(Kotlin object) = 本地 TLS 终止 MITM，解密+双向盲转发，绝不完整 HTTP 解析/整体缓冲（坑#4：页面加载不出来+Eruda 打不开）。功能在 pump 上旁路 tee/受控有界缓冲/fail-open 暂停增量加。数据流：请求 `Browser→MITM→ProxyProbe→DevToolsHelper→proxy-feed→panel`；响应 `Server→MITM→ProxyProbe→proxy-feed→panel`。page-world 拦截器已删，原生代理唯一数据源。
-> 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流。已实现待真机：按类拦截(遥测/噪音/cookie 三开关 gating `isLowValueUrl`)、原生 Mock(`matchMock`+`buildMockResponse`+`Connection:close`，仅有界)、原生弱网(`ThrottledOutputStream` write-through+逐响应延迟)、冷启动续开(`proxy_enabled`+新端口)、改名。
+> 已稳定(真机)：请求/响应抓包+body、请求/响应拦截、字符替换、过滤、截流。已实现待真机：按类拦截(遥测/心跳/噪音/cookie 四开关 gating `isLowValueUrl`)、原生 Mock(`matchMock`+`buildMockResponse`+`Connection:close`，仅有界)、原生弱网(`ThrottledOutputStream` write-through+逐响应延迟)、冷启动续开(`proxy_enabled`+新端口)、改名。
 > 铁律：①不碰 pump 模型 ②不改请求 Accept-Encoding ③流式/SSE/WS/无 CL 一律放行不缓冲 ④叶子 issuer 用根 subject 精确 DER ⑤`reimportEnterpriseRoots` 勿删（与页面加载无关）⑥冷启动续开新端口勿改回直连 ⑦面板编辑走 light-DOM `openEditOverlay` ⑧Eruda 刷新自动恢复必须走 native `restoreToggle -> sendToggle`，勿改回 content 直接 `toggle()`。
 > 持久化：面板 `storage.local:bhNetConfig/bhNetReplaceRules/bhNetInterceptRules`；原生 `SharedPreferences("bh_devtools")`:`replace_config/intercept_config/sse_hold_config/mock_config/throttle_config/proxy_enabled`。
 > 验证：JS 跑 `node --check` 每文件 + manifest 顺序拼接；Kotlin 仅 CI 编译(allWarningsAsErrors)；APK 名带 commit SHA。下一步：真机验证 5 项新特性。

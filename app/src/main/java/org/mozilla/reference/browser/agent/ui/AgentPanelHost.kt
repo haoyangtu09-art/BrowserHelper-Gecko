@@ -4,6 +4,9 @@
 
 package org.mozilla.reference.browser.agent.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
@@ -52,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
@@ -295,6 +299,13 @@ private fun PlanCard(state: PanelState) {
                     .clickable { state.approvePlan() }
                     .padding(horizontal = 16.dp, vertical = 9.dp),
             ) { BasicText("批准并开始", style = AgentText.Body.copy(color = Color.White)) }
+            // Plan → Tasks: parses the plan body into a new task group below, but leaves
+            // the plan card up so the user can still hit "批准并开始" / "继续编辑".
+            Box(
+                Modifier.clip(AgentShapes.Pill).background(AgentColors.Bg)
+                    .clickable { state.convertPlanToTasks() }
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+            ) { BasicText("转为任务清单", style = AgentText.Body) }
             Box(
                 Modifier.clip(AgentShapes.Pill).background(AgentColors.Bg)
                     .clickable { state.planMode = false }
@@ -638,18 +649,36 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
 @Composable
 private fun AdvancedScreen(state: PanelState, onBack: () -> Unit) {
     val tools = remember { agentToolInfos() }
+    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     Column(Modifier.fillMaxSize().background(AgentColors.Surface).padding(16.dp).verticalScroll(rememberScrollState())) {
         ScreenHeader("高级", onBack) {
-            Box(
-                Modifier.clip(AgentShapes.Pill)
-                    .background(if (state.toolsChecking) AgentColors.Control else AgentColors.Accent)
-                    .clickable { if (!state.toolsChecking) state.onToolSelfTestAll?.invoke() }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-            ) {
-                BasicText(
-                    if (state.toolsChecking) "自检中" else "全部自检",
-                    style = AgentText.Label.copy(color = if (state.toolsChecking) AgentColors.TextSecondary else Color.White),
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Copy every failed self-test (name + detail) so issues can be reported in one tap.
+                Box(
+                    Modifier.clip(AgentShapes.Pill)
+                        .background(AgentColors.Control)
+                        .clickable {
+                            val report = buildToolCheckErrorReport(tools, state)
+                            clipboard.setPrimaryClip(
+                                ClipData.newPlainText("tool-self-test-errors", report),
+                            )
+                        }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                ) {
+                    BasicText("复制错误", style = AgentText.Label.copy(color = AgentColors.TextSecondary))
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier.clip(AgentShapes.Pill)
+                        .background(if (state.toolsChecking) AgentColors.Control else AgentColors.Accent)
+                        .clickable { if (!state.toolsChecking) state.onToolSelfTestAll?.invoke() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                ) {
+                    BasicText(
+                        if (state.toolsChecking) "自检中" else "全部自检",
+                        style = AgentText.Label.copy(color = if (state.toolsChecking) AgentColors.TextSecondary else Color.White),
+                    )
+                }
             }
         }
         Spacer(Modifier.height(16.dp))
@@ -709,6 +738,23 @@ private fun TierBadge(tier: AgentPermissionTier) {
     Box(Modifier.clip(AgentShapes.Pill).background(bg).padding(horizontal = 8.dp, vertical = 3.dp)) {
         BasicText(tier.name, style = AgentText.Label.copy(color = fg))
     }
+}
+
+/**
+ * Collects every failed (and untested-but-detailed) tool self-test into a single plain-text
+ * report for the 复制错误 button. Lists failures first; falls back to a friendly note when none.
+ */
+private fun buildToolCheckErrorReport(tools: List<AgentToolInfo>, state: PanelState): String {
+    val failures = tools.mapNotNull { tool ->
+        val check = state.toolChecks[tool.name] ?: return@mapNotNull null
+        if (check.status != "失败") return@mapNotNull null
+        "【${tool.name}】(${tool.tier.name})\n${check.detail.ifBlank { "（无详情）" }}"
+    }
+    if (failures.isEmpty()) {
+        val anyChecked = tools.any { state.toolChecks[it.name] != null }
+        return if (anyChecked) "工具自检无失败项。" else "尚未运行工具自检（请先点「全部自检」）。"
+    }
+    return "工具自检失败 ${failures.size} 项：\n\n" + failures.joinToString("\n\n")
 }
 
 private fun statusColor(status: String): Color = when (status) {

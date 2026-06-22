@@ -58,6 +58,22 @@ interface AgentPanelBridge {
     fun listMemories(): JSONArray
     fun addMemory(value: String): Int
     fun deleteMemory(index: Int): Boolean
+
+    // Visual Task Tracker — see TaskTrackerManager for semantics. All methods run on the
+    // main thread (registry uses runOnMainResult); host implementations may directly mutate
+    // PanelState.tracker.
+    fun taskTrackerSnapshot(): JSONObject
+    fun taskCurrentId(): String?
+    fun taskCreateGroup(title: String): String
+    fun taskAddTask(groupId: String, title: String, description: String): String?
+    fun taskStart(taskId: String): Boolean
+    fun taskComplete(taskId: String): Boolean
+    fun taskFail(taskId: String, error: String): Boolean
+    fun taskCancel(taskId: String): Boolean
+    fun taskUpdate(taskId: String, title: String?, description: String?): Boolean
+    fun taskDelete(taskId: String): Boolean
+    fun taskClearAll(): Boolean
+    fun taskRecordToolCall(taskId: String, name: String, status: String, durationMs: Long, error: String): Boolean
 }
 
 private data class ToolDef(
@@ -236,12 +252,52 @@ class AgentToolRegistry(
                     "允许，并且本次会话不再询问批量放行",
                 )
             }
-            "cookie_reveal" ->
+            "cookie_reveal", "auth_reveal", "set_cookie_headers_reveal" -> {
+                val headerName = when (name) {
+                    "set_cookie_headers_reveal" -> "set-cookie"
+                    else -> args.optString("name", "authorization")
+                }
                 req(
                     "允许 Agent 读取这条请求的凭证明文吗？",
-                    "secret:${args.optString("id", "")}:${args.optString("name", "authorization").lowercase()}",
-                    "flowId=${args.optString("id", "")}, header=${args.optString("name", "authorization")}",
+                    "secret:${args.optString("id", "")}:${headerName.lowercase()}",
+                    "flowId=${args.optString("id", "")}, header=$headerName",
                     "允许，并且本次会话不再询问这个凭证范围",
+                )
+            }
+            "cookie_list_redacted", "auth_headers_redacted" ->
+                req(
+                    "允许 Agent 查看这条请求有哪些凭证头吗？（值会脱敏）",
+                    "secret-list:$name:${args.optString("id", "")}",
+                    "flowId=${args.optString("id", "")}（脱敏列表，不读明文）",
+                    "允许，并且本次会话不再询问这个脱敏凭证列表",
+                )
+            "container_cp", "container_mv", "container_rm", "container_rmdir",
+            "container_mkdir", "container_touch", "container_append" -> {
+                val target = when (name) {
+                    "container_cp", "container_mv" ->
+                        "${scopePath(args.optString("src", ""))} -> ${scopePath(args.optString("dest", ""))}"
+                    else -> scopePath(args.optString("path", "."))
+                }
+                req(
+                    "允许 Agent 修改本地容器内的文件吗？",
+                    "container-fs:$name:${shortHash(target)}",
+                    "$name $target",
+                    "允许，并且本次会话不再询问这个容器文件操作",
+                )
+            }
+            "plugin_enable", "plugin_disable" ->
+                req(
+                    "允许 Agent 启用/停用这个浏览器插件吗？",
+                    "plugin:$name:${args.optString("id", "")}",
+                    "$name id=${args.optString("id", "")}",
+                    "允许，并且本次会话不再询问这个插件开关",
+                )
+            "page_save_to_container" ->
+                req(
+                    "允许 Agent 把当前网页源码保存到容器文件吗？",
+                    "page-save:${scopePath(args.optString("path", "").ifBlank { "(自动命名)" })}",
+                    "保存当前页面 HTML 到 ${args.optString("path", "").ifBlank { "pages/<host>_<时间戳>.html" }}",
+                    "允许，并且本次会话不再询问保存当前页面",
                 )
             "tab_switch" ->
                 req(
@@ -249,6 +305,20 @@ class AgentToolRegistry(
                     "tab-switch:${args.optString("id", "")}",
                     "切换到 tab ${args.optString("id", "")}",
                     "允许，并且本次会话不再询问切换标签页",
+                )
+            "page_navigate" ->
+                req(
+                    "允许 Agent 导航当前浏览器标签页吗？",
+                    "page-nav:${networkScope(name, args)}",
+                    "当前 tab 加载 ${args.optString("url", "")}",
+                    "允许，并且本次会话不再询问这个导航目标",
+                )
+            "page_reload", "page_back", "page_forward" ->
+                req(
+                    "允许 Agent 控制当前浏览器标签页吗？",
+                    "page-history:$name",
+                    name,
+                    "允许，并且本次会话不再询问这个标签页控制操作",
                 )
             "page_click", "page_type" ->
                 req(
@@ -342,11 +412,33 @@ class AgentToolRegistry(
                     JSONObject().put("selector", selector).put("limit", args.optInt("limit", 20)),
                 )
             }
+            "page_save_to_container" -> savePageToContainer(args)
             "container_list" -> listFiles(containerRoot(), args.optString("path", "."))
             "container_read" -> readFile(containerRoot(), args.optString("path", ""))
             "container_write" -> writeFile(containerRoot(), args.optString("path", ""), args.optString("content", ""))
             "batch_edit_files" -> batchWriteFiles(containerRoot(), args.optJSONArray("edits") ?: JSONArray())
             "container_serve_url" -> serveContainerUrl(args.optString("path", ""))
+            // container shell tools (coreutils-equivalent over the sandbox)
+            "container_grep" -> containerGrep(args)
+            "container_find" -> containerFind(args)
+            "container_head" -> containerHeadTail(args, head = true)
+            "container_tail" -> containerHeadTail(args, head = false)
+            "container_wc" -> containerWc(args)
+            "container_stat" -> containerStat(args)
+            "container_du" -> containerDu(args)
+            "container_tree" -> containerTree(args)
+            "container_file_type" -> containerFileType(args)
+            "container_which" -> containerWhich(args)
+            "container_sed" -> containerSed(args)
+            "container_realpath" -> containerRealpath(args)
+            "container_diff" -> containerDiff(args)
+            "container_cp" -> containerCp(args)
+            "container_mv" -> containerMv(args)
+            "container_rm" -> containerRm(args)
+            "container_mkdir" -> containerMkdir(args)
+            "container_rmdir" -> containerRmdir(args)
+            "container_touch" -> containerTouch(args)
+            "container_append" -> containerAppend(args)
             "web_search" -> webSearch(args.optString("query", ""), args.optInt("limit", 5))
             "browser_request" -> browserRequest(args)
             "proxy_start" -> {
@@ -360,7 +452,7 @@ class AgentToolRegistry(
             "throttle_set" -> {
                 ProxyProbe.setThrottle(
                     JSONObject()
-                        .put("throttleEnabled", args.optBoolean("enabled", false))
+                        .put("enabled", args.optBoolean("enabled", false))
                         .put("latencyMs", args.optLong("latencyMs", 0L))
                         .put("kbps", args.optLong("kbps", 0L)),
                 )
@@ -412,9 +504,10 @@ class AgentToolRegistry(
                         .put("interceptCookie", args.optBoolean("interceptCookie", false))
                         .put("rules", rules),
                 )
-                ok("intercept rules set: enabled=$enabled reqAll=$reqAll respAll=$respAll lowValue=${if (args.optBoolean("interceptTelemetry", false)) "" else "telemetry pass; "}${if (args.optBoolean("interceptHeartbeat", false) || args.optBoolean("interceptNoise", false)) "" else "heartbeat/noise pass; "}${if (args.optBoolean("interceptCookie", false)) "" else "cookie pass"}")
+                ok("intercept rules set: enabled=$enabled reqAll=$reqAll respAll=$respAll lowValue=${if (args.optBoolean("interceptTelemetry", false)) "" else "telemetry pass; "}${if (args.optBoolean("interceptHeartbeat", false)) "" else "heartbeat pass; "}${if (args.optBoolean("interceptNoise", false)) "" else "noise pass; "}${if (args.optBoolean("interceptCookie", false)) "" else "cookie pass"}")
             }
             "intercept_pending" -> ok(ProxyProbe.pendingInterceptList().toString())
+            "intercept_list_rules" -> ok(ProxyProbe.interceptRulesJson().toString())
 	            "intercept_resolve" -> {
 	                val flowId = NetFlowStore.flowIdFor(args.optString("flowId", "")) ?: args.optString("flowId", "")
 	                if (flowId.isEmpty()) return@withContext err("flowId required")
@@ -523,6 +616,44 @@ class AgentToolRegistry(
                 val value = NetFlowStore.revealHeader(flowId, header)
                 if (value == null) err("flow $flowId has no $header header") else ok(value)
             }
+            "cookie_list_redacted" -> {
+                val flowId = NetFlowStore.flowIdFor(args.optString("id", "")) ?: args.optString("id", "")
+                if (flowId.isEmpty()) return@withContext err("id required")
+                val arr = NetFlowStore.sensitiveHeadersJson(flowId, "cookie")
+                if (arr == null) err("no flow with id=$flowId") else ok(JSONObject().put("flowId", flowId).put("headers", arr).toString())
+            }
+            "auth_headers_redacted" -> {
+                val flowId = NetFlowStore.flowIdFor(args.optString("id", "")) ?: args.optString("id", "")
+                if (flowId.isEmpty()) return@withContext err("id required")
+                val arr = NetFlowStore.sensitiveHeadersJson(flowId, "auth")
+                if (arr == null) err("no flow with id=$flowId") else ok(JSONObject().put("flowId", flowId).put("headers", arr).toString())
+            }
+            "auth_reveal" -> {
+                val flowId = NetFlowStore.flowIdFor(args.optString("id", "")) ?: args.optString("id", "")
+                if (flowId.isEmpty()) return@withContext err("id required")
+                val header = args.optString("name", "authorization")
+                val value = NetFlowStore.revealHeader(flowId, header)
+                if (value == null) err("flow $flowId has no $header header") else ok(value)
+            }
+            "set_cookie_headers_reveal" -> {
+                val flowId = NetFlowStore.flowIdFor(args.optString("id", "")) ?: args.optString("id", "")
+                if (flowId.isEmpty()) return@withContext err("id required")
+                val value = NetFlowStore.revealHeader(flowId, "set-cookie")
+                if (value == null) err("flow $flowId has no set-cookie header") else ok(value)
+            }
+            "plugin_list" -> page("pluginList")
+            "plugin_get_permissions" -> {
+                val id = args.optString("id", "")
+                if (id.isBlank()) err("id required") else page("pluginInfo", JSONObject().put("id", id))
+            }
+            "plugin_enable" -> {
+                val id = args.optString("id", "")
+                if (id.isBlank()) err("id required") else page("pluginEnable", JSONObject().put("id", id))
+            }
+            "plugin_disable" -> {
+                val id = args.optString("id", "")
+                if (id.isBlank()) err("id required") else page("pluginDisable", JSONObject().put("id", id))
+            }
             "page_exec" -> {
                 val code = args.optString("code", "")
                 if (code.isEmpty()) err("code required") else page(
@@ -552,6 +683,31 @@ class AgentToolRegistry(
                     runOnMain { appContext.components.useCases.tabsUseCases.selectTab(id) }
                     ok("switched to tab $id")
                 }
+            }
+            "page_navigate" -> {
+                val url = normalizeNavigateUrl(args.optString("url", ""))
+                    ?: return@withContext err("url required")
+                runOnMain { appContext.components.useCases.sessionUseCases.loadUrl(url) }
+                val waitMs = args.optLong("waitMs", 0L).coerceIn(0L, 10_000L)
+                if (waitMs > 0) Thread.sleep(waitMs)
+                ok(
+                    JSONObject()
+                        .put("requestedUrl", url)
+                        .put("currentTab", currentTabJson() ?: JSONObject())
+                        .toString(),
+                )
+            }
+            "page_reload" -> {
+                runOnMain { appContext.components.useCases.sessionUseCases.reload.invoke() }
+                ok(JSONObject().put("action", "reload").put("currentTab", currentTabJson() ?: JSONObject()).toString())
+            }
+            "page_back" -> {
+                runOnMain { appContext.components.useCases.sessionUseCases.goBack.invoke() }
+                ok(JSONObject().put("action", "back").put("currentTab", currentTabJson() ?: JSONObject()).toString())
+            }
+            "page_forward" -> {
+                runOnMain { appContext.components.useCases.sessionUseCases.goForward.invoke() }
+                ok(JSONObject().put("action", "forward").put("currentTab", currentTabJson() ?: JSONObject()).toString())
             }
             "page_click" -> {
                 val selector = args.optString("selector", "")
@@ -694,6 +850,131 @@ class AgentToolRegistry(
                     err("no memory at index $index")
                 }
             }
+            // ----------------------------------------------------------- Visual Task Tracker
+            // All 9 task tools are S1 (no approval prompt) — the spec wants the agent to
+            // maintain its own plan without bothering the user on every checkbox flip.
+            "agent_tasks_create" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val title = args.optString("title", "")
+                if (title.isBlank()) {
+                    err("title required")
+                } else {
+                    val gid = runOnMainResult { bridge.taskCreateGroup(title) }
+                    ok(JSONObject().put("groupId", gid).toString())
+                }
+            }
+            "agent_tasks_add" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val groupId = args.optString("groupId", "")
+                val title = args.optString("title", "")
+                val description = args.optString("description", "")
+                if (groupId.isBlank()) {
+                    err("groupId required")
+                } else if (title.isBlank()) {
+                    err("title required")
+                } else {
+                    val tid = runOnMainResult { bridge.taskAddTask(groupId, title, description) }
+                    if (tid == null) err("group $groupId not found or title invalid")
+                    else ok(JSONObject().put("taskId", tid).toString())
+                }
+            }
+            "agent_tasks_start" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (runOnMainResult { bridge.taskStart(taskId) }) {
+                    ok("task $taskId started")
+                } else {
+                    err("task $taskId not found or already active")
+                }
+            }
+            "agent_tasks_complete" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (runOnMainResult { bridge.taskComplete(taskId) }) {
+                    ok("task $taskId completed")
+                } else {
+                    err("task $taskId not found")
+                }
+            }
+            "agent_tasks_fail" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                val error = args.optString("error", "")
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (runOnMainResult { bridge.taskFail(taskId, error) }) {
+                    ok("task $taskId failed")
+                } else {
+                    err("task $taskId not found")
+                }
+            }
+            "agent_tasks_cancel" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (runOnMainResult { bridge.taskCancel(taskId) }) {
+                    ok("task $taskId cancelled")
+                } else {
+                    err("task $taskId not found")
+                }
+            }
+            "agent_tasks_update" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                // Use has() so the caller can null-out description (keep title) by omitting the
+                // field, vs explicitly clearing it. JSONObject.has discriminates "missing" from
+                // "explicit empty string" — important so partial updates do not overwrite text
+                // the agent didn't intend to touch.
+                val title = if (args.has("title")) args.optString("title", "") else null
+                val description = if (args.has("description")) args.optString("description", "") else null
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (title == null && description == null) {
+                    err("at least one of title/description required")
+                } else if (runOnMainResult { bridge.taskUpdate(taskId, title, description) }) {
+                    ok("task $taskId updated")
+                } else {
+                    err("task $taskId not found or no change")
+                }
+            }
+            "agent_tasks_rename" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                val title = args.optString("title", "")
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (title.isBlank()) {
+                    err("title required")
+                } else if (runOnMainResult { bridge.taskUpdate(taskId, title, null) }) {
+                    ok("task $taskId renamed")
+                } else {
+                    err("task $taskId not found or title unchanged")
+                }
+            }
+            "agent_tasks_delete" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                val taskId = args.optString("taskId", "")
+                if (taskId.isBlank()) {
+                    err("taskId required")
+                } else if (runOnMainResult { bridge.taskDelete(taskId) }) {
+                    ok("task $taskId deleted")
+                } else {
+                    err("task $taskId not found")
+                }
+            }
+            "agent_tasks_list" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                ok(runOnMainResult { bridge.taskTrackerSnapshot() }.toString())
+            }
+            "agent_tasks_clear" -> {
+                val bridge = panelBridge ?: return@withContext err("panel bridge unavailable")
+                if (runOnMainResult { bridge.taskClearAll() }) ok("cleared") else ok("already empty")
+            }
             else -> err("unknown tool: $name")
         }
     }
@@ -748,6 +1029,7 @@ class AgentToolRegistry(
                 if (!indexed.ok) indexed else execute(name, JSONObject().put("query", "<").put("limit", 1))
             }
             "page_query" -> execute(name, JSONObject().put("selector", "html").put("limit", 1))
+            "page_save_to_container" -> execute(name, JSONObject().put("path", "$tempDir/page_save.html"))
             "container_list" -> {
                 containerRoot().mkdirs()
                 execute(name, JSONObject().put("path", "."))
@@ -777,6 +1059,79 @@ class AgentToolRegistry(
                     browserRequest(JSONObject().put("url", url).put("method", "GET").put("timeoutMs", 5000))
                 }
             }
+            // container shell tools: seed a small text file, then exercise the tool against it.
+            "container_grep" -> {
+                writeFile(containerRoot(), "$tempDir/grep.txt", "alpha-$stamp\nbeta\n")
+                execute(name, JSONObject().put("pattern", "alpha").put("path", "$tempDir/grep.txt"))
+            }
+            "container_find" -> {
+                writeFile(containerRoot(), "$tempDir/find_me.txt", "x-$stamp")
+                execute(name, JSONObject().put("path", tempDir).put("namePattern", "find_me.txt"))
+            }
+            "container_head", "container_tail" -> {
+                writeFile(containerRoot(), "$tempDir/lines.txt", "l1\nl2\nl3\nl4\nl5\n")
+                execute(name, JSONObject().put("path", "$tempDir/lines.txt").put("lines", 2))
+            }
+            "container_wc" -> {
+                writeFile(containerRoot(), "$tempDir/wc.txt", "a b c\nd e\n")
+                execute(name, JSONObject().put("path", "$tempDir/wc.txt"))
+            }
+            "container_stat" -> {
+                writeFile(containerRoot(), "$tempDir/stat.txt", "stat-$stamp")
+                execute(name, JSONObject().put("path", "$tempDir/stat.txt"))
+            }
+            "container_du" -> {
+                writeFile(containerRoot(), "$tempDir/du.txt", "du-$stamp")
+                execute(name, JSONObject().put("path", tempDir))
+            }
+            "container_tree" -> {
+                writeFile(containerRoot(), "$tempDir/tree.txt", "tree-$stamp")
+                execute(name, JSONObject().put("path", tempDir).put("maxDepth", 2))
+            }
+            "container_file_type" -> {
+                writeFile(containerRoot(), "$tempDir/type.txt", "type-$stamp")
+                execute(name, JSONObject().put("path", "$tempDir/type.txt"))
+            }
+            "container_which" -> {
+                writeFile(containerRoot(), "$tempDir/which_target.txt", "w-$stamp")
+                execute(name, JSONObject().put("name", "which_target.txt"))
+            }
+            "container_sed" -> {
+                writeFile(containerRoot(), "$tempDir/sed.txt", "s1\ns2\ns3\n")
+                execute(name, JSONObject().put("path", "$tempDir/sed.txt").put("startLine", 1).put("endLine", 2))
+            }
+            "container_realpath" -> {
+                writeFile(containerRoot(), "$tempDir/real.txt", "r-$stamp")
+                execute(name, JSONObject().put("path", "$tempDir/real.txt"))
+            }
+            "container_diff" -> {
+                writeFile(containerRoot(), "$tempDir/diff_a.txt", "x\ny\n")
+                writeFile(containerRoot(), "$tempDir/diff_b.txt", "x\nz\n")
+                execute(name, JSONObject().put("pathA", "$tempDir/diff_a.txt").put("pathB", "$tempDir/diff_b.txt"))
+            }
+            "container_cp" -> {
+                writeFile(containerRoot(), "$tempDir/cp_src.txt", "cp-$stamp")
+                execute(name, JSONObject().put("src", "$tempDir/cp_src.txt").put("dest", "$tempDir/cp_dst.txt"))
+            }
+            "container_mv" -> {
+                writeFile(containerRoot(), "$tempDir/mv_src.txt", "mv-$stamp")
+                execute(name, JSONObject().put("src", "$tempDir/mv_src.txt").put("dest", "$tempDir/mv_dst.txt"))
+            }
+            "container_rm" -> {
+                writeFile(containerRoot(), "$tempDir/rm.txt", "rm-$stamp")
+                execute(name, JSONObject().put("path", "$tempDir/rm.txt"))
+            }
+            "container_mkdir" -> execute(name, JSONObject().put("path", "$tempDir/mkdir_$stamp"))
+            "container_rmdir" -> {
+                resolvePath(containerRoot(), "$tempDir/rmdir_$stamp")?.mkdirs()
+                execute(name, JSONObject().put("path", "$tempDir/rmdir_$stamp"))
+            }
+            "container_touch" -> execute(name, JSONObject().put("path", "$tempDir/touch_$stamp.txt"))
+            "container_append" -> execute(
+                name,
+                JSONObject().put("path", "$tempDir/append_$stamp.txt").put("content", "appended-$stamp\n"),
+            )
+            "intercept_list_rules" -> execute(name, JSONObject())
             "web_search" -> execute(name, JSONObject().put("query", "BrowserHelper self test").put("limit", 1))
             "browser_request" -> {
                 writeFile(containerRoot(), "$tempDir/browser_request.txt", "request-$stamp")
@@ -797,6 +1152,7 @@ class AgentToolRegistry(
                     .put("reqAll", false)
                     .put("respAll", false)
                     .put("interceptTelemetry", false)
+                    .put("interceptHeartbeat", false)
                     .put("interceptNoise", false)
                     .put("interceptCookie", false)
                     .put("rules", JSONArray()),
@@ -885,6 +1241,29 @@ class AgentToolRegistry(
                 if (tested) ok("OK: cookie_reveal is callable; no captured flow has an authorization header")
                 else ok("OK: cookie_reveal is callable; no captured flow is available")
             }
+            "cookie_list_redacted", "auth_headers_redacted",
+            "auth_reveal", "set_cookie_headers_reveal" -> {
+                val rows = NetFlowStore.listJson(limit = 20)
+                var tested = false
+                for (i in 0 until rows.length()) {
+                    val id = rows.optJSONObject(i)?.optString("id", "").orEmpty()
+                    if (id.isEmpty()) continue
+                    val result = execute(name, JSONObject().put("id", id))
+                    tested = true
+                    if (result.ok) return result
+                }
+                if (tested) ok("OK: $name is callable; no captured flow carried a matching header")
+                else ok("OK: $name is callable; no captured flow is available")
+            }
+            "plugin_list", "plugin_get_permissions",
+            "plugin_enable", "plugin_disable" -> {
+                // Plugin tools route through the page channel to loader.js globals; the
+                // self-test only confirms the registry call is reachable (the page may not
+                // have any DevTools port connected during a headless self-test).
+                val list = execute("plugin_list", JSONObject())
+                if (name == "plugin_list") return list
+                ok("OK: $name is registered; live plugin toggling is skipped in self-test")
+            }
             "page_exec" -> execute(
                 name,
                 JSONObject().put("code", "return 1 + 1;").put("timeoutMs", 5000),
@@ -915,6 +1294,8 @@ class AgentToolRegistry(
                 if (id.isEmpty()) ok("OK: tab_switch is callable; no tab is available to switch to")
                 else execute(name, JSONObject().put("id", id))
             }
+            "page_navigate", "page_reload", "page_back", "page_forward" ->
+                ok("OK: $name is registered; self-test skips live navigation/history changes")
             "page_wait_for_element" -> execute(name, JSONObject().put("selector", "html").put("timeoutMs", 500))
             "console_list" -> execute(name, JSONObject().put("limit", 1))
             "page_click" -> {
@@ -1044,6 +1425,61 @@ class AgentToolRegistry(
                     if (lastIndex < 0) ok("OK: agent_memory_delete is callable; no memory to delete")
                     else execute(name, JSONObject().put("index", lastIndex))
                 }
+            }
+            // Visual Task Tracker self-tests. Each test creates a throwaway group + task,
+            // exercises one tool, then clears via agent_tasks_clear so the user's real
+            // tracker never accumulates self-test debris. The whole tracker is rebuilt fresh
+            // on next mutation, so wiping it here is safe.
+            "agent_tasks_create" -> {
+                if (panelBridge == null) ok("OK: agent_tasks_create is callable; panel bridge unavailable in self-test")
+                else {
+                    val result = execute(name, JSONObject().put("title", "自检任务组-$stamp"))
+                    execute("agent_tasks_clear", JSONObject())
+                    result
+                }
+            }
+            "agent_tasks_add" -> {
+                val bridge = panelBridge
+                if (bridge == null) ok("OK: agent_tasks_add is callable; panel bridge unavailable in self-test")
+                else {
+                    val gid = runOnMainResult { bridge.taskCreateGroup("自检任务组-$stamp") }
+                    val result = execute(name, JSONObject().put("groupId", gid).put("title", "自检子任务-$stamp"))
+                    execute("agent_tasks_clear", JSONObject())
+                    result
+                }
+            }
+            "agent_tasks_start", "agent_tasks_complete", "agent_tasks_fail",
+            "agent_tasks_cancel", "agent_tasks_update",
+            "agent_tasks_rename", "agent_tasks_delete" -> {
+                val bridge = panelBridge
+                if (bridge == null) {
+                    ok("OK: $name is callable; panel bridge unavailable in self-test")
+                } else {
+                    val gid = runOnMainResult { bridge.taskCreateGroup("自检任务组-$stamp") }
+                    val tid = runOnMainResult { bridge.taskAddTask(gid, "自检子任务-$stamp", "") }
+                    if (tid == null) {
+                        execute("agent_tasks_clear", JSONObject())
+                        ok("OK: $name is callable; could not seed self-test task")
+                    } else {
+                        val args = when (name) {
+                            "agent_tasks_fail" -> JSONObject().put("taskId", tid).put("error", "self-test")
+                            "agent_tasks_update", "agent_tasks_rename" ->
+                                JSONObject().put("taskId", tid).put("title", "自检改名-$stamp")
+                            else -> JSONObject().put("taskId", tid)
+                        }
+                        val result = execute(name, args)
+                        execute("agent_tasks_clear", JSONObject())
+                        result
+                    }
+                }
+            }
+            "agent_tasks_list" -> {
+                if (panelBridge == null) ok("OK: agent_tasks_list is callable; panel bridge unavailable in self-test")
+                else execute(name, JSONObject())
+            }
+            "agent_tasks_clear" -> {
+                if (panelBridge == null) ok("OK: agent_tasks_clear is callable; panel bridge unavailable in self-test")
+                else execute(name, JSONObject())
             }
             else -> err("no self-test registered for $name")
         }
@@ -1243,6 +1679,23 @@ class AgentToolRegistry(
     private fun tabExists(id: String): Boolean =
         appContext.components.core.store.state.tabs.any { it.id == id }
 
+    private fun normalizeNavigateUrl(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val url = when {
+            trimmed.startsWith("about:", ignoreCase = true) -> trimmed
+            trimmed.startsWith("data:", ignoreCase = true) -> trimmed
+            trimmed.contains("://") -> trimmed
+            else -> "https://$trimmed"
+        }
+        return try {
+            URI(url)
+            url
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     // network_wait_request / network_wait_response: poll the read-only NetFlowStore TEE
     // snapshot (pump-safe) for a matching flow that appeared after the call started. With
     // needResponse, only count rows whose response has been recorded (status > 0).
@@ -1339,6 +1792,48 @@ class AgentToolRegistry(
         return ok("wrote ${content.length} chars to ${relativePath(root, file)}")
     }
 
+    /**
+     * Saves the current page's full HTML into a container file and returns only metadata
+     * (path/bytes/url/title/truncated) — the HTML itself never enters the model transcript,
+     * which is the whole point: the model can then container_grep / container_sed the file
+     * instead of pulling the entire source into context. Pulls the source via the page channel
+     * (cmd getSourceRaw, capped at 4 MB page-side). Bypasses the 512 KB writeFile cap on purpose.
+     */
+    private fun savePageToContainer(args: JSONObject): AgentToolResult {
+        val res = PageChannel.exec("getSourceRaw", JSONObject(), 20_000)
+        if (res.has("error")) return err(res.optString("error"))
+        val html = res.optString("html", "")
+        if (html.isEmpty()) return err("page returned empty source")
+        val url = res.optString("url", "")
+        val rel = args.optString("path", "").ifBlank { defaultPageFileName(url) }
+        val root = containerRoot()
+        val file = resolvePath(root, rel) ?: return err("invalid path")
+        val bytes = html.toByteArray(Charsets.UTF_8)
+        file.parentFile?.mkdirs()
+        file.writeBytes(bytes)
+        return ok(
+            JSONObject()
+                .put("path", relativePath(root, file))
+                .put("bytes", bytes.size)
+                .put("chars", html.length)
+                .put("url", url)
+                .put("title", res.optString("title", ""))
+                .put("truncated", res.optBoolean("truncated", false))
+                .toString(),
+        )
+    }
+
+    /** Default container path for page_save_to_container: pages/<host>_<timestamp>.html. */
+    private fun defaultPageFileName(url: String): String {
+        val host = try {
+            java.net.URI(url).host ?: "page"
+        } catch (_: Exception) {
+            "page"
+        }
+        val safe = host.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "page" }
+        return "pages/${safe}_${System.currentTimeMillis()}.html"
+    }
+
     private fun batchWriteFiles(root: File, edits: JSONArray): AgentToolResult {
         if (edits.length() == 0) return err("edits required")
         if (edits.length() > 40) return err("too many edits; max 40 files")
@@ -1391,6 +1886,352 @@ class AgentToolRegistry(
                 .put("size", file.length())
                 .toString(),
         )
+    }
+
+    // ----------------------------------------------------------- container shell tools
+    // coreutils-equivalent reach over the agent's own sandbox (containerRoot()) WITHOUT a
+    // real shell. Every path goes through resolvePath, which blocks absolute paths, null
+    // bytes and parent-escape, so these can never touch anything outside the container.
+    // Read tools are S1 (no approval); mutating tools are S2 (approval).
+
+    private fun globToRegex(glob: String): Regex {
+        val sb = StringBuilder()
+        for (c in glob) {
+            when (c) {
+                '*' -> sb.append("[^/]*")
+                '?' -> sb.append("[^/]")
+                '.', '(', ')', '+', '|', '^', '$', '@', '%', '{', '}', '[', ']', '\\' -> sb.append('\\').append(c)
+                else -> sb.append(c)
+            }
+        }
+        return Regex(sb.toString())
+    }
+
+    // Breadth-first collect of files/dirs under [dir], bounded by [cap] to keep big trees safe.
+    private fun walkFiles(dir: File, out: MutableList<File>, cap: Int) {
+        val queue = ArrayDeque<File>()
+        queue.add(dir)
+        while (queue.isNotEmpty() && out.size < cap) {
+            val d = queue.removeFirst()
+            val children = d.listFiles()?.sortedBy { it.name } ?: continue
+            for (f in children) {
+                if (out.size >= cap) break
+                out.add(f)
+                if (f.isDirectory) queue.add(f)
+            }
+        }
+    }
+
+    private fun containerGrep(args: JSONObject): AgentToolResult {
+        val pattern = args.optString("pattern", "")
+        if (pattern.isEmpty()) return err("pattern required")
+        val rel = args.optString("path", ".")
+        val ignoreCase = args.optBoolean("ignoreCase", false)
+        val maxMatches = args.optInt("maxMatches", 100).coerceIn(1, 1000)
+        val base = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!base.exists()) return err("path not found")
+        val regex = try {
+            Regex(pattern, if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
+        } catch (e: Throwable) {
+            return err("invalid regex: ${e.message}")
+        }
+        val files = ArrayList<File>()
+        if (base.isFile) files.add(base) else walkFiles(base, files, 5000)
+        val matches = JSONArray()
+        var scanned = 0
+        for (f in files) {
+            if (matches.length() >= maxMatches) break
+            if (!f.isFile || f.length() > FILE_READ_CAP) continue
+            scanned++
+            val lines = try { f.readText(Charsets.UTF_8).split('\n') } catch (_: Throwable) { continue }
+            for ((i, line) in lines.withIndex()) {
+                if (matches.length() >= maxMatches) break
+                if (regex.containsMatchIn(line)) {
+                    matches.put(
+                        JSONObject()
+                            .put("path", relativePath(containerRoot(), f))
+                            .put("line", i + 1)
+                            .put("text", line.take(500)),
+                    )
+                }
+            }
+        }
+        return ok(JSONObject().put("matches", matches).put("count", matches.length()).put("filesScanned", scanned).toString())
+    }
+
+    private fun containerFind(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", ".")
+        val namePattern = args.optString("namePattern", "*").ifBlank { "*" }
+        val type = args.optString("type", "any").lowercase()
+        val maxResults = args.optInt("maxResults", 200).coerceIn(1, 2000)
+        val base = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!base.exists()) return err("path not found")
+        val regex = globToRegex(namePattern)
+        val all = ArrayList<File>()
+        if (base.isDirectory) walkFiles(base, all, 10000) else all.add(base)
+        val arr = JSONArray()
+        for (f in all) {
+            if (arr.length() >= maxResults) break
+            if (type == "file" && !f.isFile) continue
+            if (type == "dir" && !f.isDirectory) continue
+            if (!regex.matches(f.name)) continue
+            arr.put(
+                JSONObject()
+                    .put("path", relativePath(containerRoot(), f))
+                    .put("dir", f.isDirectory)
+                    .put("size", if (f.isFile) f.length() else 0L),
+            )
+        }
+        return ok(JSONObject().put("results", arr).put("count", arr.length()).toString())
+    }
+
+    private fun containerHeadTail(args: JSONObject, head: Boolean): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val n = args.optInt("lines", 10).coerceIn(1, 5000)
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!file.exists()) return err("path not found")
+        if (!file.isFile) return err("not a file")
+        if (file.length() > FILE_READ_CAP) return err("file too large (${file.length()} bytes)")
+        val lines = file.readText(Charsets.UTF_8).split('\n')
+        val picked = if (head) lines.take(n) else lines.takeLast(n)
+        return ok(picked.joinToString("\n"))
+    }
+
+    private fun containerWc(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!file.exists()) return err("path not found")
+        if (!file.isFile) return err("not a file")
+        if (file.length() > FILE_READ_CAP) return err("file too large (${file.length()} bytes)")
+        val text = file.readText(Charsets.UTF_8)
+        val lineCount = if (text.isEmpty()) 0 else text.count { it == '\n' } + if (text.endsWith("\n")) 0 else 1
+        val words = text.split(Regex("\\s+")).count { it.isNotEmpty() }
+        return ok(JSONObject().put("lines", lineCount).put("words", words).put("bytes", text.toByteArray(Charsets.UTF_8).size).toString())
+    }
+
+    private fun containerStat(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!file.exists()) return err("path not found")
+        return ok(
+            JSONObject()
+                .put("path", relativePath(containerRoot(), file))
+                .put("type", if (file.isDirectory) "dir" else "file")
+                .put("size", if (file.isFile) file.length() else 0L)
+                .put("lastModified", file.lastModified())
+                .put("readable", file.canRead())
+                .put("writable", file.canWrite())
+                .toString(),
+        )
+    }
+
+    private fun containerDu(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", ".")
+        val base = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!base.exists()) return err("path not found")
+        var bytes = 0L
+        var files = 0
+        if (base.isFile) {
+            bytes = base.length()
+            files = 1
+        } else {
+            val list = ArrayList<File>()
+            walkFiles(base, list, 100000)
+            for (f in list) if (f.isFile) { bytes += f.length(); files++ }
+        }
+        return ok(JSONObject().put("path", relativePath(containerRoot(), base)).put("bytes", bytes).put("files", files).toString())
+    }
+
+    private fun containerTree(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", ".")
+        val maxDepth = args.optInt("maxDepth", 3).coerceIn(1, 8)
+        val base = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!base.exists()) return err("path not found")
+        if (!base.isDirectory) return err("not a directory")
+        val sb = StringBuilder()
+        var count = 0
+        fun recurse(dir: File, depth: Int, prefix: String) {
+            if (depth > maxDepth || count > 1000) return
+            val children = dir.listFiles()?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: return
+            for (f in children) {
+                if (count++ > 1000) { sb.append(prefix).append("… (truncated)\n"); return }
+                sb.append(prefix).append(if (f.isDirectory) "[D] " else "    ").append(f.name).append('\n')
+                if (f.isDirectory) recurse(f, depth + 1, "$prefix  ")
+            }
+        }
+        recurse(base, 1, "")
+        return ok(sb.toString().ifEmpty { "(empty)" })
+    }
+
+    private fun containerFileType(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!file.exists()) return err("path not found")
+        if (file.isDirectory) {
+            return ok(JSONObject().put("path", relativePath(containerRoot(), file)).put("kind", "directory").toString())
+        }
+        val len = file.length()
+        val kind = when {
+            len == 0L -> "empty"
+            else -> {
+                val sample = ByteArray(minOf(len, 4096L).toInt())
+                val read = file.inputStream().use { it.read(sample) }
+                if ((0 until read).any { sample[it].toInt() == 0 }) "binary" else "text"
+            }
+        }
+        return ok(
+            JSONObject()
+                .put("path", relativePath(containerRoot(), file))
+                .put("kind", kind)
+                .put("ext", file.extension)
+                .put("size", len)
+                .toString(),
+        )
+    }
+
+    private fun containerWhich(args: JSONObject): AgentToolResult {
+        val targetName = args.optString("name", "")
+        if (targetName.isBlank()) return err("name required")
+        val all = ArrayList<File>()
+        walkFiles(containerRoot(), all, 10000)
+        val arr = JSONArray()
+        for (f in all) if (f.isFile && f.name == targetName) arr.put(relativePath(containerRoot(), f))
+        return ok(JSONObject().put("name", targetName).put("paths", arr).put("count", arr.length()).toString())
+    }
+
+    private fun containerSed(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val start = args.optInt("startLine", 1).coerceAtLeast(1)
+        val end = args.optInt("endLine", start).coerceAtLeast(start)
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (!file.exists()) return err("path not found")
+        if (!file.isFile) return err("not a file")
+        if (file.length() > FILE_READ_CAP) return err("file too large (${file.length()} bytes)")
+        val lines = file.readText(Charsets.UTF_8).split('\n')
+        if (start > lines.size) return err("startLine $start beyond EOF (${lines.size} lines)")
+        return ok(lines.subList(start - 1, minOf(end, lines.size)).joinToString("\n"))
+    }
+
+    private fun containerRealpath(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path (absolute or escapes container)")
+        return ok(JSONObject().put("path", relativePath(containerRoot(), file)).put("exists", file.exists()).toString())
+    }
+
+    private fun containerDiff(args: JSONObject): AgentToolResult {
+        val a = resolvePath(containerRoot(), args.optString("pathA", "")) ?: return err("invalid pathA")
+        val b = resolvePath(containerRoot(), args.optString("pathB", "")) ?: return err("invalid pathB")
+        if (!a.isFile) return err("pathA not a file")
+        if (!b.isFile) return err("pathB not a file")
+        if (a.length() > FILE_READ_CAP || b.length() > FILE_READ_CAP) return err("file too large")
+        val la = a.readText(Charsets.UTF_8).split('\n')
+        val lb = b.readText(Charsets.UTF_8).split('\n')
+        val diffs = JSONArray()
+        var changed = 0
+        for (i in 0 until maxOf(la.size, lb.size)) {
+            val x = la.getOrNull(i)
+            val y = lb.getOrNull(i)
+            if (x != y) {
+                changed++
+                if (diffs.length() < 200) {
+                    diffs.put(JSONObject().put("line", i + 1).put("a", x ?: "").put("b", y ?: ""))
+                }
+            }
+        }
+        return ok(JSONObject().put("identical", changed == 0).put("changedLines", changed).put("diffs", diffs).toString())
+    }
+
+    private fun containerCp(args: JSONObject): AgentToolResult {
+        val src = resolvePath(containerRoot(), args.optString("src", "")) ?: return err("invalid src")
+        val dest = resolvePath(containerRoot(), args.optString("dest", "")) ?: return err("invalid dest")
+        if (!src.exists()) return err("src not found")
+        if (src.isDirectory && !args.optBoolean("recursive", false)) return err("src is a directory; pass recursive=true")
+        dest.parentFile?.mkdirs()
+        src.copyRecursively(dest, overwrite = true)
+        return ok("copied ${relativePath(containerRoot(), src)} -> ${relativePath(containerRoot(), dest)}")
+    }
+
+    private fun containerMv(args: JSONObject): AgentToolResult {
+        val src = resolvePath(containerRoot(), args.optString("src", "")) ?: return err("invalid src")
+        val dest = resolvePath(containerRoot(), args.optString("dest", "")) ?: return err("invalid dest")
+        if (!src.exists()) return err("src not found")
+        dest.parentFile?.mkdirs()
+        if (dest.exists()) dest.deleteRecursively()
+        if (!src.renameTo(dest)) {
+            src.copyRecursively(dest, overwrite = true)
+            src.deleteRecursively()
+        }
+        return ok("moved ${relativePath(containerRoot(), src)} -> ${relativePath(containerRoot(), dest)}")
+    }
+
+    private fun containerRm(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (file == containerRoot().canonicalFile) return err("refusing to remove container root")
+        if (!file.exists()) return err("path not found")
+        if (file.isDirectory && !args.optBoolean("recursive", false)) {
+            return err("path is a directory; pass recursive=true or use container_rmdir")
+        }
+        val removed = if (file.isDirectory) file.deleteRecursively() else file.delete()
+        return if (removed) ok("removed ${relativePath(containerRoot(), file)}") else err("failed to remove")
+    }
+
+    private fun containerMkdir(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val dir = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (dir.exists()) {
+            return if (dir.isDirectory) ok("already exists: ${relativePath(containerRoot(), dir)}") else err("path exists and is a file")
+        }
+        return if (dir.mkdirs()) ok("created ${relativePath(containerRoot(), dir)}") else err("failed to create directory")
+    }
+
+    private fun containerRmdir(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val dir = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (dir == containerRoot().canonicalFile) return err("refusing to remove container root")
+        if (!dir.exists()) return err("path not found")
+        if (!dir.isDirectory) return err("not a directory")
+        val recursive = args.optBoolean("recursive", false)
+        val children = dir.listFiles()
+        if (!recursive && children != null && children.isNotEmpty()) {
+            return err("directory not empty; pass recursive=true to delete contents (rm -rf)")
+        }
+        val removed = if (recursive) dir.deleteRecursively() else dir.delete()
+        return if (removed) ok("removed directory ${relativePath(containerRoot(), dir)}") else err("failed to remove directory")
+    }
+
+    private fun containerTouch(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (file.exists()) {
+            file.setLastModified(System.currentTimeMillis())
+            return ok("touched ${relativePath(containerRoot(), file)}")
+        }
+        file.parentFile?.mkdirs()
+        return if (file.createNewFile()) ok("created ${relativePath(containerRoot(), file)}") else err("failed to create file")
+    }
+
+    private fun containerAppend(args: JSONObject): AgentToolResult {
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return err("path required")
+        val content = args.optString("content", "")
+        val addBytes = content.toByteArray(Charsets.UTF_8).size
+        if (addBytes > FILE_WRITE_CAP) return err("content too large")
+        val file = resolvePath(containerRoot(), rel) ?: return err("invalid path")
+        if (file.exists() && file.length() + addBytes > FILE_WRITE_CAP) return err("file would exceed size cap")
+        file.parentFile?.mkdirs()
+        file.appendText(content, Charsets.UTF_8)
+        return ok("appended ${content.length} chars to ${relativePath(containerRoot(), file)}")
     }
 
     private fun browserRequest(args: JSONObject): AgentToolResult {
@@ -1579,7 +2420,7 @@ private fun scopePath(path: String): String =
 
 private fun networkScope(name: String, args: JSONObject): String = when (name) {
     "web_search" -> "search:${shortHash(args.optString("query", ""))}"
-    "browser_request", "page_fetch" -> {
+    "browser_request", "page_fetch", "page_navigate" -> {
         val method = args.optString("method", "GET").uppercase().ifBlank { "GET" }
         "$method:${hostOf(args.optString("url", ""))}"
     }
@@ -1589,6 +2430,7 @@ private fun networkScope(name: String, args: JSONObject): String = when (name) {
 private fun networkScopeLabel(name: String, args: JSONObject): String = when (name) {
     "web_search" -> "搜索：${args.optString("query", "").take(120)}"
     "browser_request" -> "${args.optString("method", "GET").uppercase()} ${hostOf(args.optString("url", ""))}"
+    "page_navigate" -> "导航到 ${hostOf(args.optString("url", ""))}"
     "page_fetch" -> {
         val from = args.optString("requiredPageUrlContains", "").ifBlank { "当前网页" }
         "$from -> ${args.optString("method", "GET").uppercase()} ${hostOf(args.optString("url", ""))}"
@@ -1820,6 +2662,9 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("limit", num("最多元素数"))
         required("selector")
     }),
+    tool("page_save_to_container", AgentPermissionTier.S2, "把当前网页的完整 HTML 源码保存到 Agent 容器文件（源码不进对话上下文，避免爆炸）。保存后用 container_grep/container_sed/container_head 分段读取。返回 {path,bytes,chars,url,title,truncated}。", schema {
+        prop("path", str("容器内相对路径，省略则自动命名 pages/<host>_<时间戳>.html"))
+    }),
     tool("container_list", AgentPermissionTier.S1, "列出 Agent 本地容器目录内的文件。路径限制在容器内。", schema {
         prop("path", str("容器内相对目录，默认 ."))
     }),
@@ -1845,6 +2690,107 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
     tool("container_serve_url", AgentPermissionTier.S2, "为 Agent 外部容器内的文件生成当前网页可加载的本地 HTTP URL。", schema {
         prop("path", str("容器内相对文件路径"))
         required("path")
+    }),
+    // ---- 容器 shell 工具：在 Agent 私有沙盒（容器目录）内提供 coreutils 等价能力。
+    // 所有 path 都是相对容器根的相对路径，禁止绝对路径/越界。S1 只读、S2 改写。
+    tool("container_grep", AgentPermissionTier.S1, "在容器内按正则搜索文本文件内容（类似 grep -rn）。返回 [{path,line,text}]。示例: {\"pattern\":\"TODO\",\"path\":\"src\",\"ignoreCase\":true}", schema {
+        prop("pattern", str("正则表达式（Kotlin/Java regex 语法）"))
+        prop("path", str("起始相对路径，默认 \".\"（整个容器）；可指向单个文件或目录"))
+        prop("ignoreCase", bool("是否忽略大小写，默认 false"))
+        prop("maxMatches", num("最多返回匹配行数，默认 100，上限 1000"))
+        required("pattern")
+    }),
+    tool("container_find", AgentPermissionTier.S1, "按文件名通配符在容器内查找文件/目录（类似 find -name）。namePattern 支持 * 和 ?。示例: {\"namePattern\":\"*.json\",\"type\":\"file\"}", schema {
+        prop("path", str("起始相对路径，默认 \".\""))
+        prop("namePattern", str("文件名通配符，如 *.txt；默认 * 匹配全部"))
+        prop("type", str("过滤类型：file/dir/any，默认 any"))
+        prop("maxResults", num("最多返回条数，默认 200，上限 2000"))
+    }),
+    tool("container_head", AgentPermissionTier.S1, "读取容器内文本文件的前 N 行（类似 head）。示例: {\"path\":\"a.log\",\"lines\":20}", schema {
+        prop("path", str("容器内相对文件路径"))
+        prop("lines", num("行数，默认 10，上限 5000"))
+        required("path")
+    }),
+    tool("container_tail", AgentPermissionTier.S1, "读取容器内文本文件的后 N 行（类似 tail）。示例: {\"path\":\"a.log\",\"lines\":20}", schema {
+        prop("path", str("容器内相对文件路径"))
+        prop("lines", num("行数，默认 10，上限 5000"))
+        required("path")
+    }),
+    tool("container_wc", AgentPermissionTier.S1, "统计容器内文本文件的行数/词数/字节数（类似 wc）。返回 {lines,words,bytes}。", schema {
+        prop("path", str("容器内相对文件路径"))
+        required("path")
+    }),
+    tool("container_stat", AgentPermissionTier.S1, "读取容器内文件/目录的元信息（类似 stat）：type/size/lastModified/readable/writable。", schema {
+        prop("path", str("容器内相对路径"))
+        required("path")
+    }),
+    tool("container_du", AgentPermissionTier.S1, "递归统计容器内某路径的总字节数与文件数（类似 du -s）。默认统计整个容器。", schema {
+        prop("path", str("相对路径，默认 \".\""))
+    }),
+    tool("container_tree", AgentPermissionTier.S1, "以树状文本列出容器内目录结构（类似 tree）。[D] 前缀表示目录。示例: {\"path\":\".\",\"maxDepth\":2}", schema {
+        prop("path", str("起始相对目录，默认 \".\""))
+        prop("maxDepth", num("递归深度，默认 3，上限 8"))
+    }),
+    tool("container_file_type", AgentPermissionTier.S1, "判断容器内文件类型（类似 file）：返回 kind=text/binary/empty/directory、扩展名与大小。", schema {
+        prop("path", str("容器内相对路径"))
+        required("path")
+    }),
+    tool("container_which", AgentPermissionTier.S1, "在容器内按精确文件名定位文件，返回所有匹配的相对路径（类似 which/locate）。", schema {
+        prop("name", str("要查找的精确文件名，如 config.json"))
+        required("name")
+    }),
+    tool("container_sed", AgentPermissionTier.S1, "读取容器内文本文件的指定行区间（类似 sed -n 'START,ENDp'）。行号从 1 开始、含端点。", schema {
+        prop("path", str("容器内相对文件路径"))
+        prop("startLine", num("起始行号（含），默认 1"))
+        prop("endLine", num("结束行号（含），默认等于 startLine"))
+        required("path")
+    }),
+    tool("container_realpath", AgentPermissionTier.S1, "把容器内相对路径规范化并校验是否越界（类似 realpath）。返回规范相对路径与 exists。", schema {
+        prop("path", str("容器内相对路径"))
+        required("path")
+    }),
+    tool("container_diff", AgentPermissionTier.S1, "逐行比较容器内两个文本文件（类似 diff）。返回 identical/changedLines/diffs[{line,a,b}]。", schema {
+        prop("pathA", str("文件 A 的相对路径"))
+        prop("pathB", str("文件 B 的相对路径"))
+        required("pathA")
+        required("pathB")
+    }),
+    tool("container_cp", AgentPermissionTier.S2, "复制容器内文件或目录（类似 cp）。复制目录需 recursive=true。示例: {\"src\":\"a.txt\",\"dest\":\"b.txt\"}", schema {
+        prop("src", str("源相对路径"))
+        prop("dest", str("目标相对路径"))
+        prop("recursive", bool("源为目录时必须 true，默认 false"))
+        required("src")
+        required("dest")
+    }),
+    tool("container_mv", AgentPermissionTier.S2, "移动或重命名容器内文件/目录（类似 mv）。dest 已存在会被覆盖。", schema {
+        prop("src", str("源相对路径"))
+        prop("dest", str("目标相对路径"))
+        required("src")
+        required("dest")
+    }),
+    tool("container_rm", AgentPermissionTier.S2, "删除容器内文件（类似 rm）。删除目录需 recursive=true（等价 rm -rf）。不可删除容器根。", schema {
+        prop("path", str("要删除的相对路径"))
+        prop("recursive", bool("目标为目录时需 true，默认 false"))
+        required("path")
+    }),
+    tool("container_mkdir", AgentPermissionTier.S2, "在容器内创建目录（类似 mkdir -p，自动建父目录）。", schema {
+        prop("path", str("要创建的相对目录路径"))
+        required("path")
+    }),
+    tool("container_rmdir", AgentPermissionTier.S2, "删除容器内目录（类似 rmdir）。默认仅删空目录；recursive=true 时连同内容一起删（rm -rf）。不可删除容器根。", schema {
+        prop("path", str("要删除的相对目录路径"))
+        prop("recursive", bool("true=连内容一起删（rm -rf），默认 false 仅删空目录"))
+        required("path")
+    }),
+    tool("container_touch", AgentPermissionTier.S2, "创建空文件或更新其修改时间（类似 touch）。自动创建父目录。", schema {
+        prop("path", str("相对文件路径"))
+        required("path")
+    }),
+    tool("container_append", AgentPermissionTier.S2, "向容器内文件追加文本（类似 >>）。文件不存在则新建。", schema {
+        prop("path", str("相对文件路径"))
+        prop("content", str("要追加的文本内容"))
+        required("path")
+        required("content")
     }),
     tool("web_search", AgentPermissionTier.S1, "调用用户配置的搜索 API 做只读查询。支持 URL 模板 {q}/{query}/{limit}/{key}。", schema {
         prop("query", str("搜索关键词"))
@@ -1884,7 +2830,7 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         }))
         required("rules")
     }),
-	    tool("intercept_set", AgentPermissionTier.S2, "配置请求/响应拦截。缺省不全局拦截（reqAll/respAll 默认 false），避免误暂停所有流量；要拦全部需显式传 reqAll/respAll=true，或在 rules 里加 action=intercept 规则。遥测、心跳/噪音、cookie/auth 类低价值流量默认自动放行。", schema {
+	    tool("intercept_set", AgentPermissionTier.S2, "配置请求/响应拦截。缺省不全局拦截（reqAll/respAll 默认 false），避免误暂停所有流量；要拦全部需显式传 reqAll/respAll=true，或在 rules 里加 action=intercept 规则。遥测、心跳、噪音、cookie/auth 类低价值流量默认自动放行。", schema {
 	        prop("reqAll", bool("拦截全部请求；缺省=false"))
 	        prop("respAll", bool("拦截全部响应；缺省=false"))
 	        prop("interceptTelemetry", bool("是否拦截遥测类低价值流量"))
@@ -1924,6 +2870,7 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("ids", JSONObject().put("type", "array").put("items", str("六位 code")))
         prop("decision", str("continue 或 abort，默认 continue"))
     }),
+    tool("intercept_list_rules", AgentPermissionTier.S1, "读取当前拦截配置快照：enabled、reqAll/respAll 全局开关、遥测/心跳/噪音/cookie 四个低价值放行开关，以及 rules 列表。无参。", emptySchema()),
     tool("page_set_text", AgentPermissionTier.S2, "设置当前页面匹配元素的 textContent。受限 DOM 写入，不执行任意 JS。", schema {
         prop("selector", str("CSS selector"))
         prop("text", str("文本"))
@@ -1991,6 +2938,23 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("name", str("header 名，默认 authorization"))
         required("id")
     }),
+    tool("cookie_list_redacted", AgentPermissionTier.S2, "列出某 flow 上存在的 Cookie/Set-Cookie 头（值已脱敏，只暴露 scheme 与长度）。用于先了解有哪些凭证、再决定用占位符还是 cookie_reveal。返回 [{dir,name,masked}]。", schema {
+        prop("id", str("flow id 或六位 code"))
+        required("id")
+    }),
+    tool("auth_headers_redacted", AgentPermissionTier.S2, "列出某 flow 上存在的鉴权类头（authorization/x-api-key/x-csrf-token 等，值已脱敏）。返回 [{dir,name,masked}]。", schema {
+        prop("id", str("flow id 或六位 code"))
+        required("id")
+    }),
+    tool("auth_reveal", AgentPermissionTier.S3, "读取某 flow 的真实鉴权头明文（默认 authorization，可传 name 指定 x-api-key 等）。高危，需用户原生确认。", schema {
+        prop("id", str("flow id 或六位 code"))
+        prop("name", str("header 名，默认 authorization"))
+        required("id")
+    }),
+    tool("set_cookie_headers_reveal", AgentPermissionTier.S3, "读取某 flow 响应的真实 Set-Cookie 头明文。高危，需用户原生确认。", schema {
+        prop("id", str("flow id 或六位 code"))
+        required("id")
+    }),
     tool("page_exec", AgentPermissionTier.S3, "在 page world 执行任意 JavaScript，可调用页面和浏览器 API。", schema {
         prop("code", str("JS 代码"))
         prop("timeoutMs", num("超时 ms"))
@@ -2024,6 +2988,14 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("id", str("tab_list 返回的标签页 id"))
         required("id")
     }),
+    tool("page_navigate", AgentPermissionTier.S2, "让当前标签页加载指定 URL。走浏览器原生导航，不依赖页面 JS/CSP。", schema {
+        prop("url", str("目标 URL；省略 scheme 时按 https:// 处理"))
+        prop("waitMs", num("导航发起后等待毫秒数，默认 0，上限 10000"))
+        required("url")
+    }),
+    tool("page_reload", AgentPermissionTier.S2, "刷新当前标签页。走浏览器原生 reload，不执行页面 JS。", emptySchema()),
+    tool("page_back", AgentPermissionTier.S2, "让当前标签页后退。走浏览器原生历史导航，不执行页面 JS。", emptySchema()),
+    tool("page_forward", AgentPermissionTier.S2, "让当前标签页前进。走浏览器原生历史导航，不执行页面 JS。", emptySchema()),
     tool("page_click", AgentPermissionTier.S2, "点击当前页面匹配 selector 的元素（派发指针/鼠标事件并调用原生 click）。受限 UI 操作，不执行任意 JS。", schema {
         prop("selector", str("目标元素 CSS selector"))
         required("selector")
@@ -2100,6 +3072,123 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("index", num("agent_memory_list 返回的索引"))
         required("index")
     }),
+    // ---- 浏览器插件管理：内置插件只有「启用/停用」两态，由 agent.js↔loader.js 桥执行。
+    tool("plugin_list", AgentPermissionTier.S1, "列出所有内置浏览器插件及其启用状态。返回 [{id,name,desc,enabled}]。无参。", emptySchema()),
+    tool("plugin_get_permissions", AgentPermissionTier.S1, "读取单个插件的描述信息（id/name/desc/enabled）。内置插件不声明细粒度权限，此工具返回插件描述。", schema {
+        prop("id", str("plugin_list 返回的插件 id"))
+        required("id")
+    }),
+    tool("plugin_enable", AgentPermissionTier.S2, "启用指定 id 的浏览器插件（触发其 onEnable 并持久化启用态）。", schema {
+        prop("id", str("plugin_list 返回的插件 id"))
+        required("id")
+    }),
+    tool("plugin_disable", AgentPermissionTier.S2, "停用指定 id 的浏览器插件（触发其 onDisable 撤回所做改动并持久化）。", schema {
+        prop("id", str("plugin_list 返回的插件 id"))
+        required("id")
+    }),
+    // Visual Task Tracker tools (all S1 — no approval prompt, available at every tier so
+    // the agent can keep the in-chat task card up to date without user friction).
+    tool(
+        "agent_tasks_create",
+        AgentPermissionTier.S1,
+        "创建一个任务组（task group），返回 groupId。一个对话可有多个任务组，每个组内有若干子任务。复杂、多步骤的工作开始前先建组。",
+        schema {
+            prop("title", str("任务组标题，不超过 80 字"))
+            required("title")
+        },
+    ),
+    tool(
+        "agent_tasks_add",
+        AgentPermissionTier.S1,
+        "向已有任务组追加一个子任务，返回 taskId。子任务初始状态为 PENDING。",
+        schema {
+            prop("groupId", str("agent_tasks_create 返回的 groupId"))
+            prop("title", str("子任务简短标题，不超过 120 字"))
+            prop("description", str("可选：子任务详细描述，不超过 400 字"))
+            required("groupId")
+            required("title")
+        },
+    ),
+    tool(
+        "agent_tasks_start",
+        AgentPermissionTier.S1,
+        "把指定子任务标为 ACTIVE（开始执行），自动记录开始时间，并把它设为当前任务（用于关联后续工具调用）。",
+        schema {
+            prop("taskId", str("agent_tasks_add 返回的 taskId"))
+            required("taskId")
+        },
+    ),
+    tool(
+        "agent_tasks_complete",
+        AgentPermissionTier.S1,
+        "把指定子任务标为 DONE，自动计算 durationMs。在 page_set_text 等真实改动完成后调用，不要只靠口述声明完成。",
+        schema {
+            prop("taskId", str("taskId"))
+            required("taskId")
+        },
+    ),
+    tool(
+        "agent_tasks_fail",
+        AgentPermissionTier.S1,
+        "把指定子任务标为 FAILED，附带错误原因。失败原因会显示在任务卡上，最多 500 字。",
+        schema {
+            prop("taskId", str("taskId"))
+            prop("error", str("失败原因，简短一句话"))
+            required("taskId")
+        },
+    ),
+    tool(
+        "agent_tasks_cancel",
+        AgentPermissionTier.S1,
+        "把指定子任务标为 CANCELLED（用户改主意 / 不再相关 / 被更优方案取代）。失败和取消语义不同：失败=尝试过但出错；取消=不再执行。",
+        schema {
+            prop("taskId", str("taskId"))
+            required("taskId")
+        },
+    ),
+    tool(
+        "agent_tasks_update",
+        AgentPermissionTier.S1,
+        "修改指定子任务的标题或描述。任一字段省略即保留原值；至少需要其中一个。",
+        schema {
+            prop("taskId", str("taskId"))
+            prop("title", str("新标题，可省略"))
+            prop("description", str("新描述，可省略"))
+            required("taskId")
+        },
+    ),
+    tool(
+        "agent_tasks_rename",
+        AgentPermissionTier.S1,
+        "重命名指定子任务（只改标题，描述不变）。这就是「可视化任务里改任务标题」的工具。等价于只传 title 的 agent_tasks_update。",
+        schema {
+            prop("taskId", str("taskId"))
+            prop("title", str("新标题，不超过 120 字"))
+            required("taskId")
+            required("title")
+        },
+    ),
+    tool(
+        "agent_tasks_delete",
+        AgentPermissionTier.S1,
+        "从任务追踪表删除指定子任务（整条移除，不同于 cancel 的「标记取消」）。删错可重新 agent_tasks_add。",
+        schema {
+            prop("taskId", str("taskId"))
+            required("taskId")
+        },
+    ),
+    tool(
+        "agent_tasks_list",
+        AgentPermissionTier.S1,
+        "返回当前对话的整张任务追踪表（所有 group + task + 状态 + 时间戳 + 工具调用记录），用于在开始一轮新工作前回顾进度。",
+        emptySchema(),
+    ),
+    tool(
+        "agent_tasks_clear",
+        AgentPermissionTier.S1,
+        "清空当前对话的全部任务组（开始全新无关任务时使用）。一次清空所有 group 与 task，不可逆。",
+        emptySchema(),
+    ),
 )
 
 private fun tool(name: String, tier: AgentPermissionTier, desc: String, schema: JSONObject) =

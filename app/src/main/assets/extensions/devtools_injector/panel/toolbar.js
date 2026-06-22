@@ -49,10 +49,11 @@ function openInterceptConfigModal() {
     row('拦截发出去的请求', netScopeReq, 'req') +
     row('拦截服务器响应', netScopeResp, 'resp') +
     row('拦截遥测包（collect/analytics/beacon 等）', netScopeTelemetry, 'telemetry') +
-    row('拦截噪音包（心跳/ping/长连接等）', netScopeNoise, 'noise') +
+    row('拦截心跳包（heartbeat/ping/keepalive 等）', netScopeHeartbeat, 'heartbeat') +
+    row('拦截噪音包（日志/hot-update/探测等）', netScopeNoise, 'noise') +
     row('拦截cookie包（cookie-sync/gen_204 等）', netScopeCookie, 'cookie') +
     row('过滤遥测ACK（204/空体等压制响应）', netScopeFilterSuppressResp, 'suppress') +
-    '<div style="color:#888;font-size:11px;margin-top:6px;">' + escHtml(hint) + '遥测/噪音/cookie 三类低价值包默认放行；分别勾选可一并拦截。命中后在面板里手动放行。</div>',
+    '<div style="color:#888;font-size:11px;margin-top:6px;">' + escHtml(hint) + '遥测/心跳/噪音/cookie 四类低价值包默认放行；分别勾选可一并拦截。命中后在面板里手动放行。</div>',
     function () { closeModal(); }
   );
   setTimeout(function () {
@@ -66,6 +67,8 @@ function openInterceptConfigModal() {
           netScopeResp = !netScopeResp;
         } else if (act === 'telemetry') {
           netScopeTelemetry = !netScopeTelemetry;
+        } else if (act === 'heartbeat') {
+          netScopeHeartbeat = !netScopeHeartbeat;
         } else if (act === 'noise') {
           netScopeNoise = !netScopeNoise;
         } else if (act === 'cookie') {

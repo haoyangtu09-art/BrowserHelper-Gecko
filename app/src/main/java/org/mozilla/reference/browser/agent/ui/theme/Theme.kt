@@ -31,7 +31,9 @@ object AgentColors {
     // than the heavier Hairline so it reads as a subtle inset stroke, not a hard rule.
     val HairlineFaint = Color(0x1F000000)
     val Control = Color(0xFFEAEAEA)
-    val UserBubble = Color(0xFFF0F1F3)
+    // User-message bubble: a solid gray clearly darker than the chat background (Bg/Surface)
+    // so the bubble reads as a filled block — no border/outline (which looked bad).
+    val UserBubble = Color(0xFFE4E6EA)
     val Accent = Color(0xFF4285F4)
     val Stop = Color(0xFF111111)
     // Tint behind the floating top-bar buttons' drop shadow.

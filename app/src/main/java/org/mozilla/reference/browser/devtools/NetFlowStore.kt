@@ -249,6 +249,49 @@ object NetFlowStore {
         }
     }
 
+    /**
+     * List the credential-bearing headers present on one flow, with values MASKED.
+     * For the agent's cookie_list_redacted / auth_headers_redacted tools: lets the model
+     * discover which secrets exist (and on which direction) without reading them, so it can
+     * then decide to use a {{placeholder}} or call the L3 reveal tool. [kind] selects the
+     * header group: "cookie" → cookie/set-cookie; "auth" → authorization/api-key/csrf/etc.;
+     * anything else → both groups. Returns null only when the flow itself is unknown.
+     */
+    fun sensitiveHeadersJson(flowId: String, kind: String): JSONArray? {
+        val cookieNames = setOf("cookie", "set-cookie")
+        val authNames = setOf(
+            "authorization", "proxy-authorization", "x-auth-token",
+            "x-api-key", "x-csrf-token", "x-xsrf-token", "openai-organization",
+        )
+        val want = when (kind.lowercase()) {
+            "cookie" -> cookieNames
+            "auth" -> authNames
+            else -> cookieNames + authNames
+        }
+        synchronized(lock) {
+            val r = resolveRecord(flowId) ?: return null
+            val arr = JSONArray()
+            fun collect(headers: JSONObject?, dir: String) {
+                if (headers == null) return
+                val keys = headers.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (want.contains(k.lowercase())) {
+                        arr.put(
+                            JSONObject()
+                                .put("dir", dir)
+                                .put("name", k)
+                                .put("masked", maskValue(headers.optString(k, ""))),
+                        )
+                    }
+                }
+            }
+            collect(r.reqHeaders, "req")
+            collect(r.respHeaders, "resp")
+            return arr
+        }
+    }
+
     fun codeFor(flowId: String): String? = synchronized(lock) { records[flowId]?.code }
 
     fun flowIdFor(idOrCode: String): String? = synchronized(lock) { resolveRecord(idOrCode)?.flowId }

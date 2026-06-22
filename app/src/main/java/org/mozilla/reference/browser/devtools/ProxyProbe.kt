@@ -97,8 +97,9 @@ object ProxyProbe {
     @Volatile private var respInterceptAll = false
     // Per-class intercept toggles: when on, the matching low-value class is NO LONGER
     // let through by "intercept all" (it gets paused like everything else). Off = pass
-    // (default), mirroring the panel's 拦截遥测包/拦截噪音包/拦截cookie包 checkboxes.
+    // (default), mirroring the panel's 拦截遥测包/拦截心跳包/拦截噪音包/拦截cookie包 checkboxes.
     @Volatile private var interceptTelemetry = false
+    @Volatile private var interceptHeartbeat = false
     @Volatile private var interceptNoise = false
     @Volatile private var interceptCookie = false
     @Volatile private var interceptRulesList: List<InterceptRule> = emptyList()
@@ -132,7 +133,8 @@ object ProxyProbe {
     // Low-value request classes "intercept all" lets through (ports panel/render.js
     // isTelemetryReq / isNoiseReq / isCookieReq regexes; tested against the lowercased URL).
     private val telemetryRe = Regex("(collect|telemetry|analytics|metrics|beacon|sentry|trace|traces|stats|gtm|gtag|google-analytics|doubleclick|amplitude|mixpanel|segment|datadog|bugsnag|track|pixel|rum)([/?#_.-]|$)")
-    private val noiseRe = Regex("(heartbeat|ping|keepalive|poll|socket\\.io|sockjs|realtime|tunnel|presence|typing|status|health|alive|connect|events?)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive|beacon)=")
+    private val heartbeatRe = Regex("(heartbeat|ping|keepalive|poll|socket\\.io|sockjs|realtime|presence|typing|status|health|alive|connect|events?)([/?#_.-]|$)|[?&](ping|heartbeat|keepalive)=")
+    private val noiseRe = Regex("(/|[?&._-])(tunnel|favicon|manifest|robots|hot-update|webpack|hmr|source-map|sourcemap|map|log|logs|debug|diagnostic|diagnostics|probe|cdn-cgi)([/?#._-]|$)")
     private val cookieRe = Regex("(/|[?&._-])(cookie|cookiesync|setuid|usersync|user-sync|idsync|id-sync|cksync|syncuser|getuid|gen_204|__cf)([/?#._-]|$)")
 
     // ── Mock (Map Local): synthesize a response for matched requests without ever
@@ -291,7 +293,8 @@ object ProxyProbe {
         reqInterceptAll = data.optBoolean("reqAll", false)
         respInterceptAll = data.optBoolean("respAll", false)
         interceptTelemetry = data.optBoolean("interceptTelemetry", false)
-        interceptNoise = data.optBoolean("interceptNoise", data.optBoolean("interceptHeartbeat", false))
+        interceptHeartbeat = data.optBoolean("interceptHeartbeat", false)
+        interceptNoise = data.optBoolean("interceptNoise", false)
         interceptCookie = data.optBoolean("interceptCookie", false)
         val rulesJson = data.optJSONArray("rules")
         interceptRulesList = parseInterceptRules(rulesJson)
@@ -301,6 +304,44 @@ object ProxyProbe {
         )
         if (!interceptEnabled) releaseAllIntercepts(JSONObject().put("decision", "continue"))
         saveInterceptConfig(interceptEnabled, reqInterceptAll, respInterceptAll, rulesJson)
+        notifyInterceptState()
+    }
+
+    /** Snapshot of current intercept state (for the agent's intercept_list_rules tool). */
+    @Synchronized
+    fun interceptRulesJson(): JSONObject {
+        val arr = org.json.JSONArray()
+        for (r in interceptRulesList) {
+            arr.put(
+                JSONObject()
+                    .put("host", r.host)
+                    .put("path", r.path)
+                    .put("method", r.method)
+                    .put("hasBody", r.hasBody)
+                    .put("action", r.action)
+                    .put("interceptResp", r.interceptResp),
+            )
+        }
+        return JSONObject()
+            .put("enabled", interceptEnabled)
+            .put("reqAll", reqInterceptAll)
+            .put("respAll", respInterceptAll)
+            .put("interceptTelemetry", interceptTelemetry)
+            .put("interceptHeartbeat", interceptHeartbeat)
+            .put("interceptNoise", interceptNoise)
+            .put("interceptCookie", interceptCookie)
+            .put("rules", arr)
+    }
+
+    /** Snapshot pushed to the DevTools panel so frontend state mirrors native truth. */
+    @Synchronized
+    fun interceptStateJson(): JSONObject =
+        interceptRulesJson()
+            .put("type", "interceptState")
+            .put("pendingCount", pendingInterceptMeta.size)
+
+    fun notifyInterceptState() {
+        try { emit(interceptStateJson()) } catch (_: Throwable) {}
     }
 
     private fun parseInterceptRules(rulesJson: org.json.JSONArray?): List<InterceptRule> {
@@ -328,7 +369,7 @@ object ProxyProbe {
         try {
             val obj = JSONObject().put("enabled", enabled).put("reqAll", reqAll).put("respAll", respAll)
                 .put("interceptTelemetry", interceptTelemetry)
-                .put("interceptHeartbeat", interceptNoise)
+                .put("interceptHeartbeat", interceptHeartbeat)
                 .put("interceptNoise", interceptNoise)
                 .put("interceptCookie", interceptCookie)
                 .put("rules", rulesJson ?: org.json.JSONArray())
@@ -349,11 +390,12 @@ object ProxyProbe {
             // 「没开拦截却被拦了，得开关一次才好」。面板或 Agent 后续显式下发 enabled=true
             // 时才重新点亮这些规则。
             interceptEnabled = false
-            reqInterceptAll = false
-            respInterceptAll = false
-            interceptTelemetry = false
-            interceptNoise = false
-            interceptCookie = false
+            reqInterceptAll = obj.optBoolean("reqAll", false)
+            respInterceptAll = obj.optBoolean("respAll", false)
+            interceptTelemetry = obj.optBoolean("interceptTelemetry", false)
+            interceptHeartbeat = obj.optBoolean("interceptHeartbeat", false)
+            interceptNoise = obj.optBoolean("interceptNoise", false)
+            interceptCookie = obj.optBoolean("interceptCookie", false)
             interceptRulesList = parseInterceptRules(obj.optJSONArray("rules"))
         } catch (_: Throwable) {}
     }
@@ -482,7 +524,8 @@ object ProxyProbe {
     private fun applyThrottleConfig(data: JSONObject) {
         throttleLatencyMs = maxOf(0L, data.optLong("latencyMs", 0L))
         throttleKbps = maxOf(0L, data.optLong("kbps", 0L))
-        throttleEnabled = data.optBoolean("enabled", false) && (throttleLatencyMs > 0 || throttleKbps > 0)
+        throttleEnabled = data.optBoolean("enabled", data.optBoolean("throttleEnabled", false)) &&
+            (throttleLatencyMs > 0 || throttleKbps > 0)
     }
 
     private fun saveThrottleConfig(data: JSONObject) {
@@ -612,6 +655,7 @@ object ProxyProbe {
         if (!lowValueGuard(method, reqBodyLen)) return false
         val url = "https://$host$target".lowercase()
         if (!interceptTelemetry && telemetryRe.containsMatchIn(url)) return true
+        if (!interceptHeartbeat && heartbeatRe.containsMatchIn(url)) return true
         if (!interceptNoise && noiseRe.containsMatchIn(url)) return true
         if (!interceptCookie && cookieRe.containsMatchIn(url)) return true
         return false
@@ -650,6 +694,7 @@ object ProxyProbe {
         val realFlowId = NetFlowStore.flowIdFor(flowId) ?: flowId
         pendingInterceptMeta.remove(realFlowId)
         pendingIntercepts.remove(realFlowId)?.complete(decision)
+        notifyInterceptState()
     }
 
     /** Panel → native: the user's decision for a paused response flow. */
@@ -657,6 +702,7 @@ object ProxyProbe {
         val realFlowId = NetFlowStore.flowIdFor(flowId) ?: flowId
         pendingInterceptMeta.remove(realFlowId)
         pendingRespIntercepts.remove(realFlowId)?.complete(decision)
+        notifyInterceptState()
     }
 
     /**
@@ -672,6 +718,7 @@ object ProxyProbe {
         pendingInterceptMeta.remove(realFlowId)
         reqFut?.complete(decision)
         respFut?.complete(decision)
+        notifyInterceptState()
         return true
     }
 
@@ -703,6 +750,7 @@ object ProxyProbe {
         pendingIntercepts[flowId] = fut
         val method = reqHead.substringBefore("\r\n").trimStart().substringBefore(' ').trim()
         pendingInterceptMeta[flowId] = InterceptMeta("req", "https://$host$target", method)
+        notifyInterceptState()
         val bodyText = if (isLikelyText(body)) String(body, Charsets.UTF_8) else ""
         emit(
             JSONObject()
@@ -720,6 +768,8 @@ object ProxyProbe {
             fut.get(INTERCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (_: Throwable) {
             pendingIntercepts.remove(flowId)
+            pendingInterceptMeta.remove(flowId)
+            notifyInterceptState()
             null
         }
     }
@@ -772,6 +822,7 @@ object ProxyProbe {
         val status = respHead.substringBefore("\r\n").split(" ").getOrElse(1) { "" }.toIntOrNull() ?: 0
         // Store resp meta (URL from NetFlowStore/emit is unavailable here, use flowId hint)
         pendingInterceptMeta[flowId] = InterceptMeta("resp", "flow:$flowId", status.toString())
+        notifyInterceptState()
         val bodyText = if (isLikelyText(decodedBody)) String(decodedBody, Charsets.UTF_8) else ""
         emit(
             JSONObject()
@@ -788,6 +839,8 @@ object ProxyProbe {
             fut.get(INTERCEPT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (_: Throwable) {
             pendingRespIntercepts.remove(flowId)
+            pendingInterceptMeta.remove(flowId)
+            notifyInterceptState()
             null
         }
     }
@@ -1006,6 +1059,8 @@ object ProxyProbe {
         val hbBytes = sseHoldHeartbeat.toByteArray(Charsets.UTF_8)
         val fut = CompletableFuture<JSONObject>()
         pendingRespIntercepts[flowId] = fut
+        pendingInterceptMeta[flowId] = InterceptMeta("resp", "flow:$flowId", "sse")
+        notifyInterceptState()
         val hb = Thread {
             try {
                 while (beating.get()) {
@@ -1021,6 +1076,8 @@ object ProxyProbe {
                 // Browser closed the stream (write failed) or thread interrupted: stop
                 // beating and fail-open the wait so the response thread never hangs.
                 beating.set(false)
+                pendingInterceptMeta.remove(flowId)
+                notifyInterceptState()
                 pendingRespIntercepts.remove(flowId)?.complete(JSONObject().put("decision", "failopen"))
             }
         }
@@ -1050,6 +1107,8 @@ object ProxyProbe {
         // gone) ends the wait early via fail-open.
         val decision = try { fut.get() } catch (_: Throwable) { null }
         pendingRespIntercepts.remove(flowId)
+        pendingInterceptMeta.remove(flowId)
+        notifyInterceptState()
         beating.set(false)
         hb.interrupt()
 

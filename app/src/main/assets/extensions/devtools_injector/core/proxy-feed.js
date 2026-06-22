@@ -38,10 +38,89 @@ function proxyFeedInit() {
     var p = proxyGetPort();
     if (p) {
       p.onMessage.addListener(proxyOnMsg);
+      requestNativeInterceptState();
       return;
     }
     if (tries++ < 50) setTimeout(wait, 100);
   }());
+}
+
+function proxyRuleKey(rule) {
+  return [
+    rule && rule.host || '',
+    rule && rule.path || '',
+    String(rule && rule.method || 'GET').toUpperCase(),
+    rule && rule.hasBody ? '1' : '0',
+  ].join('\n');
+}
+
+function proxyHydrateNativeRules(rules) {
+  var prior = {};
+  try {
+    if (Array.isArray(netInterceptRules)) {
+      netInterceptRules.forEach(function (r) { prior[proxyRuleKey(r)] = r; });
+    }
+  } catch (e) {}
+  if (!Array.isArray(rules)) return [];
+  return rules.map(function (r) {
+    var old = prior[proxyRuleKey(r)] || {};
+    return {
+      id: old.id || (Date.now().toString(36) + Math.random().toString(36).slice(2)),
+      action: r && r.action === 'intercept' ? 'intercept' : 'pass',
+      host: String(r && r.host || ''),
+      path: String(r && r.path || ''),
+      method: String(r && r.method || 'GET').toUpperCase(),
+      hasBody: !!(r && r.hasBody),
+      interceptResp: !!(r && r.interceptResp),
+      sampleUrl: old.sampleUrl || '',
+      createdAt: old.createdAt || Date.now(),
+      updatedAt: Date.now(),
+    };
+  }).filter(function (r) {
+    return r.host || r.path;
+  });
+}
+
+function applyNativeInterceptState(msg) {
+  try {
+    if (typeof netInterceptMaster === 'undefined') return;
+    netNativeInterceptStateReceived = true;
+    netApplyingNativeInterceptState = true;
+    netInterceptMaster = !!msg.enabled;
+    netScopeReq = Object.prototype.hasOwnProperty.call(msg, 'reqAll') ? !!msg.reqAll : netScopeReq;
+    netScopeResp = Object.prototype.hasOwnProperty.call(msg, 'respAll') ? !!msg.respAll : netScopeResp;
+    netScopeTelemetry = !!msg.interceptTelemetry;
+    netScopeHeartbeat = !!msg.interceptHeartbeat;
+    netScopeNoise = !!msg.interceptNoise;
+    netScopeCookie = !!msg.interceptCookie;
+    if (Array.isArray(msg.rules)) {
+      netInterceptRules = proxyHydrateNativeRules(msg.rules);
+      netInterceptRulesLoaded = true;
+    }
+    if (typeof recomputeIntercept === 'function') recomputeIntercept(true);
+    else {
+      netGlobalInterceptEnabled = netInterceptMaster && netScopeReq;
+      netGlobalRespInterceptEnabled = netInterceptMaster && netScopeResp;
+      netGlobalInterceptNoise = netScopeNoise;
+    }
+    if (typeof syncGlobalInterceptEnabled === 'function') syncGlobalInterceptEnabled();
+    if (typeof syncGlobalRespInterceptEnabled === 'function') syncGlobalRespInterceptEnabled();
+    if (typeof syncGlobalInterceptNoise === 'function') syncGlobalInterceptNoise();
+    if (typeof syncFilterSuppressResp === 'function') syncFilterSuppressResp();
+    if (typeof syncInterceptRules === 'function') syncInterceptRules();
+    if (typeof saveNetConfig === 'function') saveNetConfig();
+    try {
+      var st = storageLocal();
+      if (st && st.set) st.set({ bhNetInterceptRules: netInterceptRules }).catch(function () {});
+    } catch (e) {}
+    if (typeof updateInterceptBtn === 'function') updateInterceptBtn();
+    if (typeof updateRulesBtn === 'function') updateRulesBtn();
+    if (typeof renderRulesView === 'function') renderRulesView();
+    if (typeof renderNetList === 'function') renderNetList();
+  } catch (e) {
+  } finally {
+    netApplyingNativeInterceptState = false;
+  }
 }
 
 function proxyOnMsg(msg) {
@@ -52,6 +131,10 @@ function proxyOnMsg(msg) {
     if (typeof netEnableBtn !== 'undefined' && netEnableBtn) {
       netEnableBtn.textContent = netEnabled ? '\u25cf \u76d1\u542c\u4e2d' : '\u25cb \u5df2\u505c\u6b62';
     }
+    return;
+  }
+  if (msg.type === 'interceptState') {
+    applyNativeInterceptState(msg);
     return;
   }
   if (msg.type === 'flowReq') {

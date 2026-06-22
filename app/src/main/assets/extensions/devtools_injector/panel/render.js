@@ -69,7 +69,7 @@
 	    if (!st || !st.get) {
 	      netInterceptRulesLoaded = true;
 	      syncInterceptRules();
-	      pushInterceptRulesToNative();
+	      requestNativeInterceptState();
 	      return;
 	    }
 	    try {
@@ -77,19 +77,19 @@
 	        netInterceptRules = sanitizeInterceptRules(res && res.bhNetInterceptRules);
 	        netInterceptRulesLoaded = true;
 	        syncInterceptRules();
-	        pushInterceptRulesToNative();
+	        requestNativeInterceptState();
 	        updateRulesBtn();
 	        renderRulesView();
 	      }).catch(function () {
 	        netInterceptRulesLoaded = true;
 	        syncInterceptRules();
-	        pushInterceptRulesToNative();
+	        requestNativeInterceptState();
 	        updateRulesBtn();
 	      });
 	    } catch (e) {
 	      netInterceptRulesLoaded = true;
 	      syncInterceptRules();
-	      pushInterceptRulesToNative();
+	      requestNativeInterceptState();
 	      updateRulesBtn();
 	    }
 	  }

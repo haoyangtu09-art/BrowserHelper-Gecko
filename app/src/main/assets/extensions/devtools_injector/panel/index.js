@@ -460,11 +460,12 @@ var netThisSiteOnly = false;
 var netPlainProbeEnabled = false;
 // 主开关（拦截按钮）：决定拦截功能是否生效
 var netInterceptMaster = false;
-// 作用域（长按配置）：主开关开启时分别决定是否拦请求/响应；遥测/噪音/cookie 三类
+// 作用域（长按配置）：主开关开启时分别决定是否拦请求/响应；遥测/心跳/噪音/cookie 四类
 // 低价值包默认放行，勾选对应项后改为一并拦截（原生侧 isLowValueUrl 按类闸门）。
 var netScopeReq = true;
 var netScopeResp = false;
 var netScopeTelemetry = false;
+var netScopeHeartbeat = false;
 var netScopeNoise = false;
 var netScopeCookie = false;
 // 派生的生效标志（= 主开关 && 对应作用域），拦截器实际读取这三个
@@ -487,6 +488,8 @@ var netReplaceRulesLoaded = false;
 // 拦截规则是否已从 storage.local 异步加载完成。未加载完时禁止 pushInterceptRulesToNative，
 // 否则导航重载早期会把空规则推给原生（并持久化），抹掉正在生效的拦截。
 var netInterceptRulesLoaded = false;
+var netNativeInterceptStateReceived = false;
+var netApplyingNativeInterceptState = false;
 var netDetailSearchText = '';
 var netDetailSearchMatches = [];
 var netDetailSearchIdx = 0;
@@ -566,6 +569,7 @@ function registerNetTool(erudaObj) {
 	      updateInterceptBtn();
 	      updateFilterButtons();
 	      updateReplaceBtn();
+	      requestNativeInterceptState();
 	    });
   // page-world: eruda 在 window.eruda; isolated: self.eruda
   var erudaObj = (erudaMode === 'page') ? null : (self.eruda || null);

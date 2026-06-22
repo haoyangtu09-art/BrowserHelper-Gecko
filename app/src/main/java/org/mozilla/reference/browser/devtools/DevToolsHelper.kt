@@ -126,6 +126,7 @@ object DevToolsHelper {
             // Tell the freshly-connected panel the real proxy state so its 监听
             // button reflects reality (the proxy is reset to OFF on cold launch).
             sendProxyState(engineSession)
+            sendInterceptState(engineSession)
         }
         override fun onPortDisconnected(port: Port) {
             registeredSessions.remove(engineSession)
@@ -152,14 +153,21 @@ object DevToolsHelper {
                 }
                 if (action == "setInterceptRules") {
                     ProxyProbe.setInterceptRules(data)
+                    sendInterceptState(engineSession)
+                    return
+                }
+                if (action == "requestInterceptState") {
+                    sendInterceptState(engineSession)
                     return
                 }
                 if (action == "resolveIntercept") {
                     ProxyProbe.resolveIntercept(data.optString("flowId", ""), data)
+                    sendInterceptState(engineSession)
                     return
                 }
                 if (action == "resolveRespIntercept") {
                     ProxyProbe.resolveRespIntercept(data.optString("flowId", ""), data)
+                    sendInterceptState(engineSession)
                     return
                 }
                 if (action == "agentResp") {
@@ -233,6 +241,16 @@ object DevToolsHelper {
         if (!controller.portConnected(engineSession, CONTENT_PORT)) return
         controller.sendContentMessage(
             JSONObject().put("ch", "proxy").put("type", "proxyState").put("running", ProxyProbe.isRunning()),
+            engineSession,
+            CONTENT_PORT,
+        )
+    }
+
+    /** Push the current native intercept config to the panel (native is authoritative). */
+    private fun sendInterceptState(engineSession: EngineSession) {
+        if (!controller.portConnected(engineSession, CONTENT_PORT)) return
+        controller.sendContentMessage(
+            ProxyProbe.interceptStateJson().put("ch", "proxy"),
             engineSession,
             CONTENT_PORT,
         )

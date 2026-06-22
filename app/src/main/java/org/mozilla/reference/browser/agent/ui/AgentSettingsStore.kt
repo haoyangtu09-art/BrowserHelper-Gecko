@@ -11,6 +11,7 @@ import org.mozilla.reference.browser.agent.core.AgentMessage
 import org.mozilla.reference.browser.agent.core.AgentPermissionTier
 import org.mozilla.reference.browser.agent.core.ChatToolCall
 import org.mozilla.reference.browser.agent.core.Role
+import org.mozilla.reference.browser.agent.core.TaskTrackerState
 import java.io.File
 
 private const val PREFS = "bh_agent_overlay"
@@ -95,6 +96,7 @@ class AgentSettingsStore(context: Context) {
             state.messages.addAll(current.messages)
             state.convo.clear()
             state.convo.addAll(current.convo)
+            state.tracker = current.tracker
         }
     }
 
@@ -164,20 +166,28 @@ class AgentSettingsStore(context: Context) {
                 },
             )
 
-    private fun chatToJson(chat: SavedChat): JSONObject =
-        JSONObject()
+    private fun chatToJson(chat: SavedChat): JSONObject {
+        val o = JSONObject()
             .put("version", 1)
             .put("id", chat.id)
             .put("title", chat.title)
             .put("titled", chat.titled)
             .put("messages", JSONArray().also { arr -> chat.messages.forEach { arr.put(msgToJson(it)) } })
             .put("convo", JSONArray().also { arr -> chat.convo.forEach { arr.put(convoToJson(it)) } })
+        // Visual Task Tracker — omitted from the JSON when the chat has never produced any
+        // task groups, so old chats stay byte-identical until they actually start tracking.
+        if (!chat.tracker.isEmpty) {
+            o.put("tasks", chat.tracker.toJson())
+        }
+        return o
+    }
 
     private fun chatFromJson(o: JSONObject): SavedChat {
         val chat = SavedChat(
             id = o.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
             title = o.optString("title", "新对话"),
             titled = o.optBoolean("titled", false),
+            tracker = TaskTrackerState.fromJson(o.optJSONObject("tasks")),
         )
         val msgs = o.optJSONArray("messages") ?: JSONArray()
         for (i in 0 until msgs.length()) {

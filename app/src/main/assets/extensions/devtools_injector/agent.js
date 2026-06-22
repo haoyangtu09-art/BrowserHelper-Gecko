@@ -26,14 +26,32 @@ var _bhPageSourceCap = 512 * 1024;  // 512 KB cap to keep JS memory sane
 // ── page world execution ─────────────────────────────────────────────────────
 
 function _bhRunInPage(code) {
-    // Inject a <script> into the page DOM to run code in page world.
-    // Fallback used when wrappedJSObject is unavailable.
+    // Inject a blob <script> into the page DOM to run code in page world. This
+    // survives strict inline-script CSP on sites such as ChatGPT; inline is last resort.
     try {
+        var blob = new Blob([code], { type: 'application/javascript' });
+        var url = URL.createObjectURL(blob);
         var s = document.createElement('script');
-        s.textContent = code;
+        s.src = url;
+        s.onload = function () { s.remove(); URL.revokeObjectURL(url); };
+        s.onerror = function () {
+            s.remove(); URL.revokeObjectURL(url);
+            try {
+                var inl = document.createElement('script');
+                inl.textContent = code;
+                (document.head || document.documentElement).appendChild(inl);
+                inl.remove();
+            } catch (_) {}
+        };
         (document.head || document.documentElement).appendChild(s);
-        s.remove();
-    } catch (e) {}
+    } catch (e) {
+        try {
+            var s2 = document.createElement('script');
+            s2.textContent = code;
+            (document.head || document.documentElement).appendChild(s2);
+            s2.remove();
+        } catch (_) {}
+    }
 }
 
 function _bhEvalInPage(code, timeoutMs) {
@@ -173,6 +191,153 @@ function _bhPageFetch(args) {
     });
 }
 
+// ── DOM/CSS hardening for page tools ────────────────────────────────────────
+// Page automation must work on pages that use shadow DOM, pointer-events traps,
+// opacity/visibility transitions, sticky overlays, or framework-controlled inputs.
+// These helpers keep tools constrained (no arbitrary JS for S2), but make the
+// actual element interaction less dependent on the page's own CSS.
+function _bhParentElement(el) {
+    if (!el) return null;
+    if (el.parentElement) return el.parentElement;
+    var root = el.getRootNode && el.getRootNode();
+    return root && root.host ? root.host : null;
+}
+
+function _bhQueryAll(selector, limit) {
+    selector = String(selector || '');
+    if (!selector) return [];
+    var max = Math.max(1, Math.min(Number(limit || 100), 1000));
+    var out = [];
+    var seenRoots = [];
+    function add(el) {
+        if (!el || out.indexOf(el) >= 0) return;
+        out.push(el);
+    }
+    function scan(root) {
+        if (!root || seenRoots.indexOf(root) >= 0 || out.length >= max) return;
+        seenRoots.push(root);
+        var matches = [];
+        try { matches = Array.prototype.slice.call(root.querySelectorAll(selector)); }
+        catch (e) { throw e; }
+        for (var i = 0; i < matches.length && out.length < max; i++) add(matches[i]);
+        var all = [];
+        try { all = Array.prototype.slice.call(root.querySelectorAll('*')); } catch (_) {}
+        for (var j = 0; j < all.length && out.length < max; j++) {
+            if (all[j].shadowRoot) scan(all[j].shadowRoot);
+        }
+    }
+    scan(document);
+    return out.slice(0, max);
+}
+
+function _bhQueryOne(selector) {
+    return _bhQueryAll(selector, 1)[0] || null;
+}
+
+function _bhElementRect(el) {
+    try {
+        var r = el.getBoundingClientRect();
+        return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+    } catch (e) {
+        return { x: 0, y: 0, width: 0, height: 0 };
+    }
+}
+
+function _bhElementVisible(el) {
+    if (!el) return false;
+    try {
+        var r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        var cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse' || Number(cs.opacity) === 0)) return false;
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+function _bhApplyCssBypass(el, opts) {
+    if (!el || !el.style) return function () {};
+    opts = opts || {};
+    var saved = [];
+    function set(prop, val) {
+        try {
+            saved.push([prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)]);
+            el.style.setProperty(prop, val, 'important');
+        } catch (e) {}
+    }
+    set('pointer-events', 'auto');
+    set('visibility', 'visible');
+    set('opacity', '1');
+    set('scroll-margin', '80px');
+    set('scroll-margin-top', '80px');
+    if (opts.zIndex) {
+        set('position', 'relative');
+        set('z-index', '2147483647');
+    }
+    if (opts.display) {
+        try {
+            var cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (cs && cs.display === 'none') set('display', 'block');
+        } catch (e) {}
+    }
+    return function () {
+        for (var i = saved.length - 1; i >= 0; i--) {
+            try {
+                if (saved[i][1]) el.style.setProperty(saved[i][0], saved[i][1], saved[i][2] || '');
+                else el.style.removeProperty(saved[i][0]);
+            } catch (e) {}
+        }
+    };
+}
+
+function _bhScrollIntoView(el, block, inline) {
+    if (!el) return;
+    var restore = _bhApplyCssBypass(el, { display: true });
+    try { el.scrollIntoView({ block: block || 'center', inline: inline || 'center' }); } catch (e) {}
+    setTimeout(restore, 120);
+}
+
+function _bhSetNativeValue(el, value) {
+    var tag = (el.tagName || '').toLowerCase();
+    var proto = tag === 'textarea' ? HTMLTextAreaElement.prototype :
+        (tag === 'input' ? HTMLInputElement.prototype : null);
+    var desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+}
+
+function _bhDispatchInput(el, value) {
+    try {
+        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: value }));
+    } catch (e) {}
+    try {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+    } catch (e) {
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+    }
+    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+}
+
+function _bhSummarizeElement(el) {
+    var attrs = {};
+    try {
+        for (var i = 0; i < el.attributes.length; i++) {
+            attrs[el.attributes[i].name] = el.attributes[i].value.substring(0, 200);
+        }
+    } catch (e) {}
+    return {
+        tag: el.tagName,
+        id: el.id || undefined,
+        className: el.className || undefined,
+        text: el.textContent ? el.textContent.trim().substring(0, 300) : '',
+        html: el.outerHTML ? el.outerHTML.substring(0, 600) : '',
+        attrs: attrs,
+        visible: _bhElementVisible(el),
+        rect: _bhElementRect(el),
+    };
+}
+
 // ── page-world console capture (best-effort) ─────────────────────────────────
 // console.list reads page-world console output. The hook MUST live in page world
 // (the content-script console is a separate object), so we inject a small idempotent
@@ -243,6 +408,28 @@ function bhHandleAgentCmd(msg) {
         }
     }
 
+    // ── page_save_to_container (native writes the blob to a file) ─────────────
+    // Returns the full current-page outerHTML to NATIVE only (never into the model
+    // transcript). Native writes it to a container file and reports just metadata.
+    // Capped at 4 MB so a pathological page can't stall the page channel.
+    if (cmd === 'getSourceRaw') {
+        try {
+            var rawFull = document.documentElement.outerHTML || '';
+            var rawCap = 4 * 1024 * 1024;
+            var clipped = rawFull.length > rawCap;
+            return Promise.resolve({
+                ok: true,
+                url: location.href,
+                title: document.title,
+                totalLength: rawFull.length,
+                truncated: clipped,
+                html: clipped ? rawFull.substring(0, rawCap) : rawFull,
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
     // ── page_search ─────────────────────────────────────────────────────────
     // Text search on the locally-stored source. Returns small snippets (±150 chars).
     if (cmd === 'searchSource') {
@@ -279,21 +466,8 @@ function bhHandleAgentCmd(msg) {
         var sel = args.selector || '';
         if (!sel) return Promise.resolve({ error: 'selector required' });
         try {
-            var els = Array.prototype.slice.call(document.querySelectorAll(sel), 0, args.limit || 20);
-            var mapped = els.map(function (el) {
-                var attrs = {};
-                for (var i = 0; i < el.attributes.length; i++) {
-                    attrs[el.attributes[i].name] = el.attributes[i].value.substring(0, 200);
-                }
-                return {
-                    tag: el.tagName,
-                    id: el.id || undefined,
-                    className: el.className || undefined,
-                    text: el.textContent ? el.textContent.trim().substring(0, 300) : '',
-                    html: el.outerHTML ? el.outerHTML.substring(0, 600) : '',
-                    attrs: attrs,
-                };
-            });
+            var els = _bhQueryAll(sel, args.limit || 20);
+            var mapped = els.map(_bhSummarizeElement);
             return Promise.resolve({ selector: sel, count: mapped.length, elements: mapped });
         } catch (e) {
             return Promise.resolve({ error: String(e) });
@@ -307,18 +481,30 @@ function bhHandleAgentCmd(msg) {
         var writeSel = args.selector || '';
         if (!writeSel) return Promise.resolve({ error: 'selector required' });
         try {
-            var targets = Array.prototype.slice.call(document.querySelectorAll(writeSel), 0, args.all ? 50 : 1);
+            var targets = _bhQueryAll(writeSel, args.all ? 50 : 1);
             if (!targets.length) return Promise.resolve({ error: 'no elements matched selector' });
             if (cmd === 'setText') {
-                targets.forEach(function (el) { el.textContent = String(args.text || ''); });
+                targets.forEach(function (el) {
+                    var restore = _bhApplyCssBypass(el, { display: true });
+                    el.textContent = String(args.text || '');
+                    setTimeout(restore, 80);
+                });
             } else if (cmd === 'setHTML') {
-                targets.forEach(function (el) { el.innerHTML = String(args.html || ''); });
+                targets.forEach(function (el) {
+                    var restore = _bhApplyCssBypass(el, { display: true });
+                    el.innerHTML = String(args.html || '');
+                    setTimeout(restore, 80);
+                });
             } else {
                 var attrName = String(args.name || '').trim();
                 if (!/^[A-Za-z_:][A-Za-z0-9_.:-]*$/.test(attrName)) {
                     return Promise.resolve({ error: 'invalid attribute name' });
                 }
-                targets.forEach(function (el) { el.setAttribute(attrName, String(args.value || '')); });
+                targets.forEach(function (el) {
+                    var restore = _bhApplyCssBypass(el, { display: true });
+                    el.setAttribute(attrName, String(args.value || ''));
+                    setTimeout(restore, 80);
+                });
             }
             return Promise.resolve({
                 ok: true,
@@ -361,11 +547,11 @@ function bhHandleAgentCmd(msg) {
                 var cur = el;
                 while (cur && cur !== document.body && cur !== document.documentElement) {
                     if (isScrollable(cur)) return cur;
-                    cur = cur.parentElement;
+                    cur = _bhParentElement(cur);
                 }
                 return window;
             }
-            var target = selector ? document.querySelector(selector) : window;
+            var target = selector ? _bhQueryOne(selector) : window;
             if (!target) return Promise.resolve({ error: 'no elements matched selector', selector: selector });
             if (target !== window && !isScrollable(target) && args.nearestScrollable !== false) {
                 target = nearestScrollable(target);
@@ -383,10 +569,12 @@ function bhHandleAgentCmd(msg) {
             else if (direction === 'bottom') dy = 100000000;
             else dy = amount;
 
-            var intoViewEl = toSelector ? document.querySelector(toSelector) : null;
+            var intoViewEl = toSelector ? _bhQueryOne(toSelector) : null;
             if (toSelector && !intoViewEl) return Promise.resolve({ error: 'no elements matched toSelector', toSelector: toSelector });
             if (intoViewEl) {
+                var ivRestore = _bhApplyCssBypass(intoViewEl, { display: true });
                 intoViewEl.scrollIntoView({ behavior: actualBehavior, block: block, inline: inline });
+                setTimeout(ivRestore, waitMs + 120);
             } else if (isWindow) {
                 window.scrollBy({ left: dx, top: dy, behavior: actualBehavior });
             } else {
@@ -438,12 +626,13 @@ function bhHandleAgentCmd(msg) {
         try {
             var lpSel = String(args.selector || '');
             var durationMs = Math.max(100, Math.min(Number(args.durationMs || args.duration || 600), 5000));
-            var lpEl = lpSel ? document.querySelector(lpSel) : null;
+            var lpEl = lpSel ? _bhQueryOne(lpSel) : null;
             if (lpSel && !lpEl) return Promise.resolve({ error: 'no elements matched selector', selector: lpSel });
+            var lpRestore = lpEl ? _bhApplyCssBypass(lpEl, { display: true, zIndex: true }) : function () {};
             var px;
             var py;
             if (lpEl) {
-                try { lpEl.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+                _bhScrollIntoView(lpEl);
                 var lr = lpEl.getBoundingClientRect();
                 px = (typeof args.x === 'number') ? args.x : Math.round(lr.left + lr.width / 2);
                 py = (typeof args.y === 'number') ? args.y : Math.round(lr.top + lr.height / 2);
@@ -474,6 +663,7 @@ function bhHandleAgentCmd(msg) {
                     lpFirePtr('pointerup');
                     lpFireMouse('mouseup');
                     try { lpTgt.dispatchEvent(new MouseEvent('contextmenu', lpBase)); } catch (e) {}
+                    lpRestore();
                     resolve({ ok: true, selector: lpSel || null, x: px, y: py, durationMs: durationMs, tag: lpTgt.tagName });
                 }, durationMs);
             });
@@ -498,9 +688,10 @@ function bhHandleAgentCmd(msg) {
             var stepDelayMs = Math.max(0, Math.min(Number(args.stepDelayMs || 120), 2000));
             var doGesture = args.gesture !== false;
             var swBehavior = (String(args.behavior || 'auto').toLowerCase() === 'smooth') ? 'smooth' : 'auto';
-            var swTarget = sSel ? document.querySelector(sSel) : window;
+            var swTarget = sSel ? _bhQueryOne(sSel) : window;
             if (sSel && !swTarget) return Promise.resolve({ error: 'no elements matched selector', selector: sSel });
             var swIsWindow = swTarget === window;
+            var swRestore = swIsWindow ? function () {} : _bhApplyCssBypass(swTarget, { display: true });
             var unitX = 0;
             var unitY = 0;
             if (sdir === 'up') unitY = -1;
@@ -533,6 +724,7 @@ function bhHandleAgentCmd(msg) {
                 var done = 0;
                 function swStep() {
                     if (done >= repeat) {
+                        swRestore();
                         var endX = swIsWindow ? window.scrollX : swTarget.scrollLeft;
                         var endY = swIsWindow ? window.scrollY : swTarget.scrollTop;
                         resolve({
@@ -575,12 +767,18 @@ function bhHandleAgentCmd(msg) {
         var clkSel = String(args.selector || '');
         if (!clkSel) return Promise.resolve({ error: 'selector required' });
         try {
-            var clkEl = document.querySelector(clkSel);
+            var clkEl = _bhQueryOne(clkSel);
             if (!clkEl) return Promise.resolve({ error: 'no elements matched selector', selector: clkSel });
-            try { clkEl.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+            var clkRestore = _bhApplyCssBypass(clkEl, { display: true, zIndex: true });
+            _bhScrollIntoView(clkEl);
             var cr = clkEl.getBoundingClientRect();
             var ccx = Math.round(cr.left + cr.width / 2);
             var ccy = Math.round(cr.top + cr.height / 2);
+            ccx = Math.max(1, Math.min(window.innerWidth - 1, ccx));
+            ccy = Math.max(1, Math.min(window.innerHeight - 1, ccy));
+            var hit = null;
+            try { hit = document.elementFromPoint(ccx, ccy); } catch (e) {}
+            var covered = !!(hit && hit !== clkEl && !clkEl.contains(hit));
             var cbase = { bubbles: true, cancelable: true, view: window, clientX: ccx, clientY: ccy, button: 0 };
             var cptr = { bubbles: true, cancelable: true, view: window, clientX: ccx, clientY: ccy, pointerId: 1, pointerType: 'mouse', isPrimary: true };
             try { if (window.PointerEvent) clkEl.dispatchEvent(new PointerEvent('pointerdown', cptr)); } catch (e) {}
@@ -589,7 +787,17 @@ function bhHandleAgentCmd(msg) {
             try { clkEl.dispatchEvent(new MouseEvent('mouseup', cbase)); } catch (e) {}
             // Native click() fires the canonical 'click' event once (avoids double-fire).
             try { if (typeof clkEl.click === 'function') clkEl.click(); else clkEl.dispatchEvent(new MouseEvent('click', cbase)); } catch (e) {}
-            return Promise.resolve({ ok: true, selector: clkSel, tag: clkEl.tagName, x: ccx, y: ccy });
+            setTimeout(clkRestore, 120);
+            return Promise.resolve({
+                ok: true,
+                selector: clkSel,
+                tag: clkEl.tagName,
+                x: ccx,
+                y: ccy,
+                visible: _bhElementVisible(clkEl),
+                covered: covered,
+                hitTag: hit && hit.tagName || '',
+            });
         } catch (e) {
             return Promise.resolve({ error: String(e) });
         }
@@ -602,21 +810,24 @@ function bhHandleAgentCmd(msg) {
         var tySel = String(args.selector || '');
         if (!tySel) return Promise.resolve({ error: 'selector required' });
         try {
-            var tyEl = document.querySelector(tySel);
+            var tyEl = _bhQueryOne(tySel);
             if (!tyEl) return Promise.resolve({ error: 'no elements matched selector', selector: tySel });
             var tyVal = String(args.text || '');
             var tyAppend = !!args.append;
+            var tyRestore = _bhApplyCssBypass(tyEl, { display: true, zIndex: true });
+            _bhScrollIntoView(tyEl);
             try { tyEl.focus(); } catch (e) {}
             if ('value' in tyEl) {
-                tyEl.value = tyAppend ? (tyEl.value + tyVal) : tyVal;
+                _bhSetNativeValue(tyEl, tyAppend ? (tyEl.value + tyVal) : tyVal);
             } else if (tyEl.isContentEditable) {
                 tyEl.textContent = tyAppend ? ((tyEl.textContent || '') + tyVal) : tyVal;
             } else {
+                tyRestore();
                 return Promise.resolve({ error: 'element is not editable (no value and not contentEditable)' });
             }
-            try { tyEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
-            try { tyEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-            return Promise.resolve({ ok: true, selector: tySel, tag: tyEl.tagName, length: tyVal.length, append: tyAppend });
+            _bhDispatchInput(tyEl, tyVal);
+            setTimeout(tyRestore, 120);
+            return Promise.resolve({ ok: true, selector: tySel, tag: tyEl.tagName, length: tyVal.length, append: tyAppend, visible: _bhElementVisible(tyEl) });
         } catch (e) {
             return Promise.resolve({ error: String(e) });
         }
@@ -632,17 +843,19 @@ function bhHandleAgentCmd(msg) {
         var wVisible = !!args.visible;
         var wStart = Date.now();
         function wMatch() {
-            var el = document.querySelector(wSel);
+            var el = null;
+            try { el = _bhQueryOne(wSel); } catch (e) { return { __bhError: String(e) }; }
             if (!el) return null;
-            if (wVisible) {
-                var r = el.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) return null;
-            }
+            if (wVisible && !_bhElementVisible(el)) return null;
             return el;
         }
         return new Promise(function (resolve) {
             (function tick() {
                 var el = wMatch();
+                if (el && el.__bhError) {
+                    resolve({ ok: false, error: el.__bhError, selector: wSel, waitedMs: Date.now() - wStart });
+                    return;
+                }
                 if (el) {
                     resolve({ ok: true, found: true, selector: wSel, waitedMs: Date.now() - wStart, tag: el.tagName, text: el.textContent ? el.textContent.trim().substring(0, 200) : '' });
                     return;
@@ -663,24 +876,32 @@ function bhHandleAgentCmd(msg) {
         var hSel = String(args.selector || '');
         if (!hSel) return Promise.resolve({ error: 'selector required' });
         try {
-            var hEls = Array.prototype.slice.call(document.querySelectorAll(hSel), 0, args.all ? 50 : 1);
+            var hEls = _bhQueryAll(hSel, args.all ? 50 : 1);
             if (!hEls.length) return Promise.resolve({ error: 'no elements matched selector', selector: hSel });
             var hColor = String(args.color || '#ff3b30');
             var hDuration = Math.max(0, Math.min(Number(args.durationMs || 2000), 20000));
             hEls.forEach(function (el) {
                 try {
-                    var prevOutline = el.style.outline;
-                    var prevOffset = el.style.outlineOffset;
-                    el.style.outline = '3px solid ' + hColor;
-                    el.style.outlineOffset = '2px';
-                    if (hDuration > 0) {
-                        setTimeout(function () {
-                            try { el.style.outline = prevOutline; el.style.outlineOffset = prevOffset; } catch (e) {}
-                        }, hDuration);
+                    var restoreCss = _bhApplyCssBypass(el, { display: true, zIndex: true });
+                    var prevOutline = el.style.getPropertyValue('outline');
+                    var prevOutlinePr = el.style.getPropertyPriority('outline');
+                    var prevOffset = el.style.getPropertyValue('outline-offset');
+                    var prevOffsetPr = el.style.getPropertyPriority('outline-offset');
+                    el.style.setProperty('outline', '3px solid ' + hColor, 'important');
+                    el.style.setProperty('outline-offset', '2px', 'important');
+                    function restoreHighlight() {
+                        try {
+                            if (prevOutline) el.style.setProperty('outline', prevOutline, prevOutlinePr);
+                            else el.style.removeProperty('outline');
+                            if (prevOffset) el.style.setProperty('outline-offset', prevOffset, prevOffsetPr);
+                            else el.style.removeProperty('outline-offset');
+                            restoreCss();
+                        } catch (e) {}
                     }
+                    setTimeout(restoreHighlight, hDuration > 0 ? hDuration : 80);
                 } catch (e) {}
             });
-            try { hEls[0].scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+            _bhScrollIntoView(hEls[0]);
             return Promise.resolve({ ok: true, selector: hSel, count: hEls.length, durationMs: hDuration });
         } catch (e) {
             return Promise.resolve({ error: String(e) });
@@ -732,6 +953,77 @@ function bhHandleAgentCmd(msg) {
         var code = args.code || '';
         if (!code) return Promise.resolve({ error: 'code required' });
         return _bhEvalInPage(code, args.timeoutMs || 10000);
+    }
+
+    // ── plugin_list (S1, read-only) ─────────────────────────────────────────
+    // List all built-in plugins with id/name/desc and current enabled state.
+    if (cmd === 'pluginList') {
+        try {
+            var pl = (typeof BH_PLUGINS !== 'undefined' ? BH_PLUGINS : []).map(function (p) {
+                return {
+                    id: p.id,
+                    name: p.name || p.id,
+                    desc: p.desc || '',
+                    enabled: (typeof isPluginEnabled === 'function') ? isPluginEnabled(p.id) : false,
+                };
+            });
+            return Promise.resolve({ ok: true, count: pl.length, plugins: pl });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── plugin_get_permissions (S1, read-only) ──────────────────────────────
+    // Return metadata for one plugin (id/name/desc/enabled). Plugins are built-in and
+    // don't declare granular permissions, so this surfaces the plugin's descriptor.
+    if (cmd === 'pluginInfo') {
+        var piId = String(args.id || '');
+        if (!piId) return Promise.resolve({ error: 'id required' });
+        try {
+            var pp = (typeof bhPluginById === 'function') ? bhPluginById(piId) : null;
+            if (!pp) return Promise.resolve({ error: 'plugin not found: ' + piId });
+            return Promise.resolve({
+                ok: true,
+                id: pp.id,
+                name: pp.name || pp.id,
+                desc: pp.desc || '',
+                enabled: (typeof isPluginEnabled === 'function') ? isPluginEnabled(pp.id) : false,
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── plugin_enable (S2) ──────────────────────────────────────────────────
+    if (cmd === 'pluginEnable') {
+        var peId = String(args.id || '');
+        if (!peId) return Promise.resolve({ error: 'id required' });
+        try {
+            if (typeof bhPluginById !== 'function' || !bhPluginById(peId)) {
+                return Promise.resolve({ error: 'plugin not found: ' + peId });
+            }
+            if (typeof enablePlugin === 'function') enablePlugin(peId);
+            if (typeof refreshExtCards === 'function') { try { refreshExtCards(); } catch (_) {} }
+            return Promise.resolve({ ok: true, id: peId, enabled: isPluginEnabled(peId) });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── plugin_disable (S2) ─────────────────────────────────────────────────
+    if (cmd === 'pluginDisable') {
+        var pdId = String(args.id || '');
+        if (!pdId) return Promise.resolve({ error: 'id required' });
+        try {
+            if (typeof bhPluginById !== 'function' || !bhPluginById(pdId)) {
+                return Promise.resolve({ error: 'plugin not found: ' + pdId });
+            }
+            if (typeof disablePlugin === 'function') disablePlugin(pdId);
+            if (typeof refreshExtCards === 'function') { try { refreshExtCards(); } catch (_) {} }
+            return Promise.resolve({ ok: true, id: pdId, enabled: isPluginEnabled(pdId) });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
     }
 
     return Promise.resolve({ error: 'unknown agentCmd: ' + cmd });

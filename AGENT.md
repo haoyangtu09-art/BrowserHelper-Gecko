@@ -3,7 +3,7 @@
 > 用途：新对话时只读这一个文件 + `CLAUDE.md`，就能立刻进入「原生悬浮 Agent 后端 + UI」工作状态。
 > 本文件覆盖 `org.mozilla.reference.browser.agent` 原生悬浮窗、内置后端、权限层、工具注册表和高级自检页。
 > 抓包代理 / DevTools 扩展那条线看 `CLAUDE.md`，两者基本独立。
-> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、网页图片上传链路重写、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截主开关防误拦、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、记忆实时文件同步、每个对话独立 JSON、拓展卡片 5-6 个一排（未提交）。改 Agent 后请同步更新本文件。
+> 末次更新对应 2026-06-22：模型 null 流式过滤、附件入口后端、网页图片上传链路重写、自动滚动/输入栏居中、即时最近标题、审批压缩/自动同意开关、250 次工具循环、顶部 chrome 透明覆盖、抓包/拦截工具补强、拦截前后端状态同步、心跳/噪音拆分、对话记忆恢复、用户消息灰色气泡、S2/S3 页面滑动/定位工具、页面工具 CSS/shadow DOM 抗干扰、P0 原生导航工具、记忆实时文件同步、每个对话独立 JSON、拓展卡片 5-6 个一排（未提交）。改 Agent 后请同步更新本文件。
 
 ---
 
@@ -53,12 +53,14 @@ APK 内部 `AgentToolRegistry`，不依赖外部 MCP。所有工具调用（含 
 - 容器批量/网页资源：`batch_edit_files`、`container_serve_url`。
 - 浏览器进程请求：`browser_request`。
 - 代理与网络规则：`proxy_start`、`proxy_stop`、`throttle_set`、`replace_set`、`mock_set`、`intercept_set`、`intercept_pending`、`intercept_resolve`、`resp_intercept_resolve`。
-- 受限页面操作：`page_set_text`、`page_set_html`、`page_set_attr`、`page_scroll`。其中 `page_scroll` 可滑动 window/指定滚动容器，也可用 `toSelector` 定位到元素，S2/S3 可见。
+- 受限页面操作：`page_set_text`、`page_set_html`、`page_set_attr`、`page_scroll`、`page_click`、`page_type`、`page_long_press`、`dom_highlight_element`、`dom_inject_css`。其中 selector 类工具已做 open shadow DOM 查询和临时 CSS 绕过。
+- 原生标签页导航：`page_navigate`、`page_reload`、`page_back`、`page_forward`，走 GeckoSession/session use case，不依赖页面 JS/CSP。
 
 ### 抓包/拦截工具升级
 - `network_list` 默认只返回最近 10 条，支持 `method`、`urlContains`、`sinceSeconds`、`limit`；摘要新增六位 `code`、旧 `flowId`、请求/响应大小、请求/响应 body 字节数、`latencyMs`。
 - `network_get {id,part}` 接受六位 `code` 或旧 `flowId`；`part` 可取 `summary/requestHeaders/requestBody/responseHeaders/responseBody/all`，凭证头继续脱敏。
-- `intercept_set` 未传 `reqAll/respAll` 时默认同时拦截请求和响应；遥测、心跳/噪音、cookie/auth 默认自动放行，可用 `interceptTelemetry/interceptHeartbeat/interceptNoise/interceptCookie` 显式纳入拦截。
+- `intercept_set` 未传 `reqAll/respAll` 时默认不做全局拦截；要拦全部必须显式传 `reqAll/respAll=true`，或在 `rules` 里加 `action=intercept`/`interceptResp=true`。遥测、心跳、噪音、cookie/auth 默认自动放行，可用 `interceptTelemetry/interceptHeartbeat/interceptNoise/interceptCookie` 显式纳入拦截。
+- DevTools 前台面板和 `ProxyProbe` 后台已同步：端口连接/Eruda 注入时会拉取 `interceptState`，Agent 调 `intercept_set` 后也会广播原生真实状态，避免前台显示关、后台实际还在拦截。
 - `intercept_pending` 会展示 `code`；`intercept_resolve`、`resp_intercept_resolve`、`cookie_reveal` 都接受六位 `code`，内部再映射回真实 flowId。
 - 原生 `ProxyProbe` 新增 `interceptEnabled` 主闸；DevTools 面板主开关关闭时会下发 `enabled:false`，历史 `action=intercept` 规则只保存展示、不再暂停请求，冷启动也不会误拦。
 
@@ -343,6 +345,12 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 - **记忆/历史实时文件同步**：`AgentSettingsStore` 新增 `files/agent_memory/`；长期记忆写 `memories.json`，索引写 `chat_index.json`，每个对话独立写 `chats/<chatId>.json`。每新增用户消息、附件、assistant 回复、工具卡/工具结果、标题变化、计划批准、权限切换、切换历史对话都会同步文件；`OverlayRoot.onDispose` 的 `saveBlocking()` 只作为禁用/销毁兜底。
 - **页面滑动/定位工具**：新增并优化 `page_scroll`，最低权限 S2，S2/S3 可见；走 PageChannel `scrollPage`，支持 `direction`、`amount/pixels`、`pages`、`selector`、`toSelector`、`block`、`inline`、`behavior`、`waitMs`、`nearestScrollable`，不执行任意 JS。
 - **不开拦截却被拦**：`ProxyProbe` 新增 `interceptEnabled`，冷启动不自动启用持久化拦截配置；DevTools `pushInterceptRulesToNative()` 会随主开关下发 `enabled`，主开关关时历史规则不再暂停请求，并自动放行已暂停队列。
+- **拦截状态前后端同步**：原生新增 `interceptStateJson()/notifyInterceptState()`；`DevToolsHelper` 在 port 连接、`requestInterceptState`、`setInterceptRules`、resolve 后把真实开关态推给前端；`proxy-feed.js` 收到 `interceptState` 后回灌 `netInterceptMaster/scope*`、规则列表和按钮，不再用旧 storage 反向覆盖后台。
+- **拦截作用域保存**：`enabled` 是唯一生效主闸；`reqAll/respAll/interceptTelemetry/interceptHeartbeat/interceptNoise/interceptCookie` 保存配置意图。主开关关闭时仍下发 raw scope，后端只保存不暂停，避免前端预设作用域被同步清空。
+- **心跳/噪音拆分**：`ProxyProbe` 新增独立 `interceptHeartbeat` 和 `heartbeatRe`，`noiseRe` 收窄到 log/hot-update/probe 等噪音；面板长按「拦截」新增“拦截心跳包”一行，`intercept_list_rules` 返回四类低价值流量开关。
+- **页面工具抗强 CSS/CSP**：`agent.js` selector 查询穿透 open shadow root；`page_query` 返回 `visible/rect`；`page_click/page_type/page_scroll/page_long_press/page_swipe/dom_highlight_element/page_set_*` 操作前临时加 important CSS 绕过 `pointer-events/visibility/opacity/scroll-margin/z-index/display:none`，并还原；`page_type` 改用原生 value setter + input/change，`page_exec` fallback 改 blob script 优先。
+- **P0 原生导航工具补齐**：新增 `page_navigate/page_reload/page_back/page_forward`，最低权限 S2，走 `sessionUseCases.loadUrl/reload/goBack/goForward`，不依赖页面 JS/CSP；工具自检不实际改 live history，只确认注册。
+- **弱网工具参数修正**：Agent `throttle_set` 现在向原生传 `enabled`（并兼容旧 `throttleEnabled`），避免模型以为开启弱网但 `ProxyProbe.applyThrottleConfig()` 实际没启用。
 - **Agent 顶部遮挡**：展开窗口目标 Y 从屏高 12% 下移到约 15%，且按面板高度夹紧；聊天顶部浮动按钮下移，避开透明拖拽条。
 - **对话记忆恢复**：打开抽屉/记忆页前会 `saveCurrentChat()`；`SavedChat.title/titled` 改为 Compose state；记忆页顶部新增「对话记忆」列表，点击直接 `loadChat()` 回到对应会话。
 - **用户消息气泡**：用户消息灰底加深并增加细边，恢复清晰的灰色气泡包裹。
@@ -356,7 +364,7 @@ onToolSelfTest / onToolSelfTestAll       // 高级页工具自检入口
 - **聊天自动滚动**：消息列表在接近底部时自动追踪最新消息；检测到用户向上滚动后停止追踪。
 - **顶部白条修复**：`OverlayRoot` 移除原 26dp chrome 占位，蓝色拖拽线和收起按钮改为透明 overlay，避免遮住顶部上下文。
 - **抓包展示升级**：`NetFlowStore` 为每条 flow 生成六位 `code`，记录请求/响应头体字节数、响应时间和 `latencyMs`；`network_list` 默认 10 条，`network_get` 支持按 `code`/`flowId` + `part` 读取局部详情。
-- **拦截工具升级**：`intercept_set` 缺省同时拦截请求/响应，但遥测、心跳/噪音、cookie/auth 默认放行；新增 `interceptHeartbeat`；pending/resolve/cookie 工具均支持六位 `code`。
+- **拦截工具升级**：`intercept_set` 缺省不全局拦截；遥测、心跳、噪音、cookie/auth 默认放行；新增独立 `interceptHeartbeat`；pending/resolve/cookie 工具均支持六位 `code`。
 - **拓展卡片缩小**：`extensions/index.js` 把拓展卡片改成 `minmax(46px,1fr)` 的自适应正方形，一行约 5-6 个；插件名作为最大标题，版本号放在下方。
 - **验证状态**：`git diff --check`、改动的两个 DevTools JS `node --check` 已通过；本地 `:app:assembleDebug` 仍因缺 Android SDK / `local.properties:sdk.dir` 停在环境检查，未进入源码编译。
 
@@ -470,12 +478,15 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 - `page_fetch {url,method,headers,body,credentials,mode,requiredPageUrlContains,timeoutMs}`（S3）— 在当前网页 page world 执行 `fetch`，可用 `requiredPageUrlContains` 校验来源页面。
 - `private_batch_edit_files {edits:[{path,content}]}`（S3）— 一次写多个浏览器私有目录文本文件。
 - `page_scroll {direction,amount,pixels,pages,selector,toSelector,block,inline,behavior,waitMs,nearestScrollable}`（S2）— 滑动当前网页 window 或第一个匹配 `selector` 的滚动容器；`direction=down/up/left/right/top/bottom`，默认 `down`，默认 600px，最大 5000px；`pages` 可按视口倍数滚动，`toSelector` 可定位到目标元素；受限 UI 操作，不暴露任意 JS。
+- `page_navigate {url,waitMs}`（S2）— 当前标签页加载 URL；省略 scheme 时按 `https://` 处理，走原生 `sessionUseCases.loadUrl`，不依赖页面 JS/CSP。
+- `page_reload` / `page_back` / `page_forward`（S2）— 当前标签页刷新/后退/前进，走原生 session use case。
+- `page_click {selector}`、`page_type {selector,text,append}`、`page_wait_for_element {selector,timeoutMs,visible}` — 已接 PageChannel；selector 查询穿透 open shadow DOM，点击/输入前临时绕过强 CSS，输入走原生 value setter。
 
 ### 12.0.2 抓包/拦截工具参数（内置 Agent）
 
 - `network_list {method,urlContains,sinceSeconds,limit}`（S1）— 列最近 MITM flow；默认 `limit=10`，上限 100。每条摘要返回 `id/code`（六位编号）、`flowId`、`method`、`url`、`host`、`status`、`contentType`、`reqBytes`、`respBytes`、`reqBodyBytes`、`respBodyBytes`、`latencyMs`。
 - `network_get {id,part}`（S1）— `id` 可传六位 `code` 或旧 `flowId`；`part` 支持 `summary` / `requestHeaders` / `requestBody` / `responseHeaders` / `responseBody` / `all`，默认 `all`。凭证头仍脱敏。
-- `intercept_set {reqAll,respAll,interceptTelemetry,interceptHeartbeat,interceptNoise,interceptCookie,rules}`（S2）— 如果不传 `reqAll/respAll`，默认请求和响应都拦截；低价值流量默认自动放行，只有对应 boolean 为 true 才纳入拦截。`rules[].action` 可写 `intercept` 或 `pass`。
+- `intercept_set {reqAll,respAll,interceptTelemetry,interceptHeartbeat,interceptNoise,interceptCookie,rules}`（S2）— 如果不传 `reqAll/respAll`，默认不全局拦截；低价值流量默认自动放行，只有对应 boolean 为 true 才纳入拦截。`rules[].action` 可写 `intercept` 或 `pass`，`rules[].interceptResp=true` 可只拦响应。
 - `intercept_pending`（S2）— 返回暂停队列，包含 `id/code/flowId/type/url/method/ts`。
 - `intercept_resolve` / `resp_intercept_resolve` / `cookie_reveal`（S2/S3）— `flowId` 或 `id` 位置均可传六位 `code`，APK 内部映射回真实 flowId。
 
@@ -644,23 +655,20 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 
 ### B. 工具脑暴：浏览器 Agent 还缺什么（按能力域）
 
-> 现有工具盘点见 §12.0 表。最大的结构性缺口：**Agent 不能让浏览器“去某个网址”**，也**没有普通
-> “点击”**（只有 long_press / scroll / swipe），表单填写也缺。下列按价值排序。
+> 现有工具盘点见 §12.0 表。P0「开网址→等元素→点→填→提交」闭环已落地：原生导航/刷新/前进后退、点击、输入、等待、滑动都已接入。后续缺口主要是更细的表单控件、结构化取数、截图和存储能力。下列按价值排序。
 
-**导航 / 标签页（最大缺口）**
-- `page_navigate {url,waitMs}`（S2）— 让当前 tab 加载 URL。需原生侧 `engineSession.loadUrl`，
+**导航 / 标签页（P0 已落地，剩余多标签新增/关闭）**
+- ✅ `page_navigate {url,waitMs}`（S2）— 让当前 tab 加载 URL。已走原生 `sessionUseCases.loadUrl`，
   不是 page-world JS（`location.href=` 受同源/CSP 限制，且 Agent 通道应走原生导航）。
-- `page_reload` / `page_back` / `page_forward`（S2）— 复用 GeckoSession 历史导航。
+- ✅ `page_reload` / `page_back` / `page_forward`（S2）— 已复用 GeckoSession/session use case 历史导航。
 - `page_wait_for {selector|urlContains|networkIdle, timeoutMs}`（S1）— 等元素出现 / URL 命中 /
   网络空闲，自动化链式动作的前提（轮询 page world + 原生 url 状态）。
-- `tab_list` / `tab_new {url}` / `tab_select {id}` / `tab_close {id}`（S2）— 多标签管理，
+- ✅ `tab_list` / `tab_current` / `tab_switch {id}` 已落地；`tab_new {url}` / `tab_close {id}` 待做。多标签管理，
   接 `BrowserStore`/`SessionManager`。
 
 **交互（受限 UI 操作，S2，不暴露任意 JS）**
-- `page_click {selector|x,y}`（S2）— 普通点击/轻点（当前只有 long_press，缺 click）。复用
-  agent.js 指针/鼠标/touch 派发，末尾派发 `click`（与 long_press 区别：短按 + 触发 click）。
-- `page_type {selector,text,submit,clear}`（S2）— focus 输入框、设 value、派发 input/change，
-  可选 Enter 提交。表单自动化核心。
+- ✅ `page_click {selector}`（S2）— 已落地，复用 agent.js 指针/鼠标事件 + 原生 click，且有 open shadow DOM 查询和临时 CSS 绕过。
+- ✅ `page_type {selector,text,append}`（S2）— 已落地，focus 输入框、原生 value setter、派发 input/change；`submit/clear` 待扩展。
 - `page_select_option {selector,value|label|index}`（S2）— 选 `<select>` 项。
 - `page_key {key,selector}`（S2）— 派发 Enter/Escape/Tab/方向键。
 - `page_hover {selector}` / `page_focus {selector}` / `page_blur`（S2）。
@@ -697,10 +705,8 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 > 顺序：先补“能动起来”的导航 + 点击 + 填表 + 等待（P0），再观察取数（P1），最后存储/网络只读/
 > 运行时（P2）。每批 ≤4 个工具，避免一次 diff 过大、过 CI `-Werror` 风险集中。
 
-- **P0 自动化闭环（最高优先）**：`page_navigate`、`page_reload/back/forward`、`page_click`、
-  `page_type`、`page_wait_for`。落地后 Agent 才能“开网址→等加载→点→填→提交”。
-  其中导航/历史/标签是**原生 GeckoSession** 能力（不在 agent.js），需在 `AgentTools.page()` 之外
-  加一条原生导航通道（参考 `DevToolsHelper.sendToggle` 的 native 调度），其余走 agent.js。
+- ✅ **P0 自动化闭环已完成**：`page_navigate`、`page_reload/back/forward`、`page_click`、
+  `page_type`、`page_wait_for_element`、`page_scroll` 已落地。导航/历史走**原生 GeckoSession/session use case**，其余走 PageChannel `agent.js`；selector 工具已做 open shadow DOM 查询和临时 CSS 绕过。
 - **P1 观察取数**：`page_get_text`、`page_get_attr`、`page_list_links/forms/inputs`、
   `page_select_option`、`page_key`。纯 page-world，复用 PageChannel，风险低。
 - **P2 存储/网络只读/运行时**：`storage_get/set`、`cookie_list`、`*_list`（replace/intercept/mock）、

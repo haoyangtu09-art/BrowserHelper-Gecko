@@ -104,12 +104,12 @@ function syncFilterSuppressResp() {
 
 	  // 由主开关 + 作用域重新计算生效标志，并同步到拦截器（page/isolated 两世界）
 	  // 批量同步所有拦截相关旗标，避免多次 runInPage 造成拦截按钮卡顿
-	  function recomputeIntercept() {
+	  function recomputeIntercept(skipNativePush) {
 	    netGlobalInterceptEnabled = netInterceptMaster && netScopeReq;
 	    netGlobalRespInterceptEnabled = netInterceptMaster && netScopeResp;
 	    netGlobalInterceptNoise = netScopeNoise;
 	    // 主开关/作用域变化也要同步到原生代理（拦截在原生侧执行）。
-	    pushInterceptRulesToNative();
+	    if (!skipNativePush) pushInterceptRulesToNative();
 	    if (erudaMode !== 'page' && typeof window.wrappedJSObject !== 'undefined') {
 	      try {
 	        var pw = window.wrappedJSObject;

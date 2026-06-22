@@ -320,6 +320,9 @@ private fun MessageList(state: PanelState) {
         state.messages.lastOrNull()?.text,
         state.messages.lastOrNull()?.tool,
         state.generating,
+        // Re-scroll when the task tracker mutates so the active task row stays in view.
+        state.tracker.lastUpdated,
+        state.tracker.isExpanded,
         scroll.maxValue,
         followBottom,
     ) {
@@ -360,6 +363,12 @@ private fun MessageList(state: PanelState) {
                     ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
                 }
             }
+        }
+        // Visual Task Tracker — pinned at the bottom of the transcript so it sits just above
+        // the latest message and the streaming dot. Empty trackers self-skip; the card uses
+        // its own border/background so it visually separates from the prose above.
+        if (state.tracker.groups.isNotEmpty()) {
+            TaskTrackerCard(state)
         }
         if (state.generating) {
             // Single slowly-pulsing dot — no avatar — so the wait state shows one dot, not two.

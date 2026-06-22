@@ -21,6 +21,10 @@ function postProxyCmd(action) {
   } catch (e) {}
 }
 
+function requestNativeInterceptState() {
+  postProxyCmd('requestInterceptState');
+}
+
 function requestRestoreToggleViaNative() {
   try {
     if (!port) return false;
@@ -55,6 +59,7 @@ function pushReplaceRulesToNative() {
 function pushInterceptRulesToNative() {
   try {
     if (!port) return;
+    if (typeof netApplyingNativeInterceptState !== 'undefined' && netApplyingNativeInterceptState) return;
     // 规则尚未从 storage.local 加载完时不要下发：避免重载早期用空集合覆盖原生（含持久化）。
     if (typeof netInterceptRulesLoaded !== 'undefined' && !netInterceptRulesLoaded) return;
     var master = (typeof netInterceptMaster !== 'undefined') && !!netInterceptMaster;
@@ -76,12 +81,13 @@ function pushInterceptRulesToNative() {
     port.postMessage({
       action: 'setInterceptRules',
       enabled: master,
-      reqAll: master && scopeReq,
-      respAll: master && scopeResp,
-      // 三类低价值包的「一并拦截」开关；仅在主开关开启时生效。
-      interceptTelemetry: master && (typeof netScopeTelemetry !== 'undefined') && !!netScopeTelemetry,
-      interceptNoise: master && (typeof netScopeNoise !== 'undefined') && !!netScopeNoise,
-      interceptCookie: master && (typeof netScopeCookie !== 'undefined') && !!netScopeCookie,
+      reqAll: scopeReq,
+      respAll: scopeResp,
+      // 四类低价值包的「一并拦截」开关。enabled=false 时只保存作用域意图，不会实际暂停。
+      interceptTelemetry: (typeof netScopeTelemetry !== 'undefined') && !!netScopeTelemetry,
+      interceptHeartbeat: (typeof netScopeHeartbeat !== 'undefined') && !!netScopeHeartbeat,
+      interceptNoise: (typeof netScopeNoise !== 'undefined') && !!netScopeNoise,
+      interceptCookie: (typeof netScopeCookie !== 'undefined') && !!netScopeCookie,
       rules: rules,
     });
   } catch (e) {}

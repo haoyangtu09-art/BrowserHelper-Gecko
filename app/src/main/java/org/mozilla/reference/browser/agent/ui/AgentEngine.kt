@@ -21,8 +21,26 @@ import org.mozilla.reference.browser.agent.core.AgentToolResult
 import org.mozilla.reference.browser.agent.core.ChatBackend
 import org.mozilla.reference.browser.agent.core.Role
 import org.mozilla.reference.browser.agent.core.ChatToolCall
+import org.mozilla.reference.browser.agent.core.TaskTrackerManager
+import org.mozilla.reference.browser.agent.core.compactSummary
 
 private const val TOOL_LOOP_LIMIT = 250
+
+// Hard cap on how much of a single tool result is fed back into the model transcript. Page
+// source / fetched bodies / page_exec returns can be hundreds of KB; without a cap one tool
+// call blows the context window. The UI card already shows only a short summary, so this only
+// trims what the *model* sees. ~32K chars ≈ a few thousand tokens — enough for real results,
+// small enough to keep many tool calls in one turn.
+private const val TOOL_RESULT_CAP = 32_000
+
+/** Truncates an over-long tool result, appending a marker so the model knows it was clipped. */
+private fun capToolResult(text: String): String {
+    if (text.length <= TOOL_RESULT_CAP) return text
+    val omitted = text.length - TOOL_RESULT_CAP
+    return text.take(TOOL_RESULT_CAP) +
+        "\n\n…[工具结果过长，已截断 $omitted 字符。请用更精确的查询（page_search/page_query/container_grep）" +
+        "或先把内容保存到容器文件（如 page_save_to_container）再分段读取，避免一次性拉取整页源码。]"
+}
 
 /**
  * Orchestrates one model turn over [PanelState]. The UI calls [start] after the user message
@@ -49,6 +67,9 @@ class AgentEngine(context: Context) {
         // per request so it always reflects the current permission tier / persona / memory.
         val convo = state.convo
         val backend = ChatBackend.of(config.format)
+        // Hoist the bridge so the tool loop can record each tool call against the currently
+        // active task (Visual Task Tracker → expanded card shows tool calls per task).
+        val bridge = panelBridge(state)
         val registry = AgentToolRegistry(
             appContext,
             object : AgentApprover {
@@ -63,15 +84,21 @@ class AgentEngine(context: Context) {
                 state.planText = text
                 state.planMode = true
             },
-            panelBridge = panelBridge(state),
+            panelBridge = bridge,
         )
         val toolSpecs = registry.allowedToolSpecs(state.permTier)
 
+        // Capture the turn id this coroutine belongs to. PanelState bumps turnEpoch on every
+        // stop / new chat / chat switch / new send, so a turn that has been superseded or
+        // stopped will see alive() == false and must not write into the now-current chat.
+        val myEpoch = state.turnEpoch
         turnJob = scope.launch {
+            fun alive() = state.turnEpoch == myEpoch
             var producedAnything = false
             try {
                 var loops = 0
                 while (loops < TOOL_LOOP_LIMIT) {
+                    if (!alive()) return@launch
                     loops += 1
                     val messages = ArrayList<AgentMessage>(convo.size + 2)
                     messages.add(AgentMessage(Role.System, systemPrompt(state)))
@@ -84,13 +111,17 @@ class AgentEngine(context: Context) {
                     // any) come back in the same reply and are rendered as separate cards.
                     var streamIndex = -1
                     val onDelta: (String) -> Unit = { frag ->
-                        if (streamIndex < 0) {
-                            streamIndex = state.messages.size
-                            state.messages.add(ChatMsg(fromUser = false, text = frag))
-                            state.saveCurrentChat()
-                        } else {
-                            val cur = state.messages[streamIndex]
-                            state.messages[streamIndex] = cur.copy(text = cur.text + frag)
+                        // Drop streamed fragments once this turn is no longer live (stopped or
+                        // superseded by a new chat) so they never append to another chat.
+                        if (alive()) {
+                            if (streamIndex < 0) {
+                                streamIndex = state.messages.size
+                                state.messages.add(ChatMsg(fromUser = false, text = frag))
+                                state.saveCurrentChat()
+                            } else {
+                                val cur = state.messages[streamIndex]
+                                state.messages[streamIndex] = cur.copy(text = cur.text + frag)
+                            }
                         }
                     }
                     var reply = backend.complete(config, messages, toolSpecs, onDelta)
@@ -99,6 +130,9 @@ class AgentEngine(context: Context) {
                     if (streamIndex < 0 && reply.content.isBlank() && reply.toolCalls.isEmpty()) {
                         reply = backend.complete(config, messages, toolSpecs, null)
                     }
+                    // Stop / chat-switch may have happened during streaming; discard this reply
+                    // rather than commit it (and its tool calls) into the now-current chat.
+                    if (!alive()) return@launch
                     if (reply.content.isNotBlank()) {
                         if (streamIndex < 0) {
                             state.messages.add(ChatMsg(fromUser = false, text = reply.content.trim()))
@@ -121,22 +155,44 @@ class AgentEngine(context: Context) {
                             ChatMsg(fromUser = false, text = "", tool = runningCard(call)),
                         )
                         state.saveCurrentChat()
+                        // Snapshot the currently active task BEFORE the call: agent_tasks_*
+                        // tools themselves may change currentTaskId mid-call, but the call
+                        // record should be attributed to whoever was active when it started.
+                        val taskAtStart = state.tracker.currentTaskId
+                        val startMs = System.currentTimeMillis()
                         val result = registry.call(state.permTier, call.name, call.arguments)
+                        // A long-running tool call may outlive a stop / chat switch; bail before
+                        // writing its card or result into the chat the user moved to.
+                        if (!alive()) return@launch
+                        val durationMs = System.currentTimeMillis() - startMs
                         state.messages[cardIndex] =
                             ChatMsg(fromUser = false, text = "", tool = buildToolCard(call, result))
                         state.saveCurrentChat()
+                        // Visual Task Tracker linking: each tool call appears as a sub-row
+                        // on its owning task card. Skip the agent_tasks_* tools themselves —
+                        // showing "agent_tasks_start" under the task it started would be noise.
+                        if (taskAtStart != null && !call.name.startsWith("agent_tasks_")) {
+                            bridge.taskRecordToolCall(
+                                taskId = taskAtStart,
+                                name = call.name,
+                                status = if (result.ok) "完成" else "失败",
+                                durationMs = durationMs,
+                                error = if (!result.ok) result.text.take(200) else "",
+                            )
+                        }
                         producedAnything = true
                         // The model gets the FULL tool output; the UI card only shows a summary.
                         convo.add(
                             AgentMessage(
                                 role = Role.Tool,
-                                content = if (result.ok) result.text else "ERROR: ${result.text}",
+                                content = capToolResult(if (result.ok) result.text else "ERROR: ${result.text}"),
                                 toolCallId = call.id,
                             ),
                         )
                         state.saveCurrentChat()
                     }
                 }
+                if (!alive()) return@launch
                 if (loops >= TOOL_LOOP_LIMIT) {
                     state.messages.add(ChatMsg(fromUser = false, text = "工具循环已到 ${TOOL_LOOP_LIMIT} 次上限，已停止继续调用。"))
                     state.saveCurrentChat()
@@ -150,13 +206,19 @@ class AgentEngine(context: Context) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (!alive()) return@launch
                 state.messages.add(
                     ChatMsg(fromUser = false, text = "⚠️ " + (e.message ?: e.javaClass.simpleName)),
                 )
                 state.saveCurrentChat()
             } finally {
-                state.generating = false
-                state.saveCurrentChat()
+                // Only the live turn owns state.generating / persistence. A superseded or
+                // stopped turn must not clear the spinner for the chat that replaced it
+                // (stop() / newChat() / loadChat() already set generating = false themselves).
+                if (alive()) {
+                    state.generating = false
+                    state.saveCurrentChat()
+                }
             }
         }
     }
@@ -167,6 +229,15 @@ class AgentEngine(context: Context) {
      * access here is safe.
      */
     private fun panelBridge(state: PanelState): AgentPanelBridge = object : AgentPanelBridge {
+        // Single TaskTrackerManager per bridge instance — bound to state.tracker so every
+        // mutation reassigns the mutable state slot (driving Compose recomposition) and
+        // flushes to the per-chat JSON file via saveCurrentChat().
+        private val taskManager = TaskTrackerManager(
+            read = { state.tracker },
+            write = { state.tracker = it },
+            persist = { state.saveCurrentChat() },
+        )
+
         override fun listChats(): JSONArray {
             val arr = JSONArray()
             state.chats.forEach { chat ->
@@ -218,6 +289,38 @@ class AgentEngine(context: Context) {
             state.removeMemory(index)
             return true
         }
+
+        override fun taskTrackerSnapshot(): JSONObject = state.tracker.toJson()
+
+        override fun taskCurrentId(): String? = state.tracker.currentTaskId
+
+        override fun taskCreateGroup(title: String): String = taskManager.createGroup(title)
+
+        override fun taskAddTask(groupId: String, title: String, description: String): String? =
+            taskManager.addTask(groupId, title, description)
+
+        override fun taskStart(taskId: String): Boolean = taskManager.startTask(taskId)
+
+        override fun taskComplete(taskId: String): Boolean = taskManager.completeTask(taskId)
+
+        override fun taskFail(taskId: String, error: String): Boolean = taskManager.failTask(taskId, error)
+
+        override fun taskCancel(taskId: String): Boolean = taskManager.cancelTask(taskId)
+
+        override fun taskUpdate(taskId: String, title: String?, description: String?): Boolean =
+            taskManager.updateTask(taskId, title, description)
+
+        override fun taskDelete(taskId: String): Boolean = taskManager.deleteTask(taskId)
+
+        override fun taskClearAll(): Boolean = taskManager.clearAll()
+
+        override fun taskRecordToolCall(
+            taskId: String,
+            name: String,
+            status: String,
+            durationMs: Long,
+            error: String,
+        ): Boolean = taskManager.recordToolCall(taskId, name, status, durationMs, error)
     }
 
     /** Card shown while a tool call is executing (before the result/approval resolves). */
@@ -309,6 +412,10 @@ class AgentEngine(context: Context) {
             "intercept_resolve", "resp_intercept_resolve" -> "拦截处理完成"
             "page_set_text", "page_set_html", "page_set_attr" -> "页面内容已更新"
             "page_scroll" -> "页面已滑动"
+            "page_navigate" -> "当前标签页已发起导航"
+            "page_reload" -> "当前标签页已刷新"
+            "page_back" -> "当前标签页已后退"
+            "page_forward" -> "当前标签页已前进"
             "page_exec" -> "页面脚本已执行，完整结果已返回给模型"
             "cookie_reveal" -> "凭据已读取，完整结果已返回给模型"
             "private_file_list" -> "列出私有目录"
@@ -689,6 +796,64 @@ class AgentEngine(context: Context) {
             - 写了计划后，turn 不会结束；用户在计划卡点“批准并开始”后，你会收到“已批准”的消息，然后按计划继续执行。完成一个子步骤就 update_plan 标记进展。
             - 不要写只有单步的计划，也不要把显而易见的事拆成计划。
 
+            # 任务追踪（agent_tasks_*）
+            - 多步骤、跨多个工具调用、可能耗时较久的任务，开工前用 agent_tasks_create 建任务组，再用 agent_tasks_add 把可执行子任务依次加进去。子任务初始是 PENDING。
+            - 真正开始做某子任务前调用 agent_tasks_start（自动记录开始时间、并把它设为 currentTask，后续工具调用都会自动挂在它名下）。完成后立即 agent_tasks_complete；失败用 agent_tasks_fail 带 error；改主意/不再做用 agent_tasks_cancel。
+            - 一两步就能做完的请求（单次抓包、单次点击、单次问答）不要建组——任务卡是为长流程服务的，不是流水账。
+            - 任务清单出现在聊天流里且会在每轮提示中以 compactSummary 形式回给你，所以你能跨工具调用 / 跨多轮保持上下文。开新一轮无关任务时可以 agent_tasks_clear 重置；但用户主动建过的组别轻易清。
+            - 改子任务标题用 agent_tasks_rename（只改标题，等价只传 title 的 agent_tasks_update）；整条删掉某子任务用 agent_tasks_delete（不同于 agent_tasks_cancel 的“标记取消”）。
+            - 这些 agent_tasks_* 工具都属于 S1，调用不会弹审批；放心多用。
+
+            # 多标签（tab_*）
+            - 涉及具体页面操作前若不确定当前页是哪个，先 tab_current；要在多个 tab 间挑一个，先 tab_list 看 id/url/title/selected，再 tab_switch 切过去。切换后再调 page_* 才作用在新 tab。
+
+            # 页面交互（优先用专用工具，少用 page_exec）
+            - 跳转/刷新/前进/后退当前标签页用 page_navigate / page_reload / page_back / page_forward；它们走浏览器原生导航，不依赖页面 JS/CSP。
+            - 点元素用 page_click(selector)，输入用 page_type(selector,text)，等元素出现用 page_wait_for_element(selector,timeoutMs)。它们走原生事件，比自己拼 JS 丢给 page_exec 更稳，也不需要 S3。
+            - selector 工具会尽量穿透 open shadow DOM，并在操作前临时绕过常见强 CSS（pointer-events/visibility/opacity/scroll-margin）。遇到强 CSS 页面，先用 page_query 看 visible/rect，再 click/type/wait。
+            - page_exec 是兜底：只在没有专用工具能表达的场景（复杂计算 / 多步 DOM 操作 / 读自定义属性）才用，而且要 S3。
+            - page_scroll 控制滚动；动态加载的列表往往要先滚再 wait_for_element。
+            - 仅展示/调试用途（描边、高亮、临时改样式）用 dom_highlight_element / dom_inject_css，不要拼 JS。
+
+            # 读网页源码（务必节制上下文，别拉整页）
+            - 绝不要用 page_exec 返回 document.documentElement.outerHTML / innerHTML 这种整页源码——整页几十~几百 KB，会直接撑爆上下文，工具结果超长也会被自动截断。
+            - 正确做法：先 page_index 建索引（只回摘要），再 page_search(query) 拿 ±150 字符片段、或 page_query(selector) 拿命中元素摘要，按需逐段取。
+            - 需要完整源码做后续分析时，用 page_save_to_container 把整页 HTML 存进容器文件（内容不进上下文），再用 container_grep / container_sed / container_head 分段检索，而不是把源码塞进对话。
+
+            # 网络等待（先发动作、再等结果）
+            - 点击一个按钮后要等它发的请求/响应，用 network_wait_request / network_wait_response(method, urlContains, timeoutMs)。它们读 NetFlowStore 快照轮询，pump 安全。
+            - 正确顺序：先 page_click 触发，再 network_wait_response 等结果——反过来会错过事件起始时间。
+            - 拿到 flowId 后再用 network_get 取详情。
+
+            # 控制台日志
+            - console_list 是 best-effort：注入点之后的页面日志才能收到，注入前丢失；CSP 严格的页面可能完全拿不到。看不到日志不要硬试。
+
+            # 网络规则（增量 vs 整表替换）
+            - 已经有规则的情况下，追加单条用 mock_add_rule / replace_add_rule（不会覆盖现有规则）；想查当前规则用 mock_list / replace_list。
+            - 整批改写或清空才用 mock_set / replace_set（会替换整张表）。
+            - intercept_set 缺省 reqAll/respAll 都是 false——不要无参调用，否则不会拦截任何东西也不会出错；要拦请求/响应必须显式传 reqAll/respAll=true 或在 rules 里加 action=intercept 规则。
+            - intercept_set 支持 interceptTelemetry/interceptHeartbeat/interceptNoise/interceptCookie 四类低价值流量开关；默认都放行。修改拦截后，前端面板会同步显示原生真实状态。
+            - 改拦截前先用 intercept_list_rules 看当前快照（enabled、reqAll/respAll、四个低价值开关、rules 列表），避免重复或冲突下发。
+
+            # Agent 容器（类 shell 文件工具）
+            - Agent 有一个沙箱容器目录（外部存储），所有 container_* 工具的路径都是相对该根的相对路径；禁止用 / 开头的绝对路径或 .. 越界。
+            - 基础增删改查：container_list / container_read / container_write / container_mkdir / container_touch / container_append / container_cp / container_mv / container_rm（删目录或 rmdir 的 recursive=true 等价 rm -rf）。这些写类工具是 S2、会弹审批。
+            - 类 shell 只读检索（S1，不弹审批）：container_grep（正则搜内容）、container_find（按文件名通配符找）、container_head/tail（看首/尾 N 行）、container_wc（行/词/字节数）、container_stat（元信息）、container_du（递归算大小）、container_tree（树状列目录）、container_file_type（判 text/binary）、container_which（按文件名定位）、container_sed（读指定行区间）、container_realpath（规范化+越界校验）、container_diff（逐行比对两文件）。
+            - 这些只是在沙箱内用 Kotlin 实现的等价能力，不是真的调用系统二进制，也不能跳出容器；不要假设有 bash/管道/重定向。
+
+            # 凭证（先脱敏、谨慎明文）
+            - 想知道某 flow 上有哪些凭证，先用 cookie_list_redacted / auth_headers_redacted（S2，值已脱敏，只暴露 scheme 与长度），据此判断要不要明文。
+            - 真正需要明文才用 cookie_reveal / auth_reveal / set_cookie_headers_reveal（都是 S3，会弹原生确认；用户不批就拿不到）。明文凭证只用于当前任务，绝不原样回灌进聊天，也不要写进记忆或容器文件。
+            - 改包/重放优先用占位符（如 {{cookie:<flowId>}}）让原生回填，而不是把明文 token 带进模型上下文。
+
+            # 插件管理
+            - plugin_list（S1）列出所有内置插件及启用态；plugin_get_permissions（S1）看单个插件描述。
+            - plugin_enable / plugin_disable（S2，弹审批）启停插件，会触发其 onEnable/onDisable 并持久化。启停插件可能改变抓包/改包行为，动手前先 plugin_list 确认当前状态。
+
+            # 会话与长期记忆
+            - 用户问“之前我们聊过 X”时先 agent_history_list 找出 id，再 agent_history_open 切过去查。重命名用 agent_history_rename。
+            - agent_memory_* 只用于跨对话长期记忆（用户身份、稳定偏好、长期项目背景）；一次性任务进展不要存记忆，那是任务追踪的事。
+
             # 输出风格
             - 简洁、直接、面向结果。先给答案/结论，再按需补充。能一句说清就不要三句。
             - 引用文件/路径/选择器时用反引号行内代码；贴代码或命令用三反引号围栏。涉及具体行号时写成 `path:line`。
@@ -697,7 +862,7 @@ class AgentEngine(context: Context) {
             # 当前权限层（实时权威，以本字段为准，忽略历史对话里对权限层的任何旧描述）
             当前权限层 = ${state.permTier.name}（${state.permTier.describe()}）
             - S1：只读浏览器层信息、读取页面源码摘要/DOM 摘要、查看抓包、读写 Agent 本地容器文件、创建/更新计划、写入/删除容器代码文件。
-            - S2：包含 S1，允许批量写 Agent 外部容器、生成容器文件 URL、从浏览器 App 进程发请求、受限写当前页面 DOM、滑动当前页面界面、开启/关闭代理、拦截/改请求响应、替换、Mock、弱网。
+            - S2：包含 S1，允许批量写 Agent 外部容器、生成容器文件 URL、从浏览器 App 进程发请求、受限写当前页面 DOM、滑动当前页面界面、原生导航当前标签页、开启/关闭代理、拦截/改请求响应、替换、Mock、弱网。
             - S3：包含 S2，允许从当前网页 page world 发起 fetch、执行任意 page world JavaScript、读取凭证明文、读写浏览器 App 私有目录文件。
             若用户要求的操作超出当前权限层，明确说明需要切换到哪一层，不要假装已经做了。
 
@@ -709,14 +874,21 @@ class AgentEngine(context: Context) {
         """.trimIndent()
     }
 
-    private fun runtimeStatePrompt(state: PanelState, toolNames: List<String>): String =
-        """
+    private fun runtimeStatePrompt(state: PanelState, toolNames: List<String>): String {
+        val base = """
             （运行时状态）
             当前权限层 = ${state.permTier.name}（${state.permTier.describe()}）。这是本轮请求的最新权威权限层；忽略历史对话里任何不同说法。
             当前模型可见工具 = ${toolNames.joinToString(", ").ifBlank { "无" }}。
             当前推理档 = ${state.tier.name}；临时聊天 = ${state.tempChat}；记忆启用 = ${state.memoryEnabled}。
             如果用户问“现在是什么权限层”，必须回答 ${state.permTier.name}。
         """.trimIndent()
+        // Visual Task Tracker compact summary — empty trackers contribute nothing, so the
+        // prompt stays lean for chats that don't use tasks. When tasks exist, the model gets
+        // a stable Completed / In Progress / Remaining / Failed / Tools / Next Step section
+        // before each turn so it can keep continuity across long sessions and tool churn.
+        val summary = state.tracker.compactSummary()
+        return if (summary.isBlank()) base else base + "\n\n" + summary
+    }
 
     private fun AgentPermissionTier.describe(): String = when (this) {
         AgentPermissionTier.S1 -> "S1 最低权限"

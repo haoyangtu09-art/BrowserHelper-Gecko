@@ -20,6 +20,7 @@ function saveNetConfig() {
       scopeReq: netScopeReq,
       scopeResp: netScopeResp,
       scopeTelemetry: netScopeTelemetry,
+      scopeHeartbeat: netScopeHeartbeat,
       scopeNoise: netScopeNoise,
       scopeCookie: netScopeCookie,
       replaceScope: netReplaceScope,
@@ -40,7 +41,10 @@ function saveNetConfig() {
       interceptMaster: netInterceptMaster,
       scopeReq: netScopeReq,
       scopeResp: netScopeResp,
+      scopeTelemetry: netScopeTelemetry,
+      scopeHeartbeat: netScopeHeartbeat,
       scopeNoise: netScopeNoise,
+      scopeCookie: netScopeCookie,
       filterSuppressResp: netScopeFilterSuppressResp,
       replaceScope: netReplaceScope,
     }));
@@ -58,13 +62,15 @@ function loadNetConfig(cb) {
           netInterceptMaster = !!cfg.interceptMaster;
           netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
           netScopeResp = !!cfg.scopeResp;
-          // 迁移：旧 scopeNoise（心跳/遥测合一）→ 遥测+噪音两个新开关。cookie 为新增，默认关。
-          if ('scopeTelemetry' in cfg || 'scopeCookie' in cfg) {
+          // 迁移：旧 scopeNoise（心跳/遥测合一）→ 遥测+心跳+噪音三个新开关。cookie 为新增，默认关。
+          if ('scopeTelemetry' in cfg || 'scopeHeartbeat' in cfg || 'scopeCookie' in cfg) {
             netScopeTelemetry = !!cfg.scopeTelemetry;
+            netScopeHeartbeat = !!cfg.scopeHeartbeat;
             netScopeNoise = !!cfg.scopeNoise;
             netScopeCookie = !!cfg.scopeCookie;
           } else {
             netScopeTelemetry = !!cfg.scopeNoise;
+            netScopeHeartbeat = !!cfg.scopeNoise;
             netScopeNoise = !!cfg.scopeNoise;
             netScopeCookie = false;
           }
@@ -74,12 +80,13 @@ function loadNetConfig(cb) {
           netScopeReq = !!cfg.globalIntercept;
           netScopeResp = !!cfg.globalRespIntercept;
           netScopeTelemetry = !!cfg.globalInterceptNoise;
+          netScopeHeartbeat = !!cfg.globalInterceptNoise;
           netScopeNoise = !!cfg.globalInterceptNoise;
           netScopeCookie = false;
         }
         if (Array.isArray(cfg.mockRules)) netMockRules = cfg.mockRules;
         if (cfg.throttle && typeof cfg.throttle === 'object') netThrottle = cfg.throttle;
-        recomputeIntercept();
+        recomputeIntercept(true);
         if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
         else netReplaceScope = 'both';
         if ('filterSuppressResp' in cfg) netScopeFilterSuppressResp = !!cfg.filterSuppressResp;
@@ -119,9 +126,12 @@ function loadNetConfigFromCache() {
       netInterceptMaster = !!cfg.interceptMaster;
       netScopeReq = 'scopeReq' in cfg ? !!cfg.scopeReq : true;
       netScopeResp = !!cfg.scopeResp;
+      netScopeTelemetry = !!cfg.scopeTelemetry;
+      netScopeHeartbeat = !!cfg.scopeHeartbeat;
       netScopeNoise = !!cfg.scopeNoise;
+      netScopeCookie = !!cfg.scopeCookie;
     }
-    recomputeIntercept();
+    recomputeIntercept(true);
     if ('filterSuppressResp' in cfg) netScopeFilterSuppressResp = !!cfg.filterSuppressResp;
     if (cfg.replaceScope === 'req' || cfg.replaceScope === 'resp') netReplaceScope = cfg.replaceScope;
     else netReplaceScope = 'both';
