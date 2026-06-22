@@ -173,6 +173,27 @@ function _bhPageFetch(args) {
     });
 }
 
+// ── page-world console capture (best-effort) ─────────────────────────────────
+// console.list reads page-world console output. The hook MUST live in page world
+// (the content-script console is a separate object), so we inject a small idempotent
+// patch that mirrors console.{log,info,warn,error,debug} + uncaught errors into a
+// capped page-world ring buffer (window.__bhConsoleBuf). Logs emitted BEFORE the hook
+// installs are lost — there is no API to retroactively capture them (CSP-sensitive).
+var _bhConsoleHookCode =
+    '(function(){' +
+    'if(window.__bhConsoleHooked)return;' +
+    'window.__bhConsoleHooked=true;' +
+    'window.__bhConsoleBuf=window.__bhConsoleBuf||[];' +
+    'var CAP=200;' +
+    'function push(level,a){try{var parts=Array.prototype.slice.call(a).map(function(x){if(typeof x==="string")return x;try{return JSON.stringify(x);}catch(_){return String(x);}});window.__bhConsoleBuf.push({level:level,ts:Date.now(),text:parts.join(" ").substring(0,1000)});if(window.__bhConsoleBuf.length>CAP)window.__bhConsoleBuf.shift();}catch(_){}}' +
+    '["log","info","warn","error","debug"].forEach(function(lvl){var orig=console[lvl];if(typeof orig!=="function")return;console[lvl]=function(){push(lvl,arguments);return orig.apply(console,arguments);};});' +
+    'window.addEventListener("error",function(e){push("error",["Uncaught: "+((e&&e.message)||"")]);});' +
+    'window.addEventListener("unhandledrejection",function(e){push("error",["UnhandledRejection: "+((e&&e.reason)||"")]);});' +
+    '})()';
+function _bhEnsureConsoleHook() {
+    return _bhEvalInPage(_bhConsoleHookCode, 3000).then(function () { return true; }, function () { return true; });
+}
+
 // ── command dispatcher ────────────────────────────────────────────────────────
 
 function bhHandleAgentCmd(msg) {
@@ -547,6 +568,163 @@ function bhHandleAgentCmd(msg) {
         return _bhPageFetch(args);
     }
 
+    // ── page_click (S2, constrained UI action) ──────────────────────────────
+    // Click a single matched element via realistic pointer/mouse down+up then the
+    // element's native click(). Bounded action; arbitrary JS stays S3-only evalJS.
+    if (cmd === 'clickEl') {
+        var clkSel = String(args.selector || '');
+        if (!clkSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var clkEl = document.querySelector(clkSel);
+            if (!clkEl) return Promise.resolve({ error: 'no elements matched selector', selector: clkSel });
+            try { clkEl.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+            var cr = clkEl.getBoundingClientRect();
+            var ccx = Math.round(cr.left + cr.width / 2);
+            var ccy = Math.round(cr.top + cr.height / 2);
+            var cbase = { bubbles: true, cancelable: true, view: window, clientX: ccx, clientY: ccy, button: 0 };
+            var cptr = { bubbles: true, cancelable: true, view: window, clientX: ccx, clientY: ccy, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+            try { if (window.PointerEvent) clkEl.dispatchEvent(new PointerEvent('pointerdown', cptr)); } catch (e) {}
+            try { clkEl.dispatchEvent(new MouseEvent('mousedown', cbase)); } catch (e) {}
+            try { if (window.PointerEvent) clkEl.dispatchEvent(new PointerEvent('pointerup', cptr)); } catch (e) {}
+            try { clkEl.dispatchEvent(new MouseEvent('mouseup', cbase)); } catch (e) {}
+            // Native click() fires the canonical 'click' event once (avoids double-fire).
+            try { if (typeof clkEl.click === 'function') clkEl.click(); else clkEl.dispatchEvent(new MouseEvent('click', cbase)); } catch (e) {}
+            return Promise.resolve({ ok: true, selector: clkSel, tag: clkEl.tagName, x: ccx, y: ccy });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_type (S2, constrained UI action) ───────────────────────────────
+    // Set the value/text of an input, textarea, or contentEditable element and fire
+    // input/change so frameworks observe it. Bounded; arbitrary JS stays S3 evalJS.
+    if (cmd === 'typeText') {
+        var tySel = String(args.selector || '');
+        if (!tySel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var tyEl = document.querySelector(tySel);
+            if (!tyEl) return Promise.resolve({ error: 'no elements matched selector', selector: tySel });
+            var tyVal = String(args.text || '');
+            var tyAppend = !!args.append;
+            try { tyEl.focus(); } catch (e) {}
+            if ('value' in tyEl) {
+                tyEl.value = tyAppend ? (tyEl.value + tyVal) : tyVal;
+            } else if (tyEl.isContentEditable) {
+                tyEl.textContent = tyAppend ? ((tyEl.textContent || '') + tyVal) : tyVal;
+            } else {
+                return Promise.resolve({ error: 'element is not editable (no value and not contentEditable)' });
+            }
+            try { tyEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+            try { tyEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+            return Promise.resolve({ ok: true, selector: tySel, tag: tyEl.tagName, length: tyVal.length, append: tyAppend });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_wait_for_element (S1, read-only poll) ──────────────────────────
+    // Poll the DOM until a selector matches (optionally requiring it be visible) or
+    // a timeout elapses. Returns found:true/false; never throws on timeout.
+    if (cmd === 'waitForElement') {
+        var wSel = String(args.selector || '');
+        if (!wSel) return Promise.resolve({ error: 'selector required' });
+        var wTimeout = Math.max(100, Math.min(Number(args.timeoutMs || 5000), 30000));
+        var wVisible = !!args.visible;
+        var wStart = Date.now();
+        function wMatch() {
+            var el = document.querySelector(wSel);
+            if (!el) return null;
+            if (wVisible) {
+                var r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return null;
+            }
+            return el;
+        }
+        return new Promise(function (resolve) {
+            (function tick() {
+                var el = wMatch();
+                if (el) {
+                    resolve({ ok: true, found: true, selector: wSel, waitedMs: Date.now() - wStart, tag: el.tagName, text: el.textContent ? el.textContent.trim().substring(0, 200) : '' });
+                    return;
+                }
+                if (Date.now() - wStart >= wTimeout) {
+                    resolve({ ok: true, found: false, selector: wSel, waitedMs: Date.now() - wStart, timeout: true });
+                    return;
+                }
+                setTimeout(tick, 100);
+            })();
+        });
+    }
+
+    // ── dom_highlight_element (S2, visual aid) ──────────────────────────────
+    // Draw a temporary coloured outline around matched elements and scroll the first
+    // into view. Restores the previous inline outline after durationMs.
+    if (cmd === 'highlight') {
+        var hSel = String(args.selector || '');
+        if (!hSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var hEls = Array.prototype.slice.call(document.querySelectorAll(hSel), 0, args.all ? 50 : 1);
+            if (!hEls.length) return Promise.resolve({ error: 'no elements matched selector', selector: hSel });
+            var hColor = String(args.color || '#ff3b30');
+            var hDuration = Math.max(0, Math.min(Number(args.durationMs || 2000), 20000));
+            hEls.forEach(function (el) {
+                try {
+                    var prevOutline = el.style.outline;
+                    var prevOffset = el.style.outlineOffset;
+                    el.style.outline = '3px solid ' + hColor;
+                    el.style.outlineOffset = '2px';
+                    if (hDuration > 0) {
+                        setTimeout(function () {
+                            try { el.style.outline = prevOutline; el.style.outlineOffset = prevOffset; } catch (e) {}
+                        }, hDuration);
+                    }
+                } catch (e) {}
+            });
+            try { hEls[0].scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+            return Promise.resolve({ ok: true, selector: hSel, count: hEls.length, durationMs: hDuration });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── dom_inject_css (S2, page styling) ───────────────────────────────────
+    // Append a <style> to the page. Content-script-inserted styles apply to the page
+    // DOM (CSS is not world-isolated), so this restyles the live page.
+    if (cmd === 'injectCss') {
+        var css = String(args.css || '');
+        if (!css) return Promise.resolve({ error: 'css required' });
+        try {
+            var styleEl = document.createElement('style');
+            styleEl.setAttribute('data-bh-agent', '1');
+            styleEl.textContent = css;
+            (document.head || document.documentElement).appendChild(styleEl);
+            return Promise.resolve({ ok: true, length: css.length });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── console_list (S1, read-only) ────────────────────────────────────────
+    // Return recent page-world console output captured by the injected hook. Best
+    // effort: only logs after the hook installed are available; CSP can block capture.
+    if (cmd === 'consoleList') {
+        var clLimit = Math.max(1, Math.min(Number(args.limit || 50), 200));
+        var clLevel = String(args.level || '').toLowerCase();
+        return _bhEnsureConsoleHook().then(function () {
+            return _bhEvalInPage('return (window.__bhConsoleBuf||[]).slice();', 3000).then(function (res) {
+                if (!res || res.error) {
+                    return { error: (res && res.error) || 'console read failed', hint: 'CSP may block page-world console capture' };
+                }
+                var arr;
+                try { arr = JSON.parse(res.value); } catch (_) { arr = []; }
+                if (!Array.isArray(arr)) arr = [];
+                if (clLevel) arr = arr.filter(function (en) { return en && en.level === clLevel; });
+                arr = arr.slice(-clLimit);
+                return { ok: true, count: arr.length, entries: arr };
+            });
+        });
+    }
+
     // ── page_exec (S3/L3) ───────────────────────────────────────────────────
     // Execute arbitrary JS in PAGE world. Gate: native caller approval in APK.
     // wrappedJSObject gives full access to page APIs (fetch, document.cookie, etc.).
@@ -558,3 +736,6 @@ function bhHandleAgentCmd(msg) {
 
     return Promise.resolve({ error: 'unknown agentCmd: ' + cmd });
 }
+
+// Install the page-world console hook early so console_list can capture from now on.
+try { _bhEnsureConsoleHook(); } catch (e) {}
