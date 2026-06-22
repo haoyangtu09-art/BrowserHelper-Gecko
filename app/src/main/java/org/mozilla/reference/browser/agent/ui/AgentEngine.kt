@@ -311,7 +311,7 @@ class AgentEngine(context: Context) {
 
     /**
      * Once the first two real user sentences exist, asks the model for a short title and stores
-     * it in [PanelState.recentChats]. It never updates live after that first attempt; titles are
+     * it in the current [SavedChat]. It never updates live after that first attempt; titles are
      * a history label, not another per-turn summarization job.
      */
     private suspend fun maybeGenerateTitle(config: AgentConfig, backend: ChatBackend, state: PanelState) {
