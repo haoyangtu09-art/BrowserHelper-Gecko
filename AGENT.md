@@ -620,3 +620,103 @@ S3 的 `private_file_*` 路径限制在 App 私有 dataDir 内。两者都拒绝
 - JS 无改动（本轮纯 Kotlin/Compose）。
 - 本地 Kotlin 编译已尝试到 Gradle 配置阶段，但当前环境缺 `ANDROID_HOME` 或 `local.properties:sdk.dir`，停在 Android SDK 检查，未进入 Kotlin 编译；后续仍需推 CI 出 `BrowserHelper-Gecko-<SHA>-arm64.apk` 真机验。
 - 真机逐项核对 #26–#40。
+
+---
+
+## 14. 浏览器工具扩展计划 + 本批 UI 微调（2026-06-22）
+
+> 用户反馈四项 + 一次工具脑暴。本节先记本批已落地的 UI 微调，再列「浏览器 Agent 还缺哪些工具」
+> 的完整脑暴 + 分批实施计划。新工具**本节只列计划，未实现**；落地时每个工具仍是 agent.js 命令
+> 处理器 + AgentTools.kt 四处接入点（approval / execute / selfTest / toolDef），按 S 层注册。
+
+### A. 本批已落地（UI 微调）
+
+- **拓展卡片改 4–5 格/行**：`extensions/index.js` 的 `#bh-ext-body` 网格 `minmax(46px→70px)`、
+  `gap 6→8px`，卡片 padding/字号同步放大（name 13→14、ver 9.5→11、btn 9.5→11），方块更大更清晰，
+  一行约 4–5 个（原先挤成 6–7 个偏小）。
+- **用户消息去边框**：`ChatScreen` 用户气泡删 `.border(1.dp, HairlineFaint)`，只留 `UserBubble` 填充，
+  视觉与按钮一致（纯色块、无描边）。`border`/`HairlineFaint` 仍被其它控件使用，无 unused-import 风险。
+- **高级面板已自动收录新工具（无需改代码）**：`AdvancedScreen` 的列表来自
+  `agentToolInfos()`→`buildTools()`→`buildToolDefs()`，**无 tier 过滤**。任何在 `buildToolDefs()`
+  注册的工具（含本轮 `page_long_press`/`page_swipe`）都会自动出现在「设置 → 高级 → 工具自检」里。
+  **结论：新增工具只要进 `buildToolDefs()` 即自动上高级面板，不必另接 UI。**
+
+### B. 工具脑暴：浏览器 Agent 还缺什么（按能力域）
+
+> 现有工具盘点见 §12.0 表。最大的结构性缺口：**Agent 不能让浏览器“去某个网址”**，也**没有普通
+> “点击”**（只有 long_press / scroll / swipe），表单填写也缺。下列按价值排序。
+
+**导航 / 标签页（最大缺口）**
+- `page_navigate {url,waitMs}`（S2）— 让当前 tab 加载 URL。需原生侧 `engineSession.loadUrl`，
+  不是 page-world JS（`location.href=` 受同源/CSP 限制，且 Agent 通道应走原生导航）。
+- `page_reload` / `page_back` / `page_forward`（S2）— 复用 GeckoSession 历史导航。
+- `page_wait_for {selector|urlContains|networkIdle, timeoutMs}`（S1）— 等元素出现 / URL 命中 /
+  网络空闲，自动化链式动作的前提（轮询 page world + 原生 url 状态）。
+- `tab_list` / `tab_new {url}` / `tab_select {id}` / `tab_close {id}`（S2）— 多标签管理，
+  接 `BrowserStore`/`SessionManager`。
+
+**交互（受限 UI 操作，S2，不暴露任意 JS）**
+- `page_click {selector|x,y}`（S2）— 普通点击/轻点（当前只有 long_press，缺 click）。复用
+  agent.js 指针/鼠标/touch 派发，末尾派发 `click`（与 long_press 区别：短按 + 触发 click）。
+- `page_type {selector,text,submit,clear}`（S2）— focus 输入框、设 value、派发 input/change，
+  可选 Enter 提交。表单自动化核心。
+- `page_select_option {selector,value|label|index}`（S2）— 选 `<select>` 项。
+- `page_key {key,selector}`（S2）— 派发 Enter/Escape/Tab/方向键。
+- `page_hover {selector}` / `page_focus {selector}` / `page_blur`（S2）。
+- `page_drag {from,to}`（S2）— 拖放（复用 swipe 的指针拖拽手势，端点改为两元素/坐标）。
+- `page_upload {selector,containerPath}`（S2/S3）— 用容器文件填 `<input type=file>`。
+
+**观察 / 取数（只读 S1）**
+- `page_get_text {selector}`（S1）— 取元素 innerText/可见文本（现 page_query 偏结构，缺纯文本取值）。
+- `page_get_attr {selector,name}`（S1）— 取属性/`value`/`checked` 等。
+- `page_list_links` / `page_list_forms` / `page_list_inputs`（S1）— 结构化可交互元素清单，
+  给模型“可点什么/可填什么”的着陆点。
+- `page_accessibility_tree`（S1）— a11y 角色树快照（仿 Playwright），强化 grounding。
+- `page_screenshot {selector?}`（S2）— 视口/元素截图，需原生 GeckoView 抓帧（较重，单独评估）。
+
+**存储 / 凭证**
+- `storage_get {area,key}` / `storage_set {area,key,value}`（读 S1 / 写 S2）— local/sessionStorage。
+- `cookie_list {host}`（S2）— 只列 cookie 名（值仍走已存在的 S3 `cookie_reveal`）。
+- `indexeddb_list`（S1，后续）。
+
+**网络（已多，补只读 + 维护）**
+- `network_clear`（S2）— 清空已抓 flow。
+- `network_wait {urlContains,timeoutMs}`（S1）— 等某请求/响应发生。
+- `replace_list` / `intercept_list` / `mock_list`（S1）— 读当前规则（现只有 set，缺 list）。
+- `proxy_status`（S1）— 代理开关/端口/计数。
+- `network_har_export {containerPath}`（S2）— 导出 HAR 到容器。
+
+**浏览器 / 运行时**
+- `download_file {url,containerPath}`（S2）— 抓 URL 存容器（二进制走 `browser_request` 不便）。
+- `clipboard_read`（S3）/ `clipboard_write {text}`（S2）。
+- `useragent_set` / `viewport_set` / `geolocation_set`（S2）— 测试用 spoof。
+
+### C. 实施计划（分批，单 commit 推 CI 真机验）
+
+> 顺序：先补“能动起来”的导航 + 点击 + 填表 + 等待（P0），再观察取数（P1），最后存储/网络只读/
+> 运行时（P2）。每批 ≤4 个工具，避免一次 diff 过大、过 CI `-Werror` 风险集中。
+
+- **P0 自动化闭环（最高优先）**：`page_navigate`、`page_reload/back/forward`、`page_click`、
+  `page_type`、`page_wait_for`。落地后 Agent 才能“开网址→等加载→点→填→提交”。
+  其中导航/历史/标签是**原生 GeckoSession** 能力（不在 agent.js），需在 `AgentTools.page()` 之外
+  加一条原生导航通道（参考 `DevToolsHelper.sendToggle` 的 native 调度），其余走 agent.js。
+- **P1 观察取数**：`page_get_text`、`page_get_attr`、`page_list_links/forms/inputs`、
+  `page_select_option`、`page_key`。纯 page-world，复用 PageChannel，风险低。
+- **P2 存储/网络只读/运行时**：`storage_get/set`、`cookie_list`、`*_list`（replace/intercept/mock）、
+  `network_clear/wait`、`proxy_status`、`download_file`、`clipboard_*`。多数是已有原生状态的只读暴露。
+- **P3（重/单独评估）**：`tab_*` 多标签、`page_screenshot` 抓帧、`page_upload`、`page_drag`、
+  `network_har_export`、`*_set` spoof、`page_accessibility_tree`。
+
+### D. 落地约束（每个新工具都要守）
+
+- **S 层即门禁**：S2 注册 = S2/S3 可见；S3 注册 = 仅 S3。受限 UI 操作（click/type/select…）一律 S2，
+  任意 JS / 凭证明文 / 私有目录仍 S3。`execute()` 不收 tier，靠注册层决定可见性。
+- **四处接入点齐全**：approval `req()` 文案 + scopeKey、execute when 分支、runSelfTest 固定参数、
+  buildToolDefs 工具定义（schema）。漏一处会出现“模型看得到但调用炸”或“自检缺项”。
+- **不执行任意 JS（S2）**：交互工具走 agent.js 指针/touch/鼠标/键盘事件派发，禁止 `eval`/`Function`；
+  任意 JS 仍只在 S3 `page_exec`。
+- **原生导航不走 page world**：`location`/`history` 在 page-world 受 CSP/同源限制且不稳；导航类工具
+  接 GeckoSession 原生 API，新增 native 通道而非塞进 agent.js。
+- **凭证铁律不变**：原始 cookie/auth 不进模型；`cookie_reveal` 等仍走 `AgentConfirm` 原生审批。
+- **CI `-Werror`**：本地无 Java17，可空接收者直接 `.toString()`、未用 import / 弃用 API 都会 fail，
+  推 CI 前自查；JS 跑 `node --check` 每文件 + manifest 顺序拼接。

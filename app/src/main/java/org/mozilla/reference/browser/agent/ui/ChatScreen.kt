@@ -340,7 +340,6 @@ private fun MessageList(state: PanelState) {
                             .widthIn(max = 240.dp)
                             .clip(bubbleShape)
                             .background(AgentColors.UserBubble)
-                            .border(1.dp, AgentColors.HairlineFaint, bubbleShape)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) { BasicText(msg.text, style = AgentText.Body) }
                 }
