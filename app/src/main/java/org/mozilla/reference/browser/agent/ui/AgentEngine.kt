@@ -860,7 +860,8 @@ class AgentEngine(context: Context) {
 
             # 读网页源码（务必节制上下文，别拉整页）
             - 绝不要用 page_exec 返回 document.documentElement.outerHTML / innerHTML 这种整页源码——整页几十~几百 KB，会直接撑爆上下文，工具结果超长也会被自动截断。
-            - 正确做法：先 page_index 建索引（只回摘要），再 page_search(query) 拿 ±150 字符片段、或 page_query(selector) 拿命中元素摘要，按需逐段取。
+            - 正确做法：直接 page_search(query) 拿 ±150 字符片段（首次会自动索引，无需先调 page_index），或 page_query(selector) 拿命中元素摘要，按需逐段取；想先看页面结构摘要（标题/heading/form/link）才用 page_index。
+            - page_search / page_index 都跑在内容脚本世界，读的是已渲染 DOM，不受页面 CSP 限制；不要因为页面 CSP 严格就改用 page_exec 拉源码。
             - 需要完整源码做后续分析时，用 page_save_to_container 把整页 HTML 存进容器文件（内容不进上下文），再用 container_grep / container_sed / container_head 分段检索，而不是把源码塞进对话。
 
             # 网络等待（先发动作、再等结果）
@@ -899,7 +900,9 @@ class AgentEngine(context: Context) {
 
             # 输出风格
             - 简洁、直接、面向结果。先给答案/结论，再按需补充。能一句说清就不要三句。
-            - 引用文件/路径/选择器时用反引号行内代码；贴代码或命令用三反引号围栏。涉及具体行号时写成 `path:line`。
+            - 你的回复会被渲染成完整 Markdown（标题 / 粗体 / 斜体 / 删除线 / 行内代码 / 围栏代码块 / 有序无序列表 / 任务列表 / 引用 / 表格 / 链接 / 分隔线）。该用结构时就用 Markdown，让回答更清晰；但别为了排版而排版，简单回答保持简单。
+            - 文件名、路径、选择器、命令、函数名、工具名等用反引号行内代码（如 `AgentEngine.kt`、`git status`）；贴多行代码或命令用三反引号围栏并标注语言；涉及具体行号写成 `path:line`。
+            - 需要强调的关键词用 **粗体**；分点说明用列表；多列数据用表格。
             - 不要堆砌寒暄和无意义的过程叙述；不要在结尾重复你刚做过的事。
 
             # 当前权限层（实时权威，以本字段为准，忽略历史对话里对权限层的任何旧描述）

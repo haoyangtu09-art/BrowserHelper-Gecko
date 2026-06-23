@@ -467,9 +467,20 @@ function bhHandleAgentCmd(msg) {
     if (cmd === 'searchSource') {
         var q = args.query || '';
         if (!q) return Promise.resolve({ error: 'query required' });
-        if (!_bhPageSource) return Promise.resolve({
-            error: 'no indexed source — call page_index first',
-        });
+        // Auto-index if the page hasn't been indexed yet (or was indexed on a
+        // different URL), so page_search is self-sufficient and never fails with
+        // "call page_index first". Pure content-script DOM read — not CSP-gated.
+        if (!_bhPageSource || _bhPageSourceUrl !== location.href) {
+            try {
+                var rawIdx = document.documentElement.outerHTML;
+                _bhPageSource = rawIdx.length > _bhPageSourceCap
+                    ? rawIdx.substring(0, _bhPageSourceCap) : rawIdx;
+                _bhPageSourceUrl = location.href;
+                _bhPageSourceTs = Date.now();
+            } catch (e) {
+                return Promise.resolve({ error: 'index failed: ' + String(e) });
+            }
+        }
         var results = [];
         var src = _bhPageSource;
         var srcL = src.toLowerCase();

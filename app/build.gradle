@@ -233,6 +233,15 @@ dependencies {
     // the forwarded stream is never decoded.
     implementation 'org.brotli:dec:0.1.2'
 
+    // commonmark-java: mature CommonMark + GFM parser used to render the overlay Agent's
+    // chat messages as Markdown (headings/bold/lists/code/tables/task-lists). Parsing only —
+    // a small bare-Compose renderer (MarkdownText.kt) walks the AST. Pure Java, no Android deps.
+    implementation 'org.commonmark:commonmark:0.22.0'
+    implementation 'org.commonmark:commonmark-ext-gfm-tables:0.22.0'
+    implementation 'org.commonmark:commonmark-ext-gfm-strikethrough:0.22.0'
+    implementation 'org.commonmark:commonmark-ext-task-list-items:0.22.0'
+    implementation 'org.commonmark:commonmark-ext-autolink:0.22.0'
+
     implementation libs.mozilla.browser.domains
     implementation libs.mozilla.browser.engine.gecko
     implementation libs.mozilla.browser.errorpages

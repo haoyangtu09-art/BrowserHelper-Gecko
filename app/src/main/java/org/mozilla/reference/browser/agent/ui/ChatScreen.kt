@@ -61,13 +61,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -111,7 +106,7 @@ data class ToolCard(
 
 /** Click with no ripple/indication, so transparent dismiss layers don't gray-flash on tap. */
 @Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
+internal fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
     val src = remember { MutableInteractionSource() }
     return this.clickable(interactionSource = src, indication = null) { onClick() }
 }
@@ -397,154 +392,14 @@ private fun MessageList(state: PanelState) {
 }
 
 /**
- * Renders assistant text, splitting fenced ``` blocks out into rounded CodeBlock boxes. The
- * box is a standing container, so as the streamed text grows the frame is present first and
- * code appears inside it — not code-first-then-frame. Non-code prose gets light markdown:
- * `**bold**` is rendered bold and stray asterisks are dropped.
+ * Renders an assistant chat message as full Markdown (headings, bold/italic/strikethrough, inline
+ * code, fenced code blocks, lists, task lists, quotes, tables, links). The actual rendering lives
+ * in [MarkdownContent] (MarkdownText.kt) which parses with commonmark-java and emits bare-Compose;
+ * tool / plan / task cards deliberately do NOT go through here and keep their own flat styling.
  */
 @Composable
 private fun AssistantContent(text: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        parseSegments(unescapeText(text)).forEach { (isCode, body) ->
-            if (isCode) {
-                CodeBlock(body)
-            } else {
-                ProseText(body.trim())
-            }
-        }
-    }
-}
-
-/**
- * Renders prose, turning `#`..`######` header lines into real bold headings (the leading hashes
- * are stripped, never shown). Consecutive non-header lines stay grouped as one wrapping
- * paragraph; `**bold**`/stray `*` are handled by [mdInline].
- */
-@Composable
-private fun ProseText(body: String) {
-    val headerRe = remember { Regex("^(#{1,6})\\s*(.*)$") }
-    val blocks = remember(body) {
-        val out = ArrayList<Pair<Boolean, String>>()
-        val buf = StringBuilder()
-        fun flush() {
-            if (buf.isNotBlank()) out.add(false to buf.toString().trimEnd('\n'))
-            buf.setLength(0)
-        }
-        body.split('\n').forEach { line ->
-            val m = headerRe.matchEntire(line.trimStart())
-            if (m != null && m.groupValues[2].isNotBlank()) {
-                flush()
-                out.add(true to m.groupValues[2].trim())
-            } else {
-                buf.append(line).append('\n')
-            }
-        }
-        flush()
-        out
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        blocks.forEach { (isHeader, t) ->
-            BasicText(mdInline(t), style = if (isHeader) HeaderStyle else AgentText.Body)
-        }
-    }
-}
-
-/** Bold, slightly larger style for markdown headers (replaces the raw `###` the model emits). */
-private val HeaderStyle = AgentText.Body.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold)
-
-/**
- * Unescapes the common backslash escapes (`\n` `\t` `\r` `\"` `\\`) that some providers leak
- * as literal two-character sequences into the assistant text, so they render as real newlines
- * / tabs / quotes instead of visible `\n`. Fast-paths text with no backslashes.
- */
-private fun unescapeText(s: String): String {
-    if (!s.contains('\\')) return s
-    val sb = StringBuilder(s.length)
-    var i = 0
-    while (i < s.length) {
-        val c = s[i]
-        if (c == '\\' && i + 1 < s.length) {
-            when (s[i + 1]) {
-                'n' -> { sb.append('\n'); i += 2; continue }
-                't' -> { sb.append('\t'); i += 2; continue }
-                'r' -> { i += 2; continue }
-                '"' -> { sb.append('"'); i += 2; continue }
-                '\\' -> { sb.append('\\'); i += 2; continue }
-            }
-        }
-        sb.append(c)
-        i++
-    }
-    return sb.toString()
-}
-
-/**
- * Minimal inline markdown: turns `**bold**` spans bold and strips any leftover single `*`
- * markers, so model output peppered with asterisks renders clean (bolded, not literal stars).
- */
-private fun mdInline(text: String): AnnotatedString = buildAnnotatedString {
-    var i = 0
-    while (i < text.length) {
-        val open = text.indexOf("**", i)
-        if (open < 0) {
-            append(text.substring(i).replace("*", ""))
-            break
-        }
-        val close = text.indexOf("**", open + 2)
-        if (close < 0) {
-            append(text.substring(i).replace("*", ""))
-            break
-        }
-        append(text.substring(i, open).replace("*", ""))
-        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
-            append(text.substring(open + 2, close))
-        }
-        i = close + 2
-    }
-}
-
-/** Splits text on ``` fences into (isCode, body) segments; a leading language line on a code
- *  fence is dropped. */
-private fun parseSegments(text: String): List<Pair<Boolean, String>> {
-    val parts = text.split("```")
-    val out = ArrayList<Pair<Boolean, String>>()
-    for (i in parts.indices) {
-        val seg = parts[i]
-        if (i % 2 == 0) {
-            if (seg.isNotBlank()) out.add(false to seg)
-        } else {
-            val body = if (seg.contains('\n')) seg.substringAfter('\n') else seg
-            out.add(true to body.trimEnd('\n'))
-        }
-    }
-    return out
-}
-
-/** A rounded dark code box with a two-paper copy button pinned to the top-right corner. */
-@Composable
-private fun CodeBlock(code: String) {
-    val clipboard = LocalContext.current.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(CodeBg)
-            .padding(12.dp),
-    ) {
-        // Monospace + fillMaxWidth so multi-line code wraps to the box width and shows in full
-        // (never clipped to a single line).
-        BasicText(
-            code,
-            style = AgentText.Body.copy(color = AgentColors.TextPrimary, fontFamily = FontFamily.Monospace),
-            modifier = Modifier.fillMaxWidth().padding(end = 24.dp, top = 18.dp),
-        )
-        Box(
-            Modifier.align(Alignment.TopEnd).size(24.dp).clip(CircleShape).noRippleClickable {
-                clipboard.setPrimaryClip(ClipData.newPlainText("code", code))
-            },
-            contentAlignment = Alignment.Center,
-        ) { CopyIcon(size = 15.dp, color = AgentColors.TextSecondary) }
-    }
+    MarkdownContent(text)
 }
 
 /**
@@ -583,7 +438,7 @@ private val ToolLogStyle = AgentText.Label.copy(
     fontFamily = FontFamily.Monospace,
 )
 
-/** The "●" bullet before a tool header; pulses while the tool is still running. */
+/** Small black "●" bullet before a tool header / working bar; pulses while still running. */
 @Composable
 private fun ToolBullet(running: Boolean) {
     if (running) {
@@ -594,15 +449,14 @@ private fun ToolBullet(running: Boolean) {
             animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
             label = "toolDotAlpha",
         )
-        BasicText(
-            "●",
-            style = ToolLogStyle.copy(color = AgentColors.TextTertiary),
-            modifier = Modifier.graphicsLayer { this.alpha = alpha },
-        )
+        BasicText("●", style = BulletStyle, modifier = Modifier.graphicsLayer { this.alpha = alpha })
     } else {
-        BasicText("●", style = ToolLogStyle.copy(color = AgentColors.TextTertiary))
+        BasicText("●", style = BulletStyle)
     }
 }
+
+/** A small black dot: the tool-log / working-bar bullet, smaller than the log text around it. */
+private val BulletStyle = ToolLogStyle.copy(color = AgentColors.TextPrimary, fontSize = 8.sp)
 
 /** Lays out the "⎿" connector glyph beside an indented result block. */
 @Composable

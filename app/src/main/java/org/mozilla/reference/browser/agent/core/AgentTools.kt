@@ -2652,7 +2652,7 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
 	    }),
     tool("proxy_status", AgentPermissionTier.S1, "读取 MITM 代理当前状态。", emptySchema()),
     tool("page_index", AgentPermissionTier.S1, "索引当前页面源码，只返回标题、URL、heading、form、link 等摘要。", emptySchema()),
-    tool("page_search", AgentPermissionTier.S1, "搜索已索引页面源码，返回片段。先调用 page_index。", schema {
+    tool("page_search", AgentPermissionTier.S1, "搜索当前页面源码，返回 ±150 字符片段。未索引会自动索引，无需先调 page_index。", schema {
         prop("query", str("搜索文本"))
         prop("limit", num("最多返回条数"))
         required("query")
