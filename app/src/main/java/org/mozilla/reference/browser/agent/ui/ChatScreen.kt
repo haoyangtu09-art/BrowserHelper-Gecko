@@ -153,13 +153,6 @@ fun ChatScreen(
                 onToggleMenu = { showMenu = it },
                 modifier = Modifier.align(Alignment.TopStart).padding(top = 34.dp),
             )
-            // Floating working bar centered in the top row's empty middle, only while generating.
-            if (state.generating) {
-                WorkingBar(
-                    state,
-                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 38.dp),
-                )
-            }
             // Tap anywhere over the conversation to dismiss the overflow menu, then draw
             // the menu above that dismiss layer.
             if (showMenu) {
@@ -173,6 +166,15 @@ fun ChatScreen(
         }
         InputBar(state, onPlusClick = { showUpload = !showUpload })
       }
+      // Compact working pill floating just above the input bar's left edge while generating. It
+      // sits in the outer Box (not the top row) so the upload sheet, anchored at the same corner,
+      // can slide up and cover it.
+      if (state.generating) {
+          WorkingBar(
+              state,
+              modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 58.dp),
+          )
+      }
       // Plus opens a small floating popup anchored just above the plus button (like the
       // model selector), not a full-width sheet sliding up from the bottom edge.
       if (showUpload) {
@@ -182,7 +184,7 @@ fun ChatScreen(
           visible = showUpload,
           enter = scaleIn(tween(200), initialScale = 0.9f, transformOrigin = TransformOrigin(0f, 1f)) + fadeIn(tween(200)),
           exit = scaleOut(tween(180), targetScale = 0.9f, transformOrigin = TransformOrigin(0f, 1f)) + fadeOut(tween(160)),
-          modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 66.dp),
+          modifier = Modifier.align(Alignment.BottomStart).padding(start = 16.dp, bottom = 40.dp),
       ) {
           UploadSheet(onPick = { kind ->
               showUpload = false
@@ -283,12 +285,11 @@ private fun FloatingDualPill(onNew: () -> Unit, onMore: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.fillMaxHeight().clickable { onNew() }.padding(start = 13.dp, end = 9.dp),
+            Modifier.fillMaxHeight().clickable { onNew() }.padding(start = 12.dp, end = 5.dp),
             contentAlignment = Alignment.Center,
         ) { PenSquareIcon(color = AgentColors.TextPrimary, size = 15.dp) }
-        Box(Modifier.width(1.dp).height(16.dp).background(AgentColors.HairlineFaint))
         Box(
-            Modifier.fillMaxHeight().clickable { onMore() }.padding(start = 9.dp, end = 13.dp),
+            Modifier.fillMaxHeight().clickable { onMore() }.padding(start = 5.dp, end = 12.dp),
             contentAlignment = Alignment.Center,
         ) { MoreDotsIcon(color = AgentColors.TextPrimary, size = 15.dp) }
     }
@@ -381,7 +382,7 @@ private fun MessageList(state: PanelState) {
                                 clipboard.setPrimaryClip(ClipData.newPlainText("assistant", msg.text))
                             },
                             contentAlignment = Alignment.Center,
-                        ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
+                        ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary, bg = AgentColors.Surface) }
                     }
                 }
             }
@@ -562,7 +563,7 @@ private fun OutputBlock(text: String, capped: Boolean) {
                     clipboard.setPrimaryClip(ClipData.newPlainText("tool", text))
                 },
                 contentAlignment = Alignment.Center,
-            ) { CopyIcon(size = 13.dp, color = AgentColors.TextSecondary) }
+            ) { CopyIcon(size = 13.dp, color = AgentColors.TextSecondary, bg = CodeBg) }
         }
     }
 }
@@ -629,12 +630,11 @@ private fun diffMarker(line: String): Char? {
     }
 }
 
-/** Floating top status pill shown while the model is working: a blinking bullet + cycling gerund
- *  + elapsed time + rough token estimate, e.g. "Imagining… (1m 12s · ↓ 1.2k tokens)". */
+/** Compact floating status pill shown above the input while the model is working: a blinking
+ *  bullet + cycling gerund + elapsed time, e.g. "Cooking… 1m 12s". */
 @Composable
 private fun WorkingBar(state: PanelState, modifier: Modifier = Modifier) {
-    // Re-tick once a second so the elapsed clock advances; the token estimate updates on its own
-    // as state.genTokens grows during streaming.
+    // Re-tick once a second so the elapsed clock advances.
     val start = state.turnStartMs
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(start) {
@@ -645,25 +645,26 @@ private fun WorkingBar(state: PanelState, modifier: Modifier = Modifier) {
     }
     val elapsed = ((nowMs - start) / 1000).coerceAtLeast(0)
     val timeStr = if (elapsed < 60) "${elapsed}s" else "${elapsed / 60}m ${elapsed % 60}s"
-    val tokens = state.genTokens
-    val tokStr = if (tokens >= 1000) "${tokens / 1000}.${(tokens % 1000) / 100}k" else "$tokens"
     val word = WORKING_WORDS[((elapsed / 3) % WORKING_WORDS.size).toInt()]
     Row(
         modifier = modifier
             .clip(AgentShapes.Pill)
             .background(Color.White)
-            .padding(horizontal = 12.dp, vertical = 5.dp),
+            .padding(horizontal = 9.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ToolBullet(running = true)
-        Spacer(Modifier.width(6.dp))
-        BasicText("$word… ($timeStr · ↓ $tokStr tokens)", style = ToolLogStyle)
+        Spacer(Modifier.width(5.dp))
+        // Compact: just the cycling verb + elapsed clock, so the pill stays ~1/3 of the input width.
+        BasicText("$word… $timeStr", style = ToolLogStyle.copy(fontSize = 10.sp))
     }
 }
 
 /** Playful cycling verbs for the working bar (Claude-Code style), one swapped in every ~3s. */
 private val WORKING_WORDS = listOf(
     "Thinking", "Working", "Imagining", "Reasoning", "Composing", "Crafting",
+    "Cooking", "Brewing", "Conjuring", "Pondering", "Tinkering", "Noodling",
+    "Simmering", "Percolating", "Mulling", "Scheming", "Hatching", "Wrangling",
 )
 
 @Composable
@@ -747,23 +748,23 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
 private fun UploadSheet(onPick: (AgentAttachmentKind) -> Unit) {
     Column(
         modifier = Modifier
-            .width(182.dp)
+            .width(137.dp)
             .clip(AgentShapes.Sheet)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
-            .padding(vertical = 6.dp),
+            .padding(vertical = 4.dp),
     ) {
         UploadRow("相机", AgentAttachmentKind.Camera, onPick) {
-            CameraIcon(color = AgentColors.TextPrimary, size = 18.dp)
+            CameraIcon(color = AgentColors.TextPrimary, size = 14.dp)
         }
         UploadRow("图片", AgentAttachmentKind.Image, onPick) {
-            ImageLandscapeIcon(size = 21.dp)
+            ImageLandscapeIcon(size = 16.dp)
         }
         UploadRow("文件", AgentAttachmentKind.File, onPick) {
-            SpiralClipIcon(color = AgentColors.TextPrimary, size = 20.dp)
+            SpiralClipIcon(color = AgentColors.TextPrimary, size = 15.dp)
         }
         UploadRow("插件", AgentAttachmentKind.Plugin, onPick) {
-            PluginPlugIcon(color = AgentColors.TextPrimary, size = 20.dp)
+            PluginPlugIcon(color = AgentColors.TextPrimary, size = 15.dp)
         }
     }
 }
@@ -779,19 +780,19 @@ private fun UploadRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onPick(kind) }
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(width = 38.dp, height = 32.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .size(width = 29.dp, height = 24.dp)
+                .clip(RoundedCornerShape(9.dp))
                 .background(AgentColors.Control),
             contentAlignment = Alignment.Center,
         ) {
             icon()
         }
-        Spacer(Modifier.width(10.dp))
-        BasicText(label, style = AgentText.Body)
+        Spacer(Modifier.width(8.dp))
+        BasicText(label, style = AgentText.Body.copy(fontSize = 11.7.sp))
     }
 }

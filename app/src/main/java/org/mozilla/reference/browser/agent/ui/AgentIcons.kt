@@ -263,9 +263,18 @@ fun CheckIcon(modifier: Modifier = Modifier, size: Dp = 14.dp, color: Color = Co
     }
 }
 
-/** Two overlapping rounded squares — the classic copy glyph (not the word "复制"). */
+/**
+ * Two overlapping rounded squares — the classic copy glyph (not the word "复制"). The front
+ * (bottom-left) square is filled with [bg] before being stroked, so it visibly occludes the part
+ * of the back (top-right) square it overlaps. Pass the surface color behind the icon as [bg].
+ */
 @Composable
-fun CopyIcon(modifier: Modifier = Modifier, size: Dp = 18.dp, color: Color = Color(0xFF111111)) {
+fun CopyIcon(
+    modifier: Modifier = Modifier,
+    size: Dp = 18.dp,
+    color: Color = Color(0xFF111111),
+    bg: Color = Color.White,
+) {
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
@@ -277,11 +286,13 @@ fun CopyIcon(modifier: Modifier = Modifier, size: Dp = 18.dp, color: Color = Col
             radiusX = r, radiusY = r,
         )
         drawPath(Path().apply { addRoundRect(back) }, color, style = Stroke(width = sw))
-        // Front square: bottom-left, same size, offset so the two read as stacked sheets.
+        // Front square: bottom-left, same size, offset so the two read as stacked sheets. Fill it
+        // with the surface color first to knock out the overlapping slice of the back outline.
         val front = androidx.compose.ui.geometry.RoundRect(
             left = w * 0.14f, top = h * 0.34f, right = w * 0.66f, bottom = h * 0.86f,
             radiusX = r, radiusY = r,
         )
+        drawPath(Path().apply { addRoundRect(front) }, bg)
         drawPath(Path().apply { addRoundRect(front) }, color, style = Stroke(width = sw))
     }
 }

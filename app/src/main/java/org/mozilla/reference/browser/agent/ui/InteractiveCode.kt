@@ -57,8 +57,8 @@ import org.mozilla.reference.browser.agent.ui.theme.AgentText
  */
 
 private const val HL_BASE = "file:///android_asset/agent/highlight/"
-private val WinBg = Color(0xFF1E1E1E)
-private val WinHeaderBg = Color(0xFF2A2A2A)
+private val WinBg = Color(0xFF0D1117)
+private val WinHeaderBg = Color(0xFF161B22)
 private val WinFg = Color(0xFFB0B0B0)
 private val ToggleTrack = Color(0xFF555555)
 private val ToggleKnob = Color(0xFFF2F2F2)
@@ -97,7 +97,7 @@ fun InteractiveCodeWindow(code: String, lang: String) {
                     clipboard.setPrimaryClip(ClipData.newPlainText("code", code))
                 },
                 contentAlignment = Alignment.Center,
-            ) { CopyIcon(size = 14.dp, color = WinFg) }
+            ) { CopyIcon(size = 14.dp, color = WinFg, bg = WinHeaderBg) }
             Spacer(Modifier.width(4.dp))
             ExpandIcon(
                 size = 16.dp, color = WinFg,
@@ -144,7 +144,8 @@ private fun CodeWebView(html: String, baseUrl: String?, modifier: Modifier) {
                 // Android 11+ (where allowFileAccess defaults to false).
                 settings.allowFileAccess = true
                 settings.allowContentAccess = true
-                setBackgroundColor(0xFF1E1E1E.toInt())
+                isHorizontalScrollBarEnabled = false
+                setBackgroundColor(0xFF0D1117.toInt())
                 // Let the WebView keep its own gestures so internal scroll works inside the
                 // vertically-scrolling transcript.
                 setOnTouchListener { v, _ ->
@@ -169,11 +170,17 @@ private fun escapeHtml(s: String): String =
 
 private fun highlightHtml(code: String, lang: String): String {
     val cls = when (lang) { "js" -> "language-javascript"; "markdown" -> "language-markdown"; else -> "language-html" }
+    // Style plain `pre/code` (not just `.hljs`) so the dark bg + small wrapped font hold even if
+    // highlight.js fails to load. `white-space:pre-wrap` + `overflow-x:hidden` override the
+    // theme's own `overflow-x:auto`, so long lines wrap instead of scrolling sideways. At ~12px
+    // monospace the device-width window fits roughly 35–40 ASCII chars per line.
     return "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
         "<link rel=\"stylesheet\" href=\"github-dark.min.css\">" +
-        "<style>html,body{margin:0;padding:0;background:#1e1e1e;}" +
-        "pre{margin:0;}code.hljs{background:#1e1e1e;font-size:13px;line-height:1.5;white-space:pre;padding:10px 12px;}" +
-        "::-webkit-scrollbar{height:6px;width:6px;}::-webkit-scrollbar-thumb{background:#444;border-radius:3px;}</style>" +
+        "<style>html,body{margin:0;padding:0;background:#0d1117;}" +
+        "pre,pre code.hljs{margin:0;overflow-x:hidden;}" +
+        "pre code{display:block;background:#0d1117;color:#c9d1d9;font-family:monospace;" +
+        "font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;padding:10px 12px;}" +
+        "</style>" +
         "</head><body><pre><code class=\"" + cls + "\">" + escapeHtml(code) + "</code></pre>" +
         "<script src=\"highlight.min.js\"></script><script>hljs.highlightAll();</script></body></html>"
 }

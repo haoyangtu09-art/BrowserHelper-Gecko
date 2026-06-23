@@ -767,7 +767,7 @@ private fun ToggleSwitch(on: Boolean, onToggle: () -> Unit) {
         modifier = Modifier
             .size(width = 44.dp, height = 26.dp)
             .clip(AgentShapes.Pill)
-            .background(if (on) AgentColors.Accent else AgentColors.Control)
+            .background(if (on) AgentColors.TextPrimary else AgentColors.Control)
             .clickable { onToggle() }
             .padding(3.dp),
         contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart,
