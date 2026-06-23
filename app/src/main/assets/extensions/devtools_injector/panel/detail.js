@@ -136,6 +136,8 @@ function setNetEditing(active) {
 // 可编辑范围：拦截请求的 请求头(0)/请求体(1)；普通请求的 请求体(1)。
 function openDetailEditor() {
   if (!netDetailBody) return;
+  // 同一次点按可能触发多个事件（touchend + mouseup + click），编辑层已开就忽略后续，避免重开闪烁。
+  if (netEditOverlay) return;
   // 响应拦截：可编辑 响应头(2)/响应体(3)；请求/请求拦截：可编辑 请求头(0)/请求体(1)
   var editable = netSelRespIntercept
     ? (netDetailTab === 2 || netDetailTab === 3)

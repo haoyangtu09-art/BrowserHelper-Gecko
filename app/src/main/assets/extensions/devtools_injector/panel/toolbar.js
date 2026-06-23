@@ -610,15 +610,32 @@ function buildNetPanel() {
 
 	    // shadow root 内的 textarea 在 Android 软键盘下 IME 合成会崩坏（Gecko bug），
 	    // 因此设为只读（仍可长按选中/复制），点按时改用 light DOM 编辑层输入。
+	    // 不能只靠合成 click：Gecko Android 下只读 textarea「含文本」时，单击常被当成文本
+	    // 选择手势吞掉、不再合成 click（历史请求的请求体多半有内容，于是「点了不弹键盘」）。
+	    // 改用自己的轻量 tap 判定：按下→抬起位移小且时间短 = 点按（开编辑层）；长按/拖动 =
+	    // 留给原生选择/复制。openDetailEditor 内有 netEditOverlay 去重，多事件同发也只开一次。
 	    netDetailBody.readOnly = true;
-	    ['pointerdown','pointerup','mousedown','mouseup','dblclick','touchstart','touchend'].forEach(function (type) {
+	    var bhTapX = 0, bhTapY = 0, bhTapT = 0, bhTapMoved = false;
+	    function bhTapPoint(e) { return (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e; }
+	    ['pointerdown','mousedown','touchstart'].forEach(function (type) {
 	      netDetailBody.addEventListener(type, function (e) {
-	        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-	        else e.stopPropagation();
+	        var p = bhTapPoint(e);
+	        bhTapX = p.clientX || 0; bhTapY = p.clientY || 0; bhTapT = Date.now(); bhTapMoved = false;
+	        if (e.stopImmediatePropagation) e.stopImmediatePropagation(); else e.stopPropagation();
 	      }, true);
 	    });
-	    netDetailBody.addEventListener('click', function () {
-	      openDetailEditor();
+	    ['pointermove','touchmove'].forEach(function (type) {
+	      netDetailBody.addEventListener(type, function (e) {
+	        var p = bhTapPoint(e);
+	        if (Math.abs((p.clientX || 0) - bhTapX) > 12 || Math.abs((p.clientY || 0) - bhTapY) > 12) bhTapMoved = true;
+	      }, true);
+	    });
+	    ['pointerup','mouseup','touchend','click','dblclick'].forEach(function (type) {
+	      netDetailBody.addEventListener(type, function (e) {
+	        if (e.stopImmediatePropagation) e.stopImmediatePropagation(); else e.stopPropagation();
+	        if (type === 'dblclick') return;
+	        if (!bhTapMoved && (Date.now() - bhTapT) < 500) openDetailEditor();
+	      }, true);
 	    });
 
 	    netDetailActs.querySelector('#bh-act-replay').addEventListener('click', function () {
