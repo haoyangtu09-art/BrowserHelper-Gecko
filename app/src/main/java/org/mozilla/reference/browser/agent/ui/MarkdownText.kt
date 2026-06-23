@@ -118,7 +118,14 @@ private fun MarkdownBlock(node: Node) {
     when (node) {
         is Heading -> BasicText(inlineString(node), style = headingStyle(node.level))
         is Paragraph -> BasicText(inlineString(node), style = MdBody)
-        is FencedCodeBlock -> MdCodeBlock(node.literal.trimEnd('\n'), node.info ?: "")
+        is FencedCodeBlock -> {
+            val src = node.literal.trimEnd('\n')
+            val info = node.info ?: ""
+            // The model opts into an interactive window by tagging the fence html/js/markdown;
+            // every other language stays a flat code box. No content sniffing — tag only.
+            val kind = interactiveLang(info)
+            if (kind != null) InteractiveCodeWindow(src, kind) else MdCodeBlock(src, info)
+        }
         is IndentedCodeBlock -> MdCodeBlock(node.literal.trimEnd('\n'), "")
         is BulletList -> ListBlock(node, ordered = false)
         is OrderedList -> ListBlock(node, ordered = true)
