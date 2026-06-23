@@ -263,25 +263,24 @@ fun CheckIcon(modifier: Modifier = Modifier, size: Dp = 14.dp, color: Color = Co
     }
 }
 
-/** Two offset stacked sheets of paper — the copy glyph (not the word "复制"). */
+/** Two overlapping rounded squares — the classic copy glyph (not the word "复制"). */
 @Composable
 fun CopyIcon(modifier: Modifier = Modifier, size: Dp = 18.dp, color: Color = Color(0xFF111111)) {
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
         val sw = this.size.minDimension * 0.09f
-        // Back sheet drawn as just its exposed top + right edges (an L), so it reads as a
-        // second sheet behind the front one without needing a background-matching fill.
-        val back = Path().apply {
-            moveTo(w * 0.40f, h * 0.14f)
-            lineTo(w * 0.84f, h * 0.14f)
-            lineTo(w * 0.84f, h * 0.60f)
-        }
-        drawPath(back, color, style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
-        // Front sheet: a full rounded rectangle, bottom-left.
+        val r = this.size.minDimension * 0.16f
+        // Back square: top-right, drawn first so the front one sits over it.
+        val back = androidx.compose.ui.geometry.RoundRect(
+            left = w * 0.34f, top = h * 0.14f, right = w * 0.86f, bottom = h * 0.66f,
+            radiusX = r, radiusY = r,
+        )
+        drawPath(Path().apply { addRoundRect(back) }, color, style = Stroke(width = sw))
+        // Front square: bottom-left, same size, offset so the two read as stacked sheets.
         val front = androidx.compose.ui.geometry.RoundRect(
-            left = w * 0.16f, top = h * 0.36f, right = w * 0.64f, bottom = h * 0.86f,
-            radiusX = this.size.minDimension * 0.12f, radiusY = this.size.minDimension * 0.12f,
+            left = w * 0.14f, top = h * 0.34f, right = w * 0.66f, bottom = h * 0.86f,
+            radiusX = r, radiusY = r,
         )
         drawPath(Path().apply { addRoundRect(front) }, color, style = Stroke(width = sw))
     }

@@ -117,7 +117,7 @@ private fun MarkdownBlocks(parent: Node) {
 private fun MarkdownBlock(node: Node) {
     when (node) {
         is Heading -> BasicText(inlineString(node), style = headingStyle(node.level))
-        is Paragraph -> BasicText(inlineString(node), style = AgentText.Body)
+        is Paragraph -> BasicText(inlineString(node), style = MdBody)
         is FencedCodeBlock -> MdCodeBlock(node.literal.trimEnd('\n'), node.info ?: "")
         is IndentedCodeBlock -> MdCodeBlock(node.literal.trimEnd('\n'), "")
         is BulletList -> ListBlock(node, ordered = false)
@@ -132,7 +132,7 @@ private fun MarkdownBlock(node: Node) {
         is HtmlBlock -> BasicText(node.literal.trim(), style = MonoBody)
         else -> {
             val s = inlineString(node)
-            if (s.isNotBlank()) BasicText(s, style = AgentText.Body) else MarkdownBlocks(node)
+            if (s.isNotBlank()) BasicText(s, style = MdBody) else MarkdownBlocks(node)
         }
     }
 }
@@ -160,16 +160,16 @@ private fun ListItemRow(item: ListItem, ordered: Boolean, index: Int) {
                 taskMarker != null ->
                     BasicText(
                         if (taskMarker.isChecked) "\u2611" else "\u2610",
-                        style = AgentText.Body.copy(color = AgentColors.TextSecondary),
+                        style = MdBody.copy(color = AgentColors.TextSecondary),
                     )
-                ordered -> BasicText("$index.", style = AgentText.Body.copy(color = AgentColors.TextSecondary))
-                else -> BasicText("\u2022", style = AgentText.Body.copy(color = AgentColors.TextSecondary))
+                ordered -> BasicText("$index.", style = MdBody.copy(color = AgentColors.TextSecondary))
+                else -> BasicText("\u2022", style = MdBody.copy(color = AgentColors.TextSecondary))
             }
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             item.children().forEach { child ->
                 if (child === firstPara && taskMarker != null) {
-                    BasicText(inlineString(child, skip = taskMarker), style = AgentText.Body)
+                    BasicText(inlineString(child, skip = taskMarker), style = MdBody)
                 } else {
                     MarkdownBlock(child)
                 }
@@ -212,9 +212,9 @@ private fun TableBlockView(table: Node) {
                             BasicText(
                                 inlineString(cell),
                                 style = if (isHeader) {
-                                    AgentText.Body.copy(fontWeight = FontWeight.Bold)
+                                    MdBody.copy(fontWeight = FontWeight.Bold)
                                 } else {
-                                    AgentText.Body
+                                    MdBody
                                 },
                             )
                         }
@@ -248,7 +248,7 @@ private fun MdCodeBlock(code: String, info: String) {
         Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp)) {
             BasicText(
                 code,
-                style = AgentText.Body.copy(color = MdCodeFg, fontFamily = FontFamily.Monospace),
+                style = MdCodeStyle.copy(color = MdCodeFg),
             )
         }
     }
@@ -309,11 +309,16 @@ private fun headingStyle(level: Int) = when (level) {
     else -> H4Style
 }
 
-private val H1Style = AgentText.Body.copy(fontSize = 20.sp, fontWeight = FontWeight.Bold)
-private val H2Style = AgentText.Body.copy(fontSize = 17.sp, fontWeight = FontWeight.Bold)
-private val H3Style = AgentText.Body.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold)
-private val H4Style = AgentText.Body.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold)
-private val MonoBody = AgentText.Body.copy(fontFamily = FontFamily.Monospace)
+// Chat prose runs ~10% smaller than the global Body token (the overlay is narrow and the
+// transcript reads as dense text); headings scale with it. The code block keeps its own size.
+private val MdBody = AgentText.Body.copy(fontSize = 11.7.sp)
+private val H1Style = AgentText.Body.copy(fontSize = 18.sp, fontWeight = FontWeight.Bold)
+private val H2Style = AgentText.Body.copy(fontSize = 15.3.sp, fontWeight = FontWeight.Bold)
+private val H3Style = AgentText.Body.copy(fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
+private val H4Style = AgentText.Body.copy(fontSize = 11.7.sp, fontWeight = FontWeight.Bold)
+private val MonoBody = MdBody.copy(fontFamily = FontFamily.Monospace)
+// Code block body: a touch smaller so ~35–40 mono chars fit per line in the overlay width.
+private val MdCodeStyle = AgentText.Body.copy(fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
 
 // Dark ChatGPT-style fenced code block; the chat surface itself stays light.
 private val MdCodeBg = Color(0xFF1E1E1E)

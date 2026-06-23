@@ -351,7 +351,10 @@ private fun MessageList(state: PanelState) {
     ) {
         // Clear the floating top bar so the first message isn't hidden beneath it.
         Spacer(Modifier.height(76.dp))
-        state.messages.forEach { msg ->
+        state.messages.forEachIndexed { idx, msg ->
+            // The message still being streamed is the last one while generating; its copy
+            // button is suppressed until generation completes.
+            val streaming = state.generating && idx == state.messages.lastIndex
             if (msg.fromUser) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     val bubbleShape = RoundedCornerShape(18.dp)
@@ -361,7 +364,7 @@ private fun MessageList(state: PanelState) {
                             .clip(bubbleShape)
                             .background(AgentColors.UserBubble)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
-                    ) { BasicText(msg.text, style = AgentText.Body) }
+                    ) { BasicText(msg.text, style = AgentText.Body.copy(fontSize = 11.7.sp)) }
                 }
             } else if (msg.tool != null) {
                 ToolCardView(msg.tool)
@@ -371,13 +374,15 @@ private fun MessageList(state: PanelState) {
                 // shows only the single dot below (not an empty bubble + a dot).
                 Column(Modifier.fillMaxWidth()) {
                     AssistantContent(msg.text)
-                    Spacer(Modifier.height(4.dp))
-                    Box(
-                        Modifier.size(22.dp).clip(CircleShape).noRippleClickable {
-                            clipboard.setPrimaryClip(ClipData.newPlainText("assistant", msg.text))
-                        },
-                        contentAlignment = Alignment.Center,
-                    ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
+                    if (!streaming) {
+                        Spacer(Modifier.height(4.dp))
+                        Box(
+                            Modifier.size(22.dp).clip(CircleShape).noRippleClickable {
+                                clipboard.setPrimaryClip(ClipData.newPlainText("assistant", msg.text))
+                            },
+                            contentAlignment = Alignment.Center,
+                        ) { CopyIcon(size = 14.dp, color = AgentColors.TextSecondary) }
+                    }
                 }
             }
         }
