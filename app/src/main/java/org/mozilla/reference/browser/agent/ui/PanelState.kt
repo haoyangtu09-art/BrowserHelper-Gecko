@@ -187,6 +187,9 @@ class PanelState {
     fun send() {
         val text = input.trim()
         if (text.isEmpty()) return
+        // A finished plan/task list is cleared at the start of the next turn so it doesn't linger
+        // into an unrelated conversation.
+        if (tracker.allComplete) tracker = TaskTrackerState()
         messages.add(ChatMsg(fromUser = true, text = text))
         convo.add(AgentMessage(Role.User, text))
         ensureCurrentChat(text)

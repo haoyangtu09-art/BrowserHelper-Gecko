@@ -365,7 +365,7 @@ private fun MessageList(state: PanelState) {
                             .clip(bubbleShape)
                             .background(AgentColors.UserBubble)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
-                    ) { BasicText(msg.text, style = AgentText.Body.copy(fontSize = 11.7.sp)) }
+                    ) { BasicText(msg.text, style = AgentText.Body.copy(fontSize = 10.5.sp)) }
                 }
             } else if (msg.tool != null) {
                 ToolCardView(msg.tool)
@@ -392,6 +392,11 @@ private fun MessageList(state: PanelState) {
         // the floating WorkingBar at the top, so there is no separate bottom dot here.
         if (state.tracker.groups.isNotEmpty()) {
             TaskTrackerCard(state)
+        }
+        // Blinking black dot at the foot of the transcript while the model works — the inline
+        // "typing" indicator (the compact WorkingBar above the input shows the verb + clock).
+        if (state.generating) {
+            Row(Modifier.fillMaxWidth().padding(top = 2.dp)) { ToolBullet(running = true) }
         }
         Spacer(Modifier.height(8.dp))
     }
@@ -656,7 +661,7 @@ private fun WorkingBar(state: PanelState, modifier: Modifier = Modifier) {
         ToolBullet(running = true)
         Spacer(Modifier.width(5.dp))
         // Compact: just the cycling verb + elapsed clock, so the pill stays ~1/3 of the input width.
-        BasicText("$word… $timeStr", style = ToolLogStyle.copy(fontSize = 10.sp))
+        BasicText("$word… $timeStr", style = ToolLogStyle.copy(fontSize = 9.sp))
     }
 }
 
@@ -793,6 +798,6 @@ private fun UploadRow(
             icon()
         }
         Spacer(Modifier.width(8.dp))
-        BasicText(label, style = AgentText.Body.copy(fontSize = 11.7.sp))
+        BasicText(label, style = AgentText.Body.copy(fontSize = 10.5.sp))
     }
 }

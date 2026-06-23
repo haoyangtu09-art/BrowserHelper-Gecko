@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.mozilla.reference.browser.agent.core.TaskGroup
 import org.mozilla.reference.browser.agent.core.TaskItem
 import org.mozilla.reference.browser.agent.core.TaskStatus
@@ -70,16 +71,27 @@ private fun GroupList(group: TaskGroup) {
     val terminal = group.tasks.filter {
         it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED
     }
+    // Never show more than MAX_VISIBLE live (active+pending) rows: the rest fold into a count line
+    // so a big plan can't stretch the transcript. Active rows always show; pending fills the rest.
+    val budget = (MAX_VISIBLE - active.size).coerceAtLeast(0)
+    val visiblePending = pending.take(budget)
+    val hiddenPending = pending.size - visiblePending.size
     Column(Modifier.fillMaxWidth()) {
         active.forEach { TaskLine(it) }
-        pending.forEach { TaskLine(it) }
+        visiblePending.forEach { TaskLine(it) }
+        if (hiddenPending > 0) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+                Spacer(Modifier.width(MARKER_WIDTH))
+                BasicText("… +$hiddenPending 待办", style = TaskMutedStyle)
+            }
+        }
         // Finished tasks collapse: show only the most recent one, fold the rest into a count
         // line so a long run of completed steps doesn't keep stretching the conversation.
         terminal.lastOrNull()?.let { TaskLine(it) }
         if (terminal.size > 1) {
-            Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
                 Spacer(Modifier.width(MARKER_WIDTH))
-                BasicText("… +${terminal.size - 1} 已完成", style = AgentText.Label)
+                BasicText("… +${terminal.size - 1} 已完成", style = TaskMutedStyle)
             }
         }
     }
@@ -103,20 +115,21 @@ private fun TaskLine(task: TaskItem) {
         TaskStatus.CANCELLED -> "–"
         else -> ""
     }
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), verticalAlignment = Alignment.Top) {
         Box(Modifier.width(MARKER_WIDTH)) {
             when (task.status) {
                 TaskStatus.PENDING ->
-                    Box(Modifier.padding(top = 3.dp).size(SQUARE).border(1.5.dp, AgentColors.TextSecondary))
+                    Box(Modifier.padding(top = 2.dp).size(SQUARE).border(1.dp, AgentColors.TextSecondary))
                 TaskStatus.ACTIVE ->
-                    Box(Modifier.padding(top = 3.dp).size(SQUARE).background(AgentColors.TextPrimary))
+                    Box(Modifier.padding(top = 2.dp).size(SQUARE).background(AgentColors.TextPrimary))
                 else ->
-                    BasicText(terminalMarker, style = AgentText.Body.copy(color = color))
+                    BasicText(terminalMarker, style = TaskTitleStyle.copy(color = color))
             }
         }
         BasicText(
-            task.title,
-            style = AgentText.Body.copy(
+            // Render light markdown in the title (bold / code / etc.) instead of showing raw `**`.
+            inlineMarkdown(task.title),
+            style = TaskTitleStyle.copy(
                 color = color,
                 fontWeight = if (task.status == TaskStatus.ACTIVE) FontWeight.Bold else FontWeight.Normal,
                 textDecoration = if (terminal) TextDecoration.LineThrough else null,
@@ -125,5 +138,10 @@ private fun TaskLine(task: TaskItem) {
     }
 }
 
-private val MARKER_WIDTH = 18.dp
-private val SQUARE = 10.dp
+// Task titles run at half the normal body size (the list is a compact glance, not prose), and the
+// fold/count lines share a muted small style.
+private val TaskTitleStyle = AgentText.Body.copy(fontSize = 6.5.sp)
+private val TaskMutedStyle = AgentText.Label.copy(fontSize = 6.5.sp)
+private val MARKER_WIDTH = 13.dp
+private val SQUARE = 7.dp
+private const val MAX_VISIBLE = 5

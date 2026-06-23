@@ -106,6 +106,25 @@ private val markdownParser: Parser by lazy {
         .build()
 }
 
+/**
+ * Renders [text] as a single inline-markdown [AnnotatedString] (bold / italic / strikethrough /
+ * inline code / links), flattening block structure onto one line. For short one-line labels such
+ * as task-tracker titles that may carry light markdown but must keep their own base text style.
+ */
+fun inlineMarkdown(text: String): AnnotatedString {
+    val doc = markdownParser.parse(unescapeMarkdown(text))
+    return buildAnnotatedString {
+        var block = doc.firstChild
+        var first = true
+        while (block != null) {
+            if (!first) append(' ')
+            appendInlineChildren(block)
+            first = false
+            block = block.next
+        }
+    }
+}
+
 // ── block level ──────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -250,7 +269,7 @@ private fun MdCodeBlock(code: String, info: String) {
                     clipboard.setPrimaryClip(ClipData.newPlainText("code", code))
                 },
                 contentAlignment = Alignment.Center,
-            ) { CopyIcon(size = 14.dp, color = MdCodeLangFg) }
+            ) { CopyIcon(size = 14.dp, color = MdCodeLangFg, bg = MdCodeHeaderBg) }
         }
         Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp)) {
             BasicText(
@@ -318,20 +337,20 @@ private fun headingStyle(level: Int) = when (level) {
 
 // Chat prose runs ~10% smaller than the global Body token (the overlay is narrow and the
 // transcript reads as dense text); headings scale with it. The code block keeps its own size.
-private val MdBody = AgentText.Body.copy(fontSize = 11.7.sp)
-private val H1Style = AgentText.Body.copy(fontSize = 18.sp, fontWeight = FontWeight.Bold)
-private val H2Style = AgentText.Body.copy(fontSize = 15.3.sp, fontWeight = FontWeight.Bold)
-private val H3Style = AgentText.Body.copy(fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
-private val H4Style = AgentText.Body.copy(fontSize = 11.7.sp, fontWeight = FontWeight.Bold)
+private val MdBody = AgentText.Body.copy(fontSize = 10.5.sp)
+private val H1Style = AgentText.Body.copy(fontSize = 16.2.sp, fontWeight = FontWeight.Bold)
+private val H2Style = AgentText.Body.copy(fontSize = 13.8.sp, fontWeight = FontWeight.Bold)
+private val H3Style = AgentText.Body.copy(fontSize = 12.2.sp, fontWeight = FontWeight.Bold)
+private val H4Style = AgentText.Body.copy(fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
 private val MonoBody = MdBody.copy(fontFamily = FontFamily.Monospace)
 // Code block body: a touch smaller so ~35–40 mono chars fit per line in the overlay width.
-private val MdCodeStyle = AgentText.Body.copy(fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+private val MdCodeStyle = AgentText.Body.copy(fontSize = 10.4.sp, fontFamily = FontFamily.Monospace)
 
-// Dark ChatGPT-style fenced code block; the chat surface itself stays light.
-private val MdCodeBg = Color(0xFF1E1E1E)
-private val MdCodeHeaderBg = Color(0xFF2A2A2A)
-private val MdCodeFg = Color(0xFFE6E6E6)
-private val MdCodeLangFg = Color(0xFFB0B0B0)
+// Light-gray fenced code block (gray, not black) with dark text, matching the tool-output box.
+private val MdCodeBg = Color(0xFFEDEEF0)
+private val MdCodeHeaderBg = Color(0xFFE2E4E8)
+private val MdCodeFg = Color(0xFF24292F)
+private val MdCodeLangFg = Color(0xFF666666)
 // Inline `code`: subtle gray pill background with the normal dark text.
 private val MdInlineCodeBg = Color(0x14000000)
 private val MdInlineCodeFg = Color(0xFF24292F)

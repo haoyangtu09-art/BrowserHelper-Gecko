@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -60,6 +61,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.mozilla.reference.browser.agent.core.AgentApprovalDecision
 import org.mozilla.reference.browser.agent.core.AgentPermissionTier
@@ -288,10 +290,27 @@ private fun PlanCard(state: PanelState) {
             BasicText("计划模式", style = AgentText.Title)
         }
         Spacer(Modifier.height(8.dp))
-        BasicText(
-            state.planText.ifBlank { "（暂无计划内容）" },
-            style = AgentText.Body,
-        )
+        // A long plan must not push the approve/edit buttons off-screen: collapse it to a few
+        // lines with a 展开 toggle; expanded, it scrolls inside a capped box so the buttons below
+        // always stay reachable.
+        var planExpanded by remember(state.planText) { mutableStateOf(false) }
+        val planBody = state.planText.ifBlank { "（暂无计划内容）" }
+        val longPlan = planBody.length > 160 || planBody.count { it == '\n' } >= 6
+        if (planExpanded) {
+            Box(Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                BasicText(planBody, style = AgentText.Body)
+            }
+        } else {
+            BasicText(planBody, style = AgentText.Body, maxLines = 6, overflow = TextOverflow.Ellipsis)
+        }
+        if (longPlan) {
+            Spacer(Modifier.height(4.dp))
+            BasicText(
+                if (planExpanded) "收起" else "展开",
+                style = AgentText.Label.copy(color = AgentColors.TextPrimary),
+                modifier = Modifier.noRippleClickable { planExpanded = !planExpanded },
+            )
+        }
         Spacer(Modifier.height(12.dp))
         // Black/white buttons only (no blue accent). "批准并开始" also converts the plan into the
         // working task list (see PanelState.approvePlan), so the standalone convert button is gone.

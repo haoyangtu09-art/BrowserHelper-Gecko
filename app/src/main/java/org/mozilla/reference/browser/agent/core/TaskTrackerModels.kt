@@ -145,6 +145,12 @@ data class TaskTrackerState(
 
     val allTasks: List<TaskItem> get() = groups.flatMap { it.tasks }
 
+    /** True when the tracker has tasks and every one of them has reached a terminal state — i.e.
+     *  the plan is finished. The next user turn clears a finished tracker (see PanelState.send). */
+    val allComplete: Boolean get() = !isEmpty && allTasks.all {
+        it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED
+    }
+
     fun task(id: String): TaskItem? {
         for (g in groups) for (t in g.tasks) if (t.id == id) return t
         return null

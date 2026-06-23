@@ -43,6 +43,40 @@ private fun capToolResult(text: String): String {
 }
 
 /**
+ * Both OpenAI and Anthropic require every assistant `tool_calls` entry to be answered by a
+ * matching tool-result message. A turn stopped mid-tool-call (stop button, chat switch, app kill)
+ * can persist an assistant-with-tool_calls whose results never landed, which then poisons the
+ * NEXT request: "An assistant message with 'tool_calls' must be followed by tool messages
+ * responding to each 'tool_call_id'." This drops any tool_call that has no response, drops the
+ * assistant message if filtering empties it, and drops orphan tool results.
+ */
+private fun sanitizeConvo(convo: List<AgentMessage>): List<AgentMessage> {
+    val respondedIds = convo.asSequence()
+        .filter { it.role == Role.Tool }
+        .mapNotNull { it.toolCallId?.takeIf { id -> id.isNotEmpty() } }
+        .toHashSet()
+    val firstPass = ArrayList<AgentMessage>(convo.size)
+    for (msg in convo) {
+        if (msg.role == Role.Assistant && msg.toolCalls.isNotEmpty()) {
+            val kept = msg.toolCalls.filter { respondedIds.contains(it.id) }
+            when {
+                kept.size == msg.toolCalls.size -> firstPass.add(msg)
+                msg.content.isNotBlank() || kept.isNotEmpty() -> firstPass.add(msg.copy(toolCalls = kept))
+                // else: an assistant turn that was nothing but unanswered tool calls — drop it.
+            }
+        } else {
+            firstPass.add(msg)
+        }
+    }
+    // Drop tool results whose id no longer maps to a kept assistant tool_call.
+    val keptCallIds = firstPass.asSequence()
+        .flatMap { it.toolCalls.asSequence() }
+        .map { it.id }
+        .toHashSet()
+    return firstPass.filter { it.role != Role.Tool || keptCallIds.contains(it.toolCallId) }
+}
+
+/**
  * Orchestrates one model turn over [PanelState]. The UI calls [start] after the user message
  * is already appended to the structured transcript ([PanelState.convo]); the engine prepends
  * the system prompt, calls the backend, and runs the tool loop, rewriting a single assistant
@@ -101,7 +135,7 @@ class AgentEngine(context: Context) {
                     loops += 1
                     val messages = ArrayList<AgentMessage>(convo.size + 2)
                     messages.add(AgentMessage(Role.System, systemPrompt(state)))
-                    messages.addAll(convo)
+                    messages.addAll(sanitizeConvo(convo))
                     // Keep volatile runtime facts at the end of the context so stale history
                     // cannot convince the model it is still on an older permission tier.
                     messages.add(AgentMessage(Role.System, runtimeStatePrompt(state, toolSpecs.map { it.name })))
