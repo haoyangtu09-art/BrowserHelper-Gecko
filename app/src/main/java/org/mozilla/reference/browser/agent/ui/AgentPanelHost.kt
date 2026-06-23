@@ -346,7 +346,7 @@ private fun DrawerSheet(state: PanelState, onClose: () -> Unit, onSettings: () -
         Column(
             modifier = Modifier
                 .fillMaxHeight()
-                .fillMaxWidth(0.78f)
+                .fillMaxWidth(0.62f)
                 .background(AgentColors.Panel)
                 .padding(16.dp),
         ) {

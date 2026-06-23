@@ -57,11 +57,15 @@ import org.mozilla.reference.browser.agent.ui.theme.AgentText
  */
 
 private const val HL_BASE = "file:///android_asset/agent/highlight/"
-private val WinBg = Color(0xFF0D1117)
-private val WinHeaderBg = Color(0xFF161B22)
-private val WinFg = Color(0xFFB0B0B0)
+// Gray code surface (matches the plain markdown code box) instead of the old near-black window.
+private val WinBg = Color(0xFFEDEEF0)
+private val WinHeaderBg = Color(0xFFE2E4E8)
+private val WinFg = Color(0xFF57606A)
 private val ToggleTrack = Color(0xFF555555)
 private val ToggleKnob = Color(0xFFF2F2F2)
+// Toggle sits on its own dark track, so its track-side glyph stays light regardless of the
+// now-light header foreground.
+private val ToggleFg = Color(0xFFE8E8E8)
 
 private enum class CodeMode { CODE, RENDER }
 
@@ -145,7 +149,7 @@ private fun CodeWebView(html: String, baseUrl: String?, modifier: Modifier) {
                 settings.allowFileAccess = true
                 settings.allowContentAccess = true
                 isHorizontalScrollBarEnabled = false
-                setBackgroundColor(0xFF0D1117.toInt())
+                setBackgroundColor(0xFFEDEEF0.toInt())
                 // Let the WebView keep its own gestures so internal scroll works inside the
                 // vertically-scrolling transcript.
                 setOnTouchListener { v, _ ->
@@ -170,16 +174,16 @@ private fun escapeHtml(s: String): String =
 
 private fun highlightHtml(code: String, lang: String): String {
     val cls = when (lang) { "js" -> "language-javascript"; "markdown" -> "language-markdown"; else -> "language-html" }
-    // Style plain `pre/code` (not just `.hljs`) so the dark bg + small wrapped font hold even if
+    // Style plain `pre/code` (not just `.hljs`) so the gray bg + small wrapped font hold even if
     // highlight.js fails to load. `white-space:pre-wrap` + `overflow-x:hidden` override the
-    // theme's own `overflow-x:auto`, so long lines wrap instead of scrolling sideways. At ~12px
-    // monospace the device-width window fits roughly 35–40 ASCII chars per line.
+    // theme's own `overflow-x:auto`, so long lines wrap instead of scrolling sideways. Source font
+    // is 10px (12px shrunk by 1/6); the light github theme keeps syntax colors readable on gray.
     return "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
-        "<link rel=\"stylesheet\" href=\"github-dark.min.css\">" +
-        "<style>html,body{margin:0;padding:0;background:#0d1117;}" +
-        "pre,pre code.hljs{margin:0;overflow-x:hidden;}" +
-        "pre code{display:block;background:#0d1117;color:#c9d1d9;font-family:monospace;" +
-        "font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;padding:10px 12px;}" +
+        "<link rel=\"stylesheet\" href=\"github.min.css\">" +
+        "<style>html,body{margin:0;padding:0;background:#edeef0;}" +
+        "pre,pre code.hljs{margin:0;overflow-x:hidden;background:#edeef0;}" +
+        "pre code{display:block;background:#edeef0;color:#24292e;font-family:monospace;" +
+        "font-size:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;padding:10px 12px;}" +
         "</style>" +
         "</head><body><pre><code class=\"" + cls + "\">" + escapeHtml(code) + "</code></pre>" +
         "<script src=\"highlight.min.js\"></script><script>hljs.highlightAll();</script></body></html>"
@@ -212,9 +216,9 @@ private fun CodeRenderToggle(render: Boolean, onToggle: () -> Unit) {
     ) {
         Box(Modifier.padding(start = knobX).size(knob, h).padding(2.dp).clip(CircleShape).background(ToggleKnob))
         Row(Modifier.fillMaxWidth().height(h).padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-            TerminalIcon(size = 13.dp, color = if (render) WinFg else Color(0xFF222222))
+            TerminalIcon(size = 13.dp, color = if (render) ToggleFg else Color(0xFF222222))
             Spacer(Modifier.weight(1f))
-            PlayIcon(size = 11.dp, color = if (render) Color(0xFF222222) else WinFg)
+            PlayIcon(size = 11.dp, color = if (render) Color(0xFF222222) else ToggleFg)
         }
     }
 }

@@ -140,8 +140,8 @@ private fun TaskLine(task: TaskItem) {
 
 // Task titles run at half the normal body size (the list is a compact glance, not prose), and the
 // fold/count lines share a muted small style.
-private val TaskTitleStyle = AgentText.Body.copy(fontSize = 6.5.sp)
-private val TaskMutedStyle = AgentText.Label.copy(fontSize = 6.5.sp)
-private val MARKER_WIDTH = 13.dp
-private val SQUARE = 7.dp
+private val TaskTitleStyle = AgentText.Body.copy(fontSize = 8.7.sp)
+private val TaskMutedStyle = AgentText.Label.copy(fontSize = 8.7.sp)
+private val MARKER_WIDTH = 17.dp
+private val SQUARE = 9.dp
 private const val MAX_VISIBLE = 5
