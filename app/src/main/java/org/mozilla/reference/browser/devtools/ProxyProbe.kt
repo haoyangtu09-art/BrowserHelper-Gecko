@@ -298,10 +298,13 @@ object ProxyProbe {
         interceptCookie = data.optBoolean("interceptCookie", false)
         val rulesJson = data.optJSONArray("rules")
         interceptRulesList = parseInterceptRules(rulesJson)
-        interceptEnabled = data.optBoolean(
-            "enabled",
-            reqInterceptAll || respInterceptAll || interceptRulesList.any { it.action == "intercept" || it.interceptResp },
-        )
+        // Fail-SAFE: interception turns on ONLY when a caller passes enabled=true explicitly.
+        // The previous fail-OPEN default (reqAll||respAll||any-intercept-rule) let any caller that
+        // merely carried scope flags or a leftover rule but omitted `enabled` silently arm
+        // interception, so responses (e.g. ChatGPT SSE-adjacent bounded bodies) got paused even
+        // though the user never opened the intercept switch. The panel master toggle always sends
+        // an explicit `enabled`, so its behavior is unchanged; only implicit-enable paths are cut.
+        interceptEnabled = data.optBoolean("enabled", false)
         if (!interceptEnabled) releaseAllIntercepts(JSONObject().put("decision", "continue"))
         saveInterceptConfig(interceptEnabled, reqInterceptAll, respInterceptAll, rulesJson)
         notifyInterceptState()

@@ -583,16 +583,31 @@ object BrowserBridge {
                 }
                 // ── Intercept ─────────────────────────────────────────────────
                 "intercept_set" -> {
+                    val reqAll = args.optBoolean("reqAll", false)
+                    val respAll = args.optBoolean("respAll", false)
+                    val rulesArr = args.optJSONArray("rules") ?: JSONArray()
+                    // setInterceptRules now fail-safes `enabled` to false, so the bridge must
+                    // compute and pass it explicitly or interception would never arm.
+                    var hasInterceptRule = false
+                    for (i in 0 until rulesArr.length()) {
+                        val o = rulesArr.optJSONObject(i) ?: continue
+                        if (o.optString("action") == "intercept" || o.optBoolean("interceptResp", false)) {
+                            hasInterceptRule = true
+                            break
+                        }
+                    }
+                    val enabled = reqAll || respAll || hasInterceptRule
                     ProxyProbe.setInterceptRules(
                         JSONObject()
-                            .put("reqAll", args.optBoolean("reqAll", false))
-                            .put("respAll", args.optBoolean("respAll", false))
+                            .put("enabled", enabled)
+                            .put("reqAll", reqAll)
+                            .put("respAll", respAll)
                             .put("interceptTelemetry", false)
                             .put("interceptNoise", false)
                             .put("interceptCookie", false)
-                            .put("rules", args.optJSONArray("rules") ?: JSONArray()),
+                            .put("rules", rulesArr),
                     )
-                    toolText(id, "intercept rules set (reqAll=${args.optBoolean("reqAll")}, respAll=${args.optBoolean("respAll")})")
+                    toolText(id, "intercept rules set (enabled=$enabled, reqAll=$reqAll, respAll=$respAll)")
                 }
                 "intercept_pending" -> toolText(id, ProxyProbe.pendingInterceptList().toString())
                 "intercept_resolve" -> {
