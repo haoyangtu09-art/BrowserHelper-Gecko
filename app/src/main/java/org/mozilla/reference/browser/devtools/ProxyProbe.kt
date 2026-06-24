@@ -5,10 +5,7 @@
 package org.mozilla.reference.browser.devtools
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
-import android.widget.Toast
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoPreferenceController
 import java.io.ByteArrayOutputStream
@@ -32,14 +29,11 @@ import javax.net.ssl.SSLSocketFactory
  * It is a blind tunnel: HTTPS CONNECTs are relayed byte-for-byte (TLS is NOT
  * terminated), so browsing keeps working while it is on. It does not yet prove
  * CA trust (that needs TLS termination, the next step). Default OFF; flip via
- * the toolbar menu. On the first observed CONNECT it shows a Toast so routing
- * can be confirmed on-device.
+ * the toolbar menu. Spike progress is written to logcat (tag BHProxySpike).
  */
 object ProxyProbe {
     private const val TAG = "BHProxySpike"
     private const val LOCALHOST = "127.0.0.1"
-
-    private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var server: ServerSocket? = null
     @Volatile private var running = false
@@ -1253,10 +1247,9 @@ object ProxyProbe {
         }
     }
 
+    // Debug spike messages now log only — the on-screen Toasts were removed.
     private fun toast(msg: String) {
         Log.i(TAG, msg)
-        val ctx = appContext ?: return
-        main.post { Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show() }
     }
 
     private fun start() {
