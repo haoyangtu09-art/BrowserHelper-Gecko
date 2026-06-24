@@ -55,6 +55,11 @@
             android:key="@string/pref_key_override_amo_collection"
             android:title="@string/preferences_customize_amo_collection"/>
 
+        <androidx.preference.Preference
+            android:key="@string/pref_key_export_ca"
+            android:title="@string/preferences_export_ca"
+            android:summary="@string/preferences_export_ca_summary"/>
+
     </PreferenceCategory>
 
     <PreferenceCategory

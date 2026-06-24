@@ -24,6 +24,7 @@ import mozilla.components.service.fxa.manager.SCOPE_SYNC
 import mozilla.components.support.ktx.android.view.showKeyboard
 import org.mozilla.reference.browser.R
 import org.mozilla.reference.browser.R.string.pref_key_about_page
+import org.mozilla.reference.browser.R.string.pref_key_export_ca
 import org.mozilla.reference.browser.R.string.pref_key_firefox_account
 import org.mozilla.reference.browser.R.string.pref_key_make_default_browser
 import org.mozilla.reference.browser.R.string.pref_key_override_amo_collection
@@ -32,6 +33,7 @@ import org.mozilla.reference.browser.R.string.pref_key_privacy
 import org.mozilla.reference.browser.R.string.pref_key_remote_debugging
 import org.mozilla.reference.browser.R.string.pref_key_sign_in
 import org.mozilla.reference.browser.autofill.AutofillPreference
+import org.mozilla.reference.browser.devtools.MitmCa
 import org.mozilla.reference.browser.ext.getPreferenceKey
 import org.mozilla.reference.browser.ext.requireComponents
 import org.mozilla.reference.browser.sync.BrowserFxAEntryPoint
@@ -69,6 +71,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         val aboutPageKey = requireContext().getPreferenceKey(pref_key_about_page)
         val privacyKey = requireContext().getPreferenceKey(pref_key_privacy)
         val customAddonsKey = requireContext().getPreferenceKey(pref_key_override_amo_collection)
+        val exportCaKey = requireContext().getPreferenceKey(pref_key_export_ca)
         val autofillPreferenceKey = requireContext().getPreferenceKey(R.string.pref_key_autofill)
 
         val preferenceSignIn = findPreference<Preference>(signInKey)
@@ -79,6 +82,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         val preferenceAboutPage = findPreference<Preference>(aboutPageKey)
         val preferencePrivacy = findPreference<Preference>(privacyKey)
         val preferenceCustomAddons = findPreference<Preference>(customAddonsKey)
+        val preferenceExportCa = findPreference<Preference>(exportCaKey)
         val preferenceAutofill = findPreference<AutofillPreference>(autofillPreferenceKey)
 
         val accountManager = requireComponents.backgroundServices.accountManager
@@ -107,7 +111,21 @@ class SettingsFragment : PreferenceFragmentCompat() {
         preferenceAboutPage?.onPreferenceClickListener = getAboutPageListener()
         preferencePrivacy?.onPreferenceClickListener = getClickListenerForPrivacy()
         preferenceCustomAddons?.onPreferenceClickListener = getClickListenerForCustomAddons()
+        preferenceExportCa?.onPreferenceClickListener = getClickListenerForExportCa()
     }
+
+    private fun getClickListenerForExportCa(): OnPreferenceClickListener =
+        OnPreferenceClickListener {
+            val context = requireContext()
+            val message = try {
+                val path = MitmCa.exportRootCert(context)
+                "根证书已存到 $path\n请到 设置→安全→加密与凭据→安装证书→CA证书 选择它"
+            } catch (e: Exception) {
+                "导出失败：${e.message}"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            true
+        }
 
     private fun getClickListenerForMakeDefaultBrowser(): OnPreferenceClickListener =
         OnPreferenceClickListener {

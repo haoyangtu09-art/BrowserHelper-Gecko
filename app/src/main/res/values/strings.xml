@@ -107,6 +107,10 @@
     <!-- Preference category for developer tools -->
     <string name="developer_tools_category">开发者工具</string>
 
+    <!-- Preference to export the MITM proxy root CA certificate -->
+    <string name="preferences_export_ca">导出抓包根证书</string>
+    <string name="preferences_export_ca_summary">导出后到 设置→安全→加密与凭据→安装证书→CA证书 安装，用于解密抓包</string>
+
     <!-- Preference for settings related turn on telemetry data-->
     <string name="use_telemetry">使用遥测数据</string>
 
