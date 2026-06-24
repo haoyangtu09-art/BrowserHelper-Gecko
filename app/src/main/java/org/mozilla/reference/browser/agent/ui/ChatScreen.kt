@@ -447,6 +447,8 @@ private fun ToolCardView(tool: ToolCard) {
 private val ToolLogStyle = AgentText.Label.copy(
     color = AgentColors.TextSecondary,
     fontFamily = FontFamily.Monospace,
+    fontSize = 8.4.sp,
+    lineHeight = 11.sp,
 )
 
 /** Small black "●" bullet before a tool header / working bar; pulses while still running. */
@@ -536,12 +538,17 @@ private fun OutputBlock(text: String, capped: Boolean) {
     val overflow = capped && lines.size > CAP_LINES
     val shown = if (overflow && !expanded) lines.take(CAP_LINES).joinToString("\n") else text
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(CodeBg)
-            .padding(horizontal = 9.dp, vertical = 7.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(CodeBg)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
         BasicText(
             shown,
-            style = AgentText.Label.copy(color = AgentColors.TextSecondary, fontFamily = FontFamily.Monospace),
+            style = AgentText.Label.copy(
+                color = AgentColors.TextSecondary,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 8.4.sp,
+                lineHeight = 11.sp,
+            ),
             modifier = Modifier.fillMaxWidth(),
         )
         if (overflow && !expanded) {
@@ -574,7 +581,7 @@ private fun OutputBlock(text: String, capped: Boolean) {
 }
 
 /** Max lines a capped tool-output block shows before folding the rest behind "… +N 行". */
-private const val CAP_LINES = 6
+private const val CAP_LINES = 5
 
 /**
  * A dark code frame rendering a unified-style diff: lines starting with `+` get a green tint
@@ -658,8 +665,6 @@ private fun WorkingBar(state: PanelState, modifier: Modifier = Modifier) {
             .padding(horizontal = 9.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ToolBullet(running = true)
-        Spacer(Modifier.width(5.dp))
         // Compact: just the cycling verb + elapsed clock, so the pill stays ~1/3 of the input width.
         BasicText("$word… $timeStr", style = ToolLogStyle.copy(fontSize = 9.sp))
     }

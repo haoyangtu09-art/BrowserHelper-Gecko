@@ -3255,7 +3255,7 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         required("id")
     }),
     tool("page_exec", AgentPermissionTier.S3, "在 page world 执行任意 JavaScript，可调用页面和浏览器 API。禁止 window.open / window.close（会卡死标签页导致白屏，已被静态拦截）——开关标签页请改用 tab_open / tab_close。", schema {
-        prop("code", str("JS 代码"))
+        prop("code", str("JS 代码。采用完成值语义（像 devtools 控制台）：末尾表达式的值会自动作为返回值，例如直接写 document.title 即可拿到标题，无需显式 return；显式 return 也支持。返回值在结果的 value 字段里。"))
         prop("timeoutMs", num("超时 ms"))
         required("code")
     }),

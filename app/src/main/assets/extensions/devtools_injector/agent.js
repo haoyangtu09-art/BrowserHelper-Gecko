@@ -63,8 +63,19 @@ function _bhRunInPage(code) {
 // (extension CSP without 'unsafe-eval', or a runtime throw — caller falls back).
 function _bhSandboxEval(code) {
     try {
-        // eslint-disable-next-line no-eval
-        var r = eval('(function(){' + code + '\n})()');
+        // Completion-value semantics: a bare trailing expression returns its value (devtools
+        // console style), so `document.title` works without an explicit `return`. A top-level
+        // `return` is a SyntaxError under direct eval, so fall back to a function-body wrapper.
+        // That SyntaxError is parse-time (nothing ran), so the retry can't double-execute.
+        var r;
+        try {
+            // eslint-disable-next-line no-eval
+            r = eval(code);
+        } catch (e) {
+            if (!(e instanceof SyntaxError)) return null;
+            // eslint-disable-next-line no-eval
+            r = eval('(function(){' + code + '\n})()');
+        }
         var s;
         try { s = JSON.stringify(r); } catch (_) { s = null; }
         if (s === undefined || s === null) s = '"' + String(r) + '"';
@@ -80,8 +91,14 @@ function _bhEvalInPage(code, timeoutMs) {
     try {
         var pw = window.wrappedJSObject;
         if (pw && pw.Function) {
-            var fn = new pw.Function(code);
-            var r = fn.call(pw);
+            // Page-world eval for completion-value semantics (a bare trailing expression returns
+            // its value, like the console), keeping an explicit top-level `return` working via the
+            // SyntaxError fallback. eval and Function share the page's unsafe-eval CSP, so if the
+            // Function constructor is allowed here, eval is too.
+            var fn = new pw.Function('__bhSrc',
+                'try{return eval(__bhSrc);}catch(__bhE){' +
+                'if(__bhE instanceof SyntaxError){return (new Function(__bhSrc))();}throw __bhE;}');
+            var r = fn.call(pw, code);
             var s;
             try { s = pw.JSON ? pw.JSON.stringify(r) : JSON.stringify(r); } catch (_) { s = null; }
             if (s === undefined || s === null) s = '"' + String(r) + '"';
