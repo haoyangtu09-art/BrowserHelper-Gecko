@@ -358,11 +358,14 @@ class AgentEngine(context: Context) {
     /** Agent-standard English display verb for a tool: gerund (running) + past tense (done). */
     private fun toolVerb(name: String): Pair<String, String> = when (name) {
         "page_index", "page_query", "container_read", "private_file_read", "container_head",
-        "network_get", "proxy_status",
+        "network_get", "proxy_status", "page_get", "page_info", "browser_info",
+        "storage_get", "page_cookie_get",
         -> "Reading" to "Read"
-        "container_list", "private_file_list", "network_list" -> "Listing" to "Listed"
+        "container_list", "private_file_list", "network_list", "storage_keys" -> "Listing" to "Listed"
         "page_search", "web_search", "container_grep" -> "Searching" to "Searched"
         "page_navigate", "page_reload", "page_back", "page_forward" -> "Navigating" to "Navigated"
+        "tab_open" -> "Opening" to "Opened"
+        "tab_close" -> "Closing" to "Closed"
         "page_exec", "page_fetch", "browser_request" -> "Running" to "Ran"
         else -> "Running" to "Ran"
     }
@@ -393,10 +396,15 @@ class AgentEngine(context: Context) {
             -> args.optString("path")
             "page_search", "web_search" -> args.optString("query")
             "page_query", "page_click", "page_set_text", "page_set_html", "page_set_attr",
-            "page_wait_for_element", "dom_highlight_element",
+            "page_wait_for_element", "dom_highlight_element", "page_get", "page_type",
+            "page_select_option", "page_set_checked", "page_submit", "page_focus",
+            "page_press_key", "page_dispatch_event",
             -> args.optString("selector")
+            "storage_get", "storage_set", "storage_remove" -> args.optString("key")
+            "page_cookie_get", "page_cookie_set" -> args.optString("name")
             "network_list" -> args.optString("urlContains")
-            "page_navigate", "browser_request", "page_fetch" -> args.optString("url")
+            "page_navigate", "browser_request", "page_fetch", "tab_open" -> args.optString("url")
+            "tab_close" -> args.optString("id")
             else -> ""
         }
         val one = v.replace('\n', ' ').replace('\r', ' ').trim()
@@ -883,14 +891,22 @@ class AgentEngine(context: Context) {
 
             # 多标签（tab_*）
             - 涉及具体页面操作前若不确定当前页是哪个，先 tab_current；要在多个 tab 间挑一个，先 tab_list 看 id/url/title/selected，再 tab_switch 切过去。切换后再调 page_* 才作用在新 tab。
+            - 新开标签页用 tab_open(url?, select?, private?)，关标签页用 tab_close(id)。绝不要用 page_exec 调 window.open / window.close——它们会留下卡死的 about:blank 标签并导致整个浏览器白屏，已被静态拦截。
 
             # 页面交互（优先用专用工具，少用 page_exec）
             - 跳转/刷新/前进/后退当前标签页用 page_navigate / page_reload / page_back / page_forward；它们走浏览器原生导航，不依赖页面 JS/CSP。
             - 点元素用 page_click(selector)，输入用 page_type(selector,text)，等元素出现用 page_wait_for_element(selector,timeoutMs)。它们走原生事件，比自己拼 JS 丢给 page_exec 更稳，也不需要 S3。
+            - 表单/控件还有专用工具：page_select_option(选 <select> 项)、page_set_checked(勾选 checkbox/radio)、page_submit(提交表单)、page_focus(聚焦)、page_press_key(派发键盘事件)、page_dispatch_event(派发任意 DOM 事件)。读元素属性用 page_get(selector,prop)。这些都走原生 DOM 操作、抗 CSP、不需 S3，优先于 page_exec。
             - selector 工具会尽量穿透 open shadow DOM，并在操作前临时绕过常见强 CSS（pointer-events/visibility/opacity/scroll-margin）。遇到强 CSS 页面，先用 page_query 看 visible/rect，再 click/type/wait。
-            - page_exec 是兜底：只在没有专用工具能表达的场景（复杂计算 / 多步 DOM 操作 / 读自定义属性）才用，而且要 S3。
+            - page_exec 仍可执行任意 JS（兜底：复杂计算 / 多步 DOM / 没有专用工具能表达的场景），要 S3；但禁止 window.open / window.close（已拦截，改用 tab_open / tab_close）。
             - page_scroll 控制滚动；动态加载的列表往往要先滚再 wait_for_element。
             - 仅展示/调试用途（描边、高亮、临时改样式）用 dom_highlight_element / dom_inject_css，不要拼 JS。
+
+            # 页面数据 / 环境（专用只读+写工具，不必拼 page_exec）
+            - 页面元信息用 page_info(url/title/readyState/滚动/视口)，浏览器/设备环境用 browser_info(userAgent/语言/屏幕等)，都只读、抗 CSP。
+            - localStorage / sessionStorage 用 storage_get / storage_keys 读，storage_set / storage_remove / storage_clear 写（area=local|session）。
+            - cookie 用 page_cookie_get 读、page_cookie_set 写（只能读写非 HttpOnly）。
+            - 这些工具直接在内容脚本世界读写页面源的存储/cookie，比 page_exec 更稳、读类不需审批。
 
             # 读网页源码（务必节制上下文，别拉整页）
             - 绝不要用 page_exec 返回 document.documentElement.outerHTML / innerHTML 这种整页源码——整页几十~几百 KB，会直接撑爆上下文，工具结果超长也会被自动截断。

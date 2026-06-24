@@ -370,6 +370,31 @@ function _bhSummarizeElement(el) {
     };
 }
 
+// ── lifecycle guardrail for page_exec ────────────────────────────────────────
+// window.open / window.close (and self/top/parent/globalThis variants, dot OR
+// bracket member access) leave a wedged about:blank tab / broken engine session
+// that white-screens the whole browser (see CLAUDE.md §6). page_exec rejects them
+// and steers to the dedicated tab_open / tab_close tools. Best-effort static check:
+// it stops accidental misuse, not a determined obfuscator (fine — goal is safety,
+// not sandboxing a hostile model). Custom objects' .open()/.close() are NOT matched.
+var _bhLifecycleDotRe = /(?:^|[^.\w$])(?:window|self|top|parent|globalThis)\s*\.\s*(?:open|close)\s*\(/;
+var _bhLifecycleIdxRe = /(?:^|[^.\w$])(?:window|self|top|parent|globalThis)\s*\[\s*(['"])(?:open|close)\1\s*\]\s*\(/;
+function _bhBlockedLifecycleApi(code) {
+    try {
+        var s = String(code || '');
+        return _bhLifecycleDotRe.test(s) || _bhLifecycleIdxRe.test(s);
+    } catch (_) {
+        return false;
+    }
+}
+
+// localStorage/sessionStorage of the PAGE origin. Gecko content scripts share the
+// page's DOM storage, so this reads/writes the real page store from the isolated
+// world — CSP never governs storage access, so this is inherently CSP-immune.
+function _bhStore(area) {
+    return (String(area || 'local').toLowerCase() === 'session') ? window.sessionStorage : window.localStorage;
+}
+
 // ── page-world console capture (best-effort) ─────────────────────────────────
 // console.list reads page-world console output. The hook MUST live in page world
 // (the content-script console is a separate object), so we inject a small idempotent
@@ -989,12 +1014,342 @@ function bhHandleAgentCmd(msg) {
         });
     }
 
+    // ── page_get (S1, read-only) ────────────────────────────────────────────
+    // Read a single property/text/value/attribute off a matched element. No JS eval.
+    if (cmd === 'getProp') {
+        var gpSel = String(args.selector || '');
+        if (!gpSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var gpEl = _bhQueryOne(gpSel);
+            if (!gpEl) return Promise.resolve({ error: 'no elements matched selector', selector: gpSel });
+            var gpWhat = String(args.prop || 'text').toLowerCase();
+            var gpVal;
+            if (gpWhat === 'text') gpVal = gpEl.textContent || '';
+            else if (gpWhat === 'value') gpVal = ('value' in gpEl) ? gpEl.value : '';
+            else if (gpWhat === 'html') gpVal = gpEl.innerHTML || '';
+            else if (gpWhat === 'outerhtml') gpVal = gpEl.outerHTML || '';
+            else if (gpWhat === 'href') gpVal = gpEl.href || gpEl.getAttribute('href') || '';
+            else if (gpWhat === 'attr') {
+                var gpAttr = String(args.attr || '');
+                if (!gpAttr) return Promise.resolve({ error: 'attr required when prop="attr"' });
+                gpVal = gpEl.getAttribute(gpAttr);
+            } else if (gpWhat === 'checked') gpVal = !!gpEl.checked;
+            else gpVal = gpEl.getAttribute(gpWhat);
+            if (typeof gpVal === 'string') gpVal = gpVal.substring(0, 20000);
+            return Promise.resolve({ ok: true, selector: gpSel, prop: gpWhat, value: gpVal, tag: gpEl.tagName });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_info (S1, read-only) ───────────────────────────────────────────
+    // Page-level metadata: url/title/referrer/charset/readyState/scroll/viewport.
+    if (cmd === 'pageInfo') {
+        try {
+            return Promise.resolve({
+                ok: true,
+                url: location.href,
+                origin: location.origin,
+                title: document.title || '',
+                referrer: document.referrer || '',
+                charset: document.characterSet || '',
+                readyState: document.readyState || '',
+                scrollX: Math.round(window.scrollX || 0),
+                scrollY: Math.round(window.scrollY || 0),
+                scrollWidth: document.documentElement ? document.documentElement.scrollWidth : 0,
+                scrollHeight: document.documentElement ? document.documentElement.scrollHeight : 0,
+                innerWidth: window.innerWidth,
+                innerHeight: window.innerHeight,
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── browser_info (S1, read-only) ────────────────────────────────────────
+    // navigator/screen environment info. No JS eval; just reads well-known props.
+    if (cmd === 'browserInfo') {
+        try {
+            var nav = window.navigator || {};
+            return Promise.resolve({
+                ok: true,
+                userAgent: nav.userAgent || '',
+                platform: nav.platform || '',
+                language: nav.language || '',
+                languages: nav.languages ? Array.prototype.slice.call(nav.languages) : [],
+                online: !!nav.onLine,
+                cookieEnabled: !!nav.cookieEnabled,
+                hardwareConcurrency: nav.hardwareConcurrency || 0,
+                deviceMemory: nav.deviceMemory || 0,
+                screenWidth: window.screen ? window.screen.width : 0,
+                screenHeight: window.screen ? window.screen.height : 0,
+                devicePixelRatio: window.devicePixelRatio || 1,
+            });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── storage_get (S1, read-only) ─────────────────────────────────────────
+    // Read one key from local/session storage of the page origin (CSP-immune).
+    if (cmd === 'storageGet') {
+        var sgKey = String(args.key || '');
+        if (!sgKey) return Promise.resolve({ error: 'key required' });
+        try {
+            return Promise.resolve({ ok: true, area: String(args.area || 'local'), key: sgKey, value: _bhStore(args.area).getItem(sgKey) });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── storage_keys (S1, read-only) ────────────────────────────────────────
+    // List all keys (and optionally values) in local/session storage.
+    if (cmd === 'storageKeys') {
+        try {
+            var skStore = _bhStore(args.area);
+            var skKeys = [];
+            for (var ski = 0; ski < skStore.length; ski++) skKeys.push(skStore.key(ski));
+            var skOut = { ok: true, area: String(args.area || 'local'), count: skKeys.length, keys: skKeys };
+            if (args.withValues) {
+                var skVals = {};
+                skKeys.forEach(function (k) { try { skVals[k] = skStore.getItem(k); } catch (_) {} });
+                skOut.values = skVals;
+            }
+            return Promise.resolve(skOut);
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── storage_set (S2) ────────────────────────────────────────────────────
+    if (cmd === 'storageSet') {
+        var ssKey = String(args.key || '');
+        if (!ssKey) return Promise.resolve({ error: 'key required' });
+        try {
+            _bhStore(args.area).setItem(ssKey, String(args.value == null ? '' : args.value));
+            return Promise.resolve({ ok: true, area: String(args.area || 'local'), key: ssKey });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── storage_remove (S2) ─────────────────────────────────────────────────
+    if (cmd === 'storageRemove') {
+        var srKey = String(args.key || '');
+        if (!srKey) return Promise.resolve({ error: 'key required' });
+        try {
+            _bhStore(args.area).removeItem(srKey);
+            return Promise.resolve({ ok: true, area: String(args.area || 'local'), key: srKey });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── storage_clear (S2) ──────────────────────────────────────────────────
+    if (cmd === 'storageClear') {
+        try {
+            var scStore = _bhStore(args.area);
+            var scCount = scStore.length;
+            scStore.clear();
+            return Promise.resolve({ ok: true, area: String(args.area || 'local'), cleared: scCount });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_cookie_get (S1, read-only) ─────────────────────────────────────
+    // Read document.cookie (non-HttpOnly cookies of the page origin). CSP-immune.
+    if (cmd === 'cookieGet') {
+        try {
+            var ckRaw = document.cookie || '';
+            var ckList = [];
+            ckRaw.split(';').forEach(function (pair) {
+                var idx = pair.indexOf('=');
+                if (idx < 0) return;
+                var name = pair.slice(0, idx).trim();
+                if (!name) return;
+                ckList.push({ name: name, value: pair.slice(idx + 1).trim() });
+            });
+            var ckName = String(args.name || '');
+            if (ckName) {
+                var hit = ckList.filter(function (c) { return c.name === ckName; })[0];
+                return Promise.resolve({ ok: true, name: ckName, value: hit ? hit.value : null, found: !!hit });
+            }
+            return Promise.resolve({ ok: true, count: ckList.length, cookies: ckList });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_cookie_set (S2) ────────────────────────────────────────────────
+    // Set a cookie via document.cookie. Cannot set HttpOnly; honours path/maxAge/etc.
+    if (cmd === 'cookieSet') {
+        var csName = String(args.name || '');
+        if (!csName) return Promise.resolve({ error: 'name required' });
+        try {
+            var csStr = encodeURIComponent(csName) + '=' + encodeURIComponent(String(args.value == null ? '' : args.value));
+            csStr += '; path=' + (args.path ? String(args.path) : '/');
+            if (args.domain) csStr += '; domain=' + String(args.domain);
+            if (args.maxAge != null) csStr += '; max-age=' + Number(args.maxAge);
+            if (args.expires) csStr += '; expires=' + String(args.expires);
+            if (args.secure) csStr += '; secure';
+            if (args.sameSite) csStr += '; samesite=' + String(args.sameSite);
+            document.cookie = csStr;
+            return Promise.resolve({ ok: true, name: csName });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_select_option (S2) ─────────────────────────────────────────────
+    // Select an <option> in a <select> by value/label/index, fire input+change.
+    if (cmd === 'selectOption') {
+        var soSel = String(args.selector || '');
+        if (!soSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var soEl = _bhQueryOne(soSel);
+            if (!soEl) return Promise.resolve({ error: 'no elements matched selector', selector: soSel });
+            if ((soEl.tagName || '').toLowerCase() !== 'select') {
+                return Promise.resolve({ error: 'element is not a <select>', tag: soEl.tagName });
+            }
+            var soOpts = Array.prototype.slice.call(soEl.options || []);
+            var soIdx = -1;
+            if (args.index != null) soIdx = Number(args.index);
+            else if (args.value != null) {
+                var sv = String(args.value);
+                for (var i = 0; i < soOpts.length; i++) { if (soOpts[i].value === sv) { soIdx = i; break; } }
+            } else if (args.label != null) {
+                var sl = String(args.label);
+                for (var j = 0; j < soOpts.length; j++) { if ((soOpts[j].textContent || '').trim() === sl) { soIdx = j; break; } }
+            }
+            if (soIdx < 0 || soIdx >= soOpts.length) {
+                return Promise.resolve({ error: 'no matching option', selector: soSel });
+            }
+            soEl.selectedIndex = soIdx;
+            try { soEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+            try { soEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
+            return Promise.resolve({ ok: true, selector: soSel, index: soIdx, value: soOpts[soIdx].value, label: (soOpts[soIdx].textContent || '').trim() });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_set_checked (S2) ───────────────────────────────────────────────
+    // Set a checkbox/radio checked state, fire click+input+change.
+    if (cmd === 'setChecked') {
+        var scSel = String(args.selector || '');
+        if (!scSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var scEl = _bhQueryOne(scSel);
+            if (!scEl) return Promise.resolve({ error: 'no elements matched selector', selector: scSel });
+            if (!('checked' in scEl)) return Promise.resolve({ error: 'element has no checked state', tag: scEl.tagName });
+            var scWant = (args.checked == null) ? true : !!args.checked;
+            if (scEl.checked !== scWant) {
+                scEl.checked = scWant;
+                try { scEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+                try { scEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
+            }
+            return Promise.resolve({ ok: true, selector: scSel, checked: scEl.checked });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_submit (S2) ────────────────────────────────────────────────────
+    // Submit a <form> (the form itself, or the form an element belongs to).
+    if (cmd === 'submitForm') {
+        var sfSel = String(args.selector || '');
+        if (!sfSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var sfEl = _bhQueryOne(sfSel);
+            if (!sfEl) return Promise.resolve({ error: 'no elements matched selector', selector: sfSel });
+            var sfForm = ((sfEl.tagName || '').toLowerCase() === 'form') ? sfEl : sfEl.form || sfEl.closest('form');
+            if (!sfForm) return Promise.resolve({ error: 'no form found for selector', selector: sfSel });
+            var sfOk = sfForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            if (sfOk) { try { sfForm.submit(); } catch (_) {} }
+            return Promise.resolve({ ok: true, selector: sfSel, defaultPrevented: !sfOk });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_focus (S2) ─────────────────────────────────────────────────────
+    if (cmd === 'focusEl') {
+        var fcSel = String(args.selector || '');
+        if (!fcSel) return Promise.resolve({ error: 'selector required' });
+        try {
+            var fcEl = _bhQueryOne(fcSel);
+            if (!fcEl) return Promise.resolve({ error: 'no elements matched selector', selector: fcSel });
+            _bhScrollIntoView(fcEl);
+            try { fcEl.focus(); } catch (_) {}
+            return Promise.resolve({ ok: true, selector: fcSel, focused: document.activeElement === fcEl, tag: fcEl.tagName });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_press_key (S2) ─────────────────────────────────────────────────
+    // Dispatch keydown+keypress+keyup on a target (or activeElement). Bounded synthetic
+    // keyboard event — not arbitrary JS.
+    if (cmd === 'pressKey') {
+        var pkKey = String(args.key || '');
+        if (!pkKey) return Promise.resolve({ error: 'key required' });
+        try {
+            var pkEl = args.selector ? _bhQueryOne(String(args.selector)) : (document.activeElement || document.body);
+            if (!pkEl) return Promise.resolve({ error: 'no target element', selector: args.selector || '' });
+            var pkInit = {
+                bubbles: true,
+                cancelable: true,
+                key: pkKey,
+                code: String(args.code || pkKey),
+                keyCode: Number(args.keyCode || 0),
+                which: Number(args.keyCode || 0),
+                ctrlKey: !!args.ctrl,
+                shiftKey: !!args.shift,
+                altKey: !!args.alt,
+                metaKey: !!args.meta,
+            };
+            try { pkEl.dispatchEvent(new KeyboardEvent('keydown', pkInit)); } catch (_) {}
+            try { pkEl.dispatchEvent(new KeyboardEvent('keypress', pkInit)); } catch (_) {}
+            try { pkEl.dispatchEvent(new KeyboardEvent('keyup', pkInit)); } catch (_) {}
+            return Promise.resolve({ ok: true, key: pkKey, tag: pkEl.tagName });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
+    // ── page_dispatch_event (S2) ────────────────────────────────────────────
+    // Dispatch a generic DOM event by name on a matched element. Bounded — no JS eval.
+    if (cmd === 'dispatchEvent') {
+        var deSel = String(args.selector || '');
+        var deType = String(args.type || '');
+        if (!deSel) return Promise.resolve({ error: 'selector required' });
+        if (!deType) return Promise.resolve({ error: 'type required' });
+        try {
+            var deEl = _bhQueryOne(deSel);
+            if (!deEl) return Promise.resolve({ error: 'no elements matched selector', selector: deSel });
+            var deEv;
+            try { deEv = new Event(deType, { bubbles: args.bubbles !== false, cancelable: args.cancelable !== false }); }
+            catch (_) { deEv = document.createEvent('Event'); deEv.initEvent(deType, args.bubbles !== false, args.cancelable !== false); }
+            var deOk = deEl.dispatchEvent(deEv);
+            return Promise.resolve({ ok: true, selector: deSel, type: deType, defaultPrevented: !deOk });
+        } catch (e) {
+            return Promise.resolve({ error: String(e) });
+        }
+    }
+
     // ── page_exec (S3/L3) ───────────────────────────────────────────────────
     // Execute arbitrary JS in PAGE world. Gate: native caller approval in APK.
     // wrappedJSObject gives full access to page APIs (fetch, document.cookie, etc.).
     if (cmd === 'evalJS') {
         var code = args.code || '';
         if (!code) return Promise.resolve({ error: 'code required' });
+        if (_bhBlockedLifecycleApi(code)) {
+            return Promise.resolve({
+                error: 'window.open / window.close 已被禁用：它们会留下卡死的 about:blank 标签并导致整个浏览器白屏。请改用 tab_open / tab_close 工具来开关标签页。',
+                blocked: 'window.open/close',
+            });
+        }
         return _bhEvalInPage(code, args.timeoutMs || 10000);
     }
 

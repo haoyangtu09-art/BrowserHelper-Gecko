@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import mozilla.components.browser.state.selector.selectedTab
 import org.json.JSONArray
 import org.json.JSONObject
+import org.mozilla.reference.browser.BrowserUrls
 import org.mozilla.reference.browser.devtools.NetFlowStore
 import org.mozilla.reference.browser.devtools.PageChannel
 import org.mozilla.reference.browser.devtools.ProxyProbe
@@ -306,6 +307,20 @@ class AgentToolRegistry(
                     "切换到 tab ${args.optString("id", "")}",
                     "允许，并且本次会话不再询问切换标签页",
                 )
+            "tab_open" ->
+                req(
+                    "允许 Agent 新建浏览器标签页吗？",
+                    "tab-open",
+                    "新建标签页 ${args.optString("url", "默认新标签页")}",
+                    "允许，并且本次会话不再询问新建标签页",
+                )
+            "tab_close" ->
+                req(
+                    "允许 Agent 关闭浏览器标签页吗？",
+                    "tab-close:${args.optString("id", "")}",
+                    "关闭 tab ${args.optString("id", "")}",
+                    "允许，并且本次会话不再询问关闭标签页",
+                )
             "page_navigate" ->
                 req(
                     "允许 Agent 导航当前浏览器标签页吗？",
@@ -320,12 +335,27 @@ class AgentToolRegistry(
                     name,
                     "允许，并且本次会话不再询问这个标签页控制操作",
                 )
-            "page_click", "page_type" ->
+            "page_click", "page_type", "page_select_option", "page_set_checked",
+            "page_submit", "page_focus", "page_press_key", "page_dispatch_event" ->
                 req(
                     "允许 Agent 操作当前网页元素吗？",
                     "page-interact:$name:${args.optString("selector", "")}",
                     "$name 当前页面 selector=${args.optString("selector", "")}",
                     "允许，并且本次会话不再询问这个页面元素操作",
+                )
+            "storage_set", "storage_remove", "storage_clear" ->
+                req(
+                    "允许 Agent 修改当前网页存储吗？",
+                    "page-storage:$name:${args.optString("area", "local")}:${args.optString("key", "")}",
+                    "$name ${args.optString("area", "local")} ${args.optString("key", "")}".trim(),
+                    "允许，并且本次会话不再询问这个存储改动",
+                )
+            "page_cookie_set" ->
+                req(
+                    "允许 Agent 修改当前网页 cookie 吗？",
+                    "page-cookie:${args.optString("name", "")}",
+                    "设置 cookie ${args.optString("name", "")}",
+                    "允许，并且本次会话不再询问这个 cookie 改动",
                 )
             "dom_highlight_element", "dom_inject_css" ->
                 req(
@@ -684,6 +714,41 @@ class AgentToolRegistry(
                     ok("switched to tab $id")
                 }
             }
+            "tab_open" -> {
+                val url = normalizeNavigateUrl(args.optString("url", BrowserUrls.DEFAULT_NEW_TAB))
+                    ?: BrowserUrls.DEFAULT_NEW_TAB
+                val select = args.optBoolean("select", true)
+                val private = args.optBoolean("private", false)
+                val newId = runOnMainResult {
+                    appContext.components.useCases.tabsUseCases.addTab(
+                        url = url,
+                        selectTab = select,
+                        private = private,
+                    )
+                }
+                ok(JSONObject().put("id", newId).put("url", url).put("selected", select).put("private", private).toString())
+            }
+            "tab_close" -> {
+                val id = args.optString("id", "")
+                if (id.isBlank()) {
+                    err("id required")
+                } else if (!tabExists(id)) {
+                    err("no tab with id=$id")
+                } else {
+                    runOnMain {
+                        val tabs = appContext.components.core.store.state.tabs
+                        // Never leave zero tabs: open a fresh default tab before closing the last one.
+                        if (tabs.size <= 1) {
+                            appContext.components.useCases.tabsUseCases.addTab(
+                                BrowserUrls.DEFAULT_NEW_TAB,
+                                selectTab = true,
+                            )
+                        }
+                        appContext.components.useCases.tabsUseCases.removeTab(id)
+                    }
+                    ok("closed tab $id")
+                }
+            }
             "page_navigate" -> {
                 val url = normalizeNavigateUrl(args.optString("url", ""))
                     ?: return@withContext err("url required")
@@ -750,6 +815,142 @@ class AgentToolRegistry(
                     .put("level", args.optString("level", "")),
                 8_000L,
             )
+            "page_get" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else {
+                    val a = JSONObject()
+                        .put("selector", selector)
+                        .put("prop", args.optString("prop", "text"))
+                    if (args.has("attr")) a.put("attr", args.optString("attr", ""))
+                    page("getProp", a)
+                }
+            }
+            "page_info" -> page("pageInfo")
+            "browser_info" -> page("browserInfo")
+            "storage_get" -> {
+                val key = args.optString("key", "")
+                if (key.isEmpty()) {
+                    err("key required")
+                } else {
+                    page("storageGet", JSONObject().put("key", key).put("area", args.optString("area", "local")))
+                }
+            }
+            "storage_keys" -> page(
+                "storageKeys",
+                JSONObject()
+                    .put("area", args.optString("area", "local"))
+                    .put("withValues", args.optBoolean("withValues", false)),
+            )
+            "storage_set" -> {
+                val key = args.optString("key", "")
+                if (key.isEmpty()) {
+                    err("key required")
+                } else {
+                    page(
+                        "storageSet",
+                        JSONObject()
+                            .put("key", key)
+                            .put("value", args.optString("value", ""))
+                            .put("area", args.optString("area", "local")),
+                    )
+                }
+            }
+            "storage_remove" -> {
+                val key = args.optString("key", "")
+                if (key.isEmpty()) {
+                    err("key required")
+                } else {
+                    page("storageRemove", JSONObject().put("key", key).put("area", args.optString("area", "local")))
+                }
+            }
+            "storage_clear" -> page("storageClear", JSONObject().put("area", args.optString("area", "local")))
+            "page_cookie_get" -> {
+                val a = JSONObject()
+                if (args.has("name")) a.put("name", args.optString("name", ""))
+                page("cookieGet", a)
+            }
+            "page_cookie_set" -> {
+                val name = args.optString("name", "")
+                if (name.isEmpty()) {
+                    err("name required")
+                } else {
+                    val a = JSONObject().put("name", name).put("value", args.optString("value", ""))
+                    if (args.has("path")) a.put("path", args.optString("path", "/"))
+                    if (args.has("domain")) a.put("domain", args.optString("domain", ""))
+                    if (args.has("maxAge")) a.put("maxAge", args.optLong("maxAge", 0L))
+                    if (args.has("expires")) a.put("expires", args.optString("expires", ""))
+                    if (args.has("secure")) a.put("secure", args.optBoolean("secure", false))
+                    if (args.has("sameSite")) a.put("sameSite", args.optString("sameSite", ""))
+                    page("cookieSet", a)
+                }
+            }
+            "page_select_option" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else {
+                    val a = JSONObject().put("selector", selector)
+                    if (args.has("value")) a.put("value", args.optString("value", ""))
+                    if (args.has("label")) a.put("label", args.optString("label", ""))
+                    if (args.has("index")) a.put("index", args.optInt("index", 0))
+                    page("selectOption", a)
+                }
+            }
+            "page_set_checked" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else {
+                    page(
+                        "setChecked",
+                        JSONObject().put("selector", selector).put("checked", args.optBoolean("checked", true)),
+                    )
+                }
+            }
+            "page_submit" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) err("selector required") else page("submitForm", JSONObject().put("selector", selector))
+            }
+            "page_focus" -> {
+                val selector = args.optString("selector", "")
+                if (selector.isEmpty()) err("selector required") else page("focusEl", JSONObject().put("selector", selector))
+            }
+            "page_press_key" -> {
+                val key = args.optString("key", "")
+                if (key.isEmpty()) {
+                    err("key required")
+                } else {
+                    val a = JSONObject().put("key", key)
+                    if (args.has("selector")) a.put("selector", args.optString("selector", ""))
+                    if (args.has("code")) a.put("code", args.optString("code", ""))
+                    if (args.has("keyCode")) a.put("keyCode", args.optInt("keyCode", 0))
+                    if (args.has("ctrl")) a.put("ctrl", args.optBoolean("ctrl", false))
+                    if (args.has("shift")) a.put("shift", args.optBoolean("shift", false))
+                    if (args.has("alt")) a.put("alt", args.optBoolean("alt", false))
+                    if (args.has("meta")) a.put("meta", args.optBoolean("meta", false))
+                    page("pressKey", a)
+                }
+            }
+            "page_dispatch_event" -> {
+                val selector = args.optString("selector", "")
+                val type = args.optString("type", "")
+                if (selector.isEmpty()) {
+                    err("selector required")
+                } else if (type.isEmpty()) {
+                    err("type required")
+                } else {
+                    page(
+                        "dispatchEvent",
+                        JSONObject()
+                            .put("selector", selector)
+                            .put("type", type)
+                            .put("bubbles", args.optBoolean("bubbles", true))
+                            .put("cancelable", args.optBoolean("cancelable", true)),
+                    )
+                }
+            }
             "network_wait_request" -> waitForFlow(args, needResponse = false)
             "network_wait_response" -> waitForFlow(args, needResponse = true)
             "mock_add_rule" -> {
@@ -1344,6 +1545,104 @@ class AgentToolRegistry(
                     result
                 }
             }
+            "page_get" -> execute(name, JSONObject().put("selector", "html").put("prop", "tagName"))
+            "page_info", "browser_info" -> execute(name, JSONObject())
+            "storage_get" -> execute(name, JSONObject().put("key", "__bh_agent_self_test__$stamp"))
+            "storage_keys" -> execute(name, JSONObject().put("withValues", false))
+            "page_cookie_get" -> execute(name, JSONObject())
+            "storage_set" -> {
+                // Write a uniquely-named key then remove it so the page store is unchanged.
+                val key = "__bh_agent_self_test__$stamp"
+                val result = execute(name, JSONObject().put("key", key).put("value", "ok"))
+                execute("storage_remove", JSONObject().put("key", key))
+                result
+            }
+            "storage_remove" -> execute(name, JSONObject().put("key", "__bh_agent_self_test_absent__$stamp"))
+            "storage_clear" ->
+                ok("OK: $name is registered; self-test skips clearing live page storage")
+            "page_cookie_set" -> {
+                // Set a uniquely-named cookie then immediately expire it (max-age=0).
+                val cname = "__bh_agent_self_test__$stamp"
+                val result = execute(name, JSONObject().put("name", cname).put("value", "ok").put("maxAge", 1))
+                execute(name, JSONObject().put("name", cname).put("value", "").put("maxAge", 0))
+                result
+            }
+            "page_select_option" -> {
+                val id = "__bh_agent_self_test_select"
+                val setup = page(
+                    "evalJS",
+                    JSONObject().put(
+                        "code",
+                        "var el=document.getElementById('$id');" +
+                            "if(!el){el=document.createElement('select');el.id='$id';el.style.position='fixed';el.style.left='-9999px';" +
+                            "var o=document.createElement('option');o.value='a';o.textContent='A';el.appendChild(o);document.documentElement.appendChild(el);}" +
+                            "return true;",
+                    ).put("timeoutMs", 5000),
+                    6000,
+                )
+                if (!setup.ok) setup else {
+                    val result = execute(name, JSONObject().put("selector", "#$id").put("value", "a"))
+                    page(
+                        "evalJS",
+                        JSONObject().put("code", "var el=document.getElementById('$id');if(el)el.remove();return true;")
+                            .put("timeoutMs", 5000),
+                        6000,
+                    )
+                    result
+                }
+            }
+            "page_set_checked" -> {
+                val id = "__bh_agent_self_test_check"
+                val setup = page(
+                    "evalJS",
+                    JSONObject().put(
+                        "code",
+                        "var el=document.getElementById('$id');" +
+                            "if(!el){el=document.createElement('input');el.type='checkbox';el.id='$id';el.style.position='fixed';el.style.left='-9999px';document.documentElement.appendChild(el);}" +
+                            "return true;",
+                    ).put("timeoutMs", 5000),
+                    6000,
+                )
+                if (!setup.ok) setup else {
+                    val result = execute(name, JSONObject().put("selector", "#$id").put("checked", true))
+                    page(
+                        "evalJS",
+                        JSONObject().put("code", "var el=document.getElementById('$id');if(el)el.remove();return true;")
+                            .put("timeoutMs", 5000),
+                        6000,
+                    )
+                    result
+                }
+            }
+            "page_submit" ->
+                ok("OK: $name is registered; self-test skips live form submission")
+            "page_focus" -> execute(name, JSONObject().put("selector", "body"))
+            "page_press_key" -> {
+                val id = "__bh_agent_self_test_key"
+                val setup = page(
+                    "evalJS",
+                    JSONObject().put(
+                        "code",
+                        "var el=document.getElementById('$id');" +
+                            "if(!el){el=document.createElement('input');el.id='$id';el.style.position='fixed';el.style.left='-9999px';document.documentElement.appendChild(el);}" +
+                            "return true;",
+                    ).put("timeoutMs", 5000),
+                    6000,
+                )
+                if (!setup.ok) setup else {
+                    val result = execute(name, JSONObject().put("selector", "#$id").put("key", "a"))
+                    page(
+                        "evalJS",
+                        JSONObject().put("code", "var el=document.getElementById('$id');if(el)el.remove();return true;")
+                            .put("timeoutMs", 5000),
+                        6000,
+                    )
+                    result
+                }
+            }
+            "page_dispatch_event" -> execute(name, JSONObject().put("selector", "body").put("type", "mouseover"))
+            "tab_open", "tab_close" ->
+                ok("OK: $name is registered; self-test skips opening/closing live tabs")
             "dom_highlight_element" -> execute(name, JSONObject().put("selector", "body").put("durationMs", 0))
             "dom_inject_css" -> execute(name, JSONObject().put("css", "/* bh agent self-test $stamp */"))
             "network_wait_request", "network_wait_response" ->
@@ -2955,7 +3254,7 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("id", str("flow id 或六位 code"))
         required("id")
     }),
-    tool("page_exec", AgentPermissionTier.S3, "在 page world 执行任意 JavaScript，可调用页面和浏览器 API。", schema {
+    tool("page_exec", AgentPermissionTier.S3, "在 page world 执行任意 JavaScript，可调用页面和浏览器 API。禁止 window.open / window.close（会卡死标签页导致白屏，已被静态拦截）——开关标签页请改用 tab_open / tab_close。", schema {
         prop("code", str("JS 代码"))
         prop("timeoutMs", num("超时 ms"))
         required("code")
@@ -2988,6 +3287,15 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
         prop("id", str("tab_list 返回的标签页 id"))
         required("id")
     }),
+    tool("tab_open", AgentPermissionTier.S2, "新建一个浏览器标签页并可选导航到 URL。走浏览器原生标签管理，替代 window.open。", schema {
+        prop("url", str("新标签页 URL；省略时打开默认新标签页"))
+        prop("select", bool("是否切换到新标签页，默认 true"))
+        prop("private", bool("是否隐私标签页，默认 false"))
+    }),
+    tool("tab_close", AgentPermissionTier.S2, "关闭指定 id 的浏览器标签页。走浏览器原生标签管理，替代 window.close；若是最后一个标签页会先开一个默认新标签页。", schema {
+        prop("id", str("tab_list 返回的标签页 id"))
+        required("id")
+    }),
     tool("page_navigate", AgentPermissionTier.S2, "让当前标签页加载指定 URL。走浏览器原生导航，不依赖页面 JS/CSP。", schema {
         prop("url", str("目标 URL；省略 scheme 时按 https:// 处理"))
         prop("waitMs", num("导航发起后等待毫秒数，默认 0，上限 10000"))
@@ -3015,6 +3323,90 @@ private fun buildToolDefs(): List<ToolDef> = listOf(
     tool("console_list", AgentPermissionTier.S1, "读取注入钩子捕获的 page world console 输出（best-effort：仅注入后日志，CSP 可能阻断）。", schema {
         prop("limit", num("最多返回条数，默认 50，上限 200"))
         prop("level", str("可选：按 log/info/warn/error/debug 过滤"))
+    }),
+    tool("page_get", AgentPermissionTier.S1, "读取当前页面匹配元素的单个属性（text/value/html/outerhtml/href/attr/checked 或任意属性名）。只读，不执行 JS。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        prop("prop", str("要读的属性：text(默认)/value/html/outerhtml/href/checked/attr 或属性名"))
+        prop("attr", str("当 prop=attr 时指定属性名"))
+        required("selector")
+    }),
+    tool("page_info", AgentPermissionTier.S1, "读取当前页面元信息：url/title/referrer/charset/readyState/滚动位置/视口尺寸。只读，不执行 JS。", emptySchema()),
+    tool("browser_info", AgentPermissionTier.S1, "读取浏览器/设备环境：userAgent/platform/language/online/屏幕尺寸/devicePixelRatio 等。只读，不执行 JS。", emptySchema()),
+    tool("storage_get", AgentPermissionTier.S1, "读取当前页面 local/session storage 的单个键值。只读。", schema {
+        prop("key", str("存储键名"))
+        prop("area", str("local(默认) 或 session"))
+        required("key")
+    }),
+    tool("storage_keys", AgentPermissionTier.S1, "列出当前页面 local/session storage 的所有键（可选带值）。只读。", schema {
+        prop("area", str("local(默认) 或 session"))
+        prop("withValues", bool("是否一并返回所有值，默认 false"))
+    }),
+    tool("storage_set", AgentPermissionTier.S2, "写入当前页面 local/session storage 的一个键值。", schema {
+        prop("key", str("存储键名"))
+        prop("value", str("存储值"))
+        prop("area", str("local(默认) 或 session"))
+        required("key")
+    }),
+    tool("storage_remove", AgentPermissionTier.S2, "删除当前页面 local/session storage 的一个键。", schema {
+        prop("key", str("存储键名"))
+        prop("area", str("local(默认) 或 session"))
+        required("key")
+    }),
+    tool("storage_clear", AgentPermissionTier.S2, "清空当前页面 local 或 session storage。", schema {
+        prop("area", str("local(默认) 或 session"))
+    }),
+    tool("page_cookie_get", AgentPermissionTier.S1, "读取当前页面 document.cookie（非 HttpOnly cookie）；给 name 则返回单条。只读。", schema {
+        prop("name", str("可选：只取该 cookie 名"))
+    }),
+    tool("page_cookie_set", AgentPermissionTier.S2, "通过 document.cookie 设置当前页面 cookie（无法设 HttpOnly）。", schema {
+        prop("name", str("cookie 名"))
+        prop("value", str("cookie 值"))
+        prop("path", str("路径，默认 /"))
+        prop("domain", str("域"))
+        prop("maxAge", num("max-age 秒"))
+        prop("expires", str("expires 字符串"))
+        prop("secure", bool("是否 Secure"))
+        prop("sameSite", str("SameSite：Strict/Lax/None"))
+        required("name")
+    }),
+    tool("page_select_option", AgentPermissionTier.S2, "在当前页面 <select> 中按 value/label/index 选中一个 <option> 并派发 input/change。受限操作，不执行 JS。", schema {
+        prop("selector", str("<select> 元素 CSS selector"))
+        prop("value", str("按 option value 选中"))
+        prop("label", str("按 option 文本选中"))
+        prop("index", num("按 option 索引选中"))
+        required("selector")
+    }),
+    tool("page_set_checked", AgentPermissionTier.S2, "设置当前页面 checkbox/radio 的勾选状态并派发 input/change。受限操作，不执行 JS。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        prop("checked", bool("勾选状态，默认 true"))
+        required("selector")
+    }),
+    tool("page_submit", AgentPermissionTier.S2, "提交当前页面的 <form>（可传 form 自身或其内部元素的 selector）。受限操作，不执行 JS。", schema {
+        prop("selector", str("form 或其内部元素的 CSS selector"))
+        required("selector")
+    }),
+    tool("page_focus", AgentPermissionTier.S2, "聚焦当前页面匹配元素并滚动到可见。受限操作，不执行 JS。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        required("selector")
+    }),
+    tool("page_press_key", AgentPermissionTier.S2, "向目标元素（或当前焦点）派发 keydown/keypress/keyup 键盘事件。受限操作，不执行 JS。", schema {
+        prop("key", str("KeyboardEvent.key，如 Enter、a、ArrowDown"))
+        prop("selector", str("可选目标元素；省略用当前焦点元素"))
+        prop("code", str("KeyboardEvent.code"))
+        prop("keyCode", num("keyCode/which 数值"))
+        prop("ctrl", bool("ctrlKey"))
+        prop("shift", bool("shiftKey"))
+        prop("alt", bool("altKey"))
+        prop("meta", bool("metaKey"))
+        required("key")
+    }),
+    tool("page_dispatch_event", AgentPermissionTier.S2, "向当前页面匹配元素派发一个指定名称的 DOM 事件。受限操作，不执行 JS。", schema {
+        prop("selector", str("目标元素 CSS selector"))
+        prop("type", str("事件名，如 click、focus、blur、mouseover"))
+        prop("bubbles", bool("是否冒泡，默认 true"))
+        prop("cancelable", bool("是否可取消，默认 true"))
+        required("selector")
+        required("type")
     }),
     tool("network_wait_request", AgentPermissionTier.S1, "阻塞等待匹配的请求被 MITM 抓到（轮询只读 TEE 快照），命中或超时返回。", schema {
         prop("method", str("按 HTTP method 过滤"))
