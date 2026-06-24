@@ -622,17 +622,15 @@ object ProxyProbe {
         try {
             val s = ctx.getSharedPreferences(REPLACE_PREFS, Context.MODE_PRIVATE)
                 .getString(SSE_HOLD_PREFS_KEY, null) ?: return
-            // 冷启动不自动恢复「截流」开启态：hold 住一条 SSE 必须有面板在场才能放行被截的流，
-            // 否则没加载面板（或面板未连）时启动会把 ChatGPT 等流式回复永久截死、心跳「思考中」
-            // 却无从放行，表现为「没开拦截却自己拦 ChatGPT 回复」。与拦截冷启动强制 enabled=false
-            // 同理：只恢复 hosts/heartbeat，开启态由截流插件 onEnable 在面板加载后显式重新下发。
             applySseHoldConfig(JSONObject(s))
-            sseHoldEnabled = false
         } catch (_: Throwable) {}
     }
 
     private fun sseHoldActiveFor(host: String): Boolean {
-        if (!sseHoldEnabled || host.isEmpty()) return false
+        // 截流（hold ChatGPT 等 SSE 流）从属于拦截：截流插件启用只表示「想关联」，
+        // 真正生效还要求拦截总开关开着。拦截关闭（含冷启动强制 interceptEnabled=false）
+        // 时永不 hold，避免「没开拦截却自己截死 ChatGPT 回复」。
+        if (!sseHoldEnabled || !interceptEnabled || host.isEmpty()) return false
         val h = host.lowercase()
         return sseHoldHosts.any { h == it || h.endsWith(".$it") }
     }
