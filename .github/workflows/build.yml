@@ -48,7 +48,11 @@ jobs:
           TAG="browser-helper-debug-latest"
           APK="$(find artifacts -type f -name '*.apk' | head -n 1)"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "浏览器插件 Debug APK" --notes "Latest debug APK built by GitHub Actions." --prerelease
-          gh release upload "$TAG" "$APK#browser-helper.apk" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+            gh release delete-asset "$TAG" "$asset" -y || true
+          done
+          cp "$APK" /tmp/browser-helper.apk
+          gh release upload "$TAG" /tmp/browser-helper.apk --clobber
 
       - name: Upload arm64 APK
         uses: actions/upload-artifact@v4
