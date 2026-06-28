@@ -26,9 +26,14 @@ class IntentReceiverActivity : Activity() {
         intent.flags = intent.flags and Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS.inv()
 
         val utils = components.utils
+        val shouldUseDesktopSite = isKuaishouUrl(intent.dataString)
 
         MainScope().launch {
             val processor = utils.intentProcessors.firstOrNull { it.process(intent) }
+            if (shouldUseDesktopSite) {
+                val tabId = components.core.store.state.selectedTabId
+                components.useCases.sessionUseCases.requestDesktopSite.invoke(true, tabId)
+            }
 
             val className = if (processor in utils.externalIntentProcessors) {
                 ExternalAppBrowserActivity::class
@@ -41,5 +46,13 @@ class IntentReceiverActivity : Activity() {
             startActivity(intent)
             finish()
         }
+    }
+
+    private fun isKuaishouUrl(url: String?): Boolean {
+        val lower = url?.lowercase() ?: return false
+        return lower.contains("kuaishou.com") ||
+            lower.contains("chenzhongtech.com") ||
+            lower.contains("gifshow.com") ||
+            lower.contains("kwai.com")
     }
 }
