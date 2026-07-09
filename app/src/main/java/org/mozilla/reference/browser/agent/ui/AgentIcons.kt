@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -216,7 +217,7 @@ fun PluginPlugIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color
             style = Stroke(width = sw, cap = StrokeCap.Round),
         )
         // Small tilted plug at the center, pointing from bottom-right toward top-left.
-        androidx.compose.ui.graphics.drawscope.rotate(-45f, Offset(cx, cy)) {
+        rotate(-45f, Offset(cx, cy)) {
             drawRoundRect(
                 color = color,
                 topLeft = Offset(cx - w * 0.10f, cy - h * 0.02f),
