@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.mozilla.reference.browser.agent.core.AgentApprovalDecision
 import org.mozilla.reference.browser.agent.core.AgentPermissionTier
 import org.mozilla.reference.browser.agent.core.AgentToolInfo
@@ -371,8 +372,15 @@ private fun DrawerSheet(state: PanelState, onClose: () -> Unit, onSettings: () -
                             state.loadChat(chat.id)
                             onClose()
                         }
-                        .padding(horizontal = 4.dp, vertical = 12.dp),
-                ) { BasicText(chat.title, style = AgentText.Body) }
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                ) {
+                    BasicText(
+                        if (chat.title.length > 10) chat.title.take(10) + "…" else chat.title,
+                        style = AgentText.Body.copy(fontSize = 10.sp),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
             }
             Spacer(Modifier.weight(1f))
             // Manual demo triggers for the secondary-confirmation sheet and plan-mode card.
@@ -556,9 +564,14 @@ private fun MemoryScreen(state: PanelState, onBack: () -> Unit) {
                     Box(
                         Modifier.fillMaxWidth()
                             .clickable { state.loadChat(chat.id) }
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                     ) {
-                        BasicText(chat.title, style = AgentText.Body)
+                        BasicText(
+                            if (chat.title.length > 10) chat.title.take(10) + "…" else chat.title,
+                            style = AgentText.Body.copy(fontSize = 10.sp),
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
                     }
                     if (i < state.chats.lastIndex) GroupDivider()
                 }

@@ -2,9 +2,12 @@
 <!-- This Source Code Form is subject to the terms of the Mozilla Public
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Browser Toolbar -->
     <dimen name="browser_toolbar_height">56dp</dimen>
     <dimen name="browser_tab_strip_height">40dp</dimen>
     <dimen name="browser_top_chrome_height">96dp</dimen>
+
+    <!-- Chrome-style rounded overflow (browser-menu2) popup corners. -->
+    <dimen name="mozac_browser_menu2_corner_radius" tools:ignore="UnusedResources">16dp</dimen>
 </resources>

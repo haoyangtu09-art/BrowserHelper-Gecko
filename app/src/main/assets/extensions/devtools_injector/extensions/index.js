@@ -41,6 +41,17 @@ var EXT_STYLE = [
   '.bh-ext-dlg-txt{margin-top:4px;font-size:13px;color:#555;line-height:1.5;white-space:pre-wrap;}',
   '.bh-ext-dlg-close{margin-top:16px;width:100%;padding:9px 0;border:none;border-radius:10px;',
   '  background:#111;color:#fff;font-size:14px;font-weight:600;}',
+  // Mobile: the enlarged desktop cards are far too big on a phone-width panel — pack more,
+  // smaller, content-height cards (2-3 per row) with proportionally smaller text/buttons.
+  '@media(max-width:600px){',
+  '  #bh-ext-body{grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px;padding:12px;}',
+  '  .bh-ext-card{gap:8px;padding:12px;border-radius:16px;aspect-ratio:auto;}',
+  '  .bh-ext-card-name{font-size:15px;-webkit-line-clamp:2;}',
+  '  .bh-ext-card-ver{margin-top:4px;font-size:11px;}',
+  '  .bh-ext-card-desc{margin-top:8px;font-size:11.5px;-webkit-line-clamp:3;}',
+  '  .bh-ext-actions{gap:8px;}',
+  '  .bh-ext-btn{padding:8px 0;font-size:12px;border-radius:10px;}',
+  '}',
 ].join('');
 
 // 单个拓展方块卡：名称 + 描述 + 底部「启用/禁用」开关按钮。

@@ -83,11 +83,23 @@ class ToolbarIntegration(
     private val tabStrip: LinearLayout? = toolbarParentView.findViewById(R.id.topTabStrip)
     private val tabScroll: HorizontalScrollView? = toolbarParentView.findViewById(R.id.topTabScroll)
     private val homeButton: ImageButton? = toolbarParentView.findViewById(R.id.navHomeButton)
-    private val backButton: ImageButton? = toolbarParentView.findViewById(R.id.navBackButton)
-    private val forwardButton: ImageButton? = toolbarParentView.findViewById(R.id.navForwardButton)
 
     private fun menuToolbar(session: SessionState?): RowMenuCandidate {
         val tint = ContextCompat.getColor(context, R.color.icons)
+
+        val back = SmallMenuCandidate(
+            contentDescription = "后退",
+            icon = DrawableMenuIcon(
+                context,
+                mozilla.components.ui.icons.R.drawable.mozac_ic_back_24,
+                tint = tint,
+            ),
+            containerStyle = ContainerStyle(
+                isEnabled = session?.content?.canGoBack == true,
+            ),
+        ) {
+            sessionUseCases.goBack.invoke()
+        }
 
         val forward = SmallMenuCandidate(
             contentDescription = "前进",
@@ -125,7 +137,7 @@ class ToolbarIntegration(
             sessionUseCases.stopLoading.invoke()
         }
 
-        return RowMenuCandidate(listOf(forward, refresh, stop))
+        return RowMenuCandidate(listOf(back, forward, refresh, stop))
     }
 
     private fun sessionMenuItems(sessionState: SessionState): List<MenuCandidate> =
@@ -179,7 +191,7 @@ class ToolbarIntegration(
             emptyList()
         }
 
-        return sessionMenuItems + listOf(
+        return listOf(menuToolbar(sessionState)) + sessionMenuItems + listOf(
             TextMenuCandidate(text = "附加组件") {
                 val intent = Intent(context, AddonsActivity::class.java)
                 intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -235,21 +247,7 @@ class ToolbarIntegration(
                 ResourcesCompat.getDrawable(context.resources, R.drawable.url_background, context.theme),
             )
         }
-        toolbar.addBrowserAction(
-            BrowserToolbar.Button(
-                imageDrawable = ContextCompat.getDrawable(
-                    context,
-                    mozilla.components.ui.icons.R.drawable.mozac_ic_arrow_clockwise_24,
-                )!!,
-                contentDescription = "刷新",
-                iconTintColorResource = R.color.icons,
-            ) {
-                sessionUseCases.reload.invoke()
-            },
-        )
         homeButton?.setOnClickListener { sessionUseCases.loadUrl(BrowserUrls.DEFAULT_NEW_TAB) }
-        backButton?.setOnClickListener { sessionUseCases.goBack.invoke() }
-        forwardButton?.setOnClickListener { sessionUseCases.goForward.invoke() }
 
         toolbar.edit.apply {
             hint = context.getString(R.string.toolbar_hint)
@@ -277,9 +275,6 @@ class ToolbarIntegration(
     private fun renderTopTabs(tabs: List<TabSessionState>, selectedTabId: String?) {
         val strip = tabStrip ?: return
         strip.removeAllViews()
-        val selectedTab = tabs.firstOrNull { tab -> tab.id == selectedTabId }
-        updateNavigationButton(backButton, selectedTab?.content?.canGoBack == true)
-        updateNavigationButton(forwardButton, selectedTab?.content?.canGoForward == true)
         updateNavigationButton(homeButton, true)
         val tabWidth = tabWidth(tabs.size)
         tabs.forEach { tab ->
@@ -307,7 +302,7 @@ class ToolbarIntegration(
         LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            background = roundedTabBackground(if (selected) Color.rgb(55, 55, 55) else Color.rgb(30, 30, 30))
+            background = roundedTabBackground(if (selected) Color.WHITE else Color.rgb(224, 227, 231))
             setPadding(dp(9), 0, dp(10), 0)
             layoutParams = LinearLayout.LayoutParams(width, ViewGroup.LayoutParams.MATCH_PARENT).apply {
                 setMargins(dp(2), dp(4), dp(2), 0)
@@ -325,7 +320,7 @@ class ToolbarIntegration(
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 gravity = android.view.Gravity.CENTER_VERTICAL
-                setTextColor(if (selected) Color.WHITE else Color.rgb(190, 190, 190))
+                setTextColor(if (selected) Color.rgb(32, 33, 36) else Color.rgb(95, 99, 104))
                 textSize = 13f
                 typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
@@ -337,7 +332,7 @@ class ToolbarIntegration(
                     text = "×"
                     textSize = 16f
                     includeFontPadding = false
-                    setTextColor(Color.rgb(190, 190, 190))
+                    setTextColor(Color.rgb(95, 99, 104))
                     gravity = android.view.Gravity.CENTER
                     layoutParams = LinearLayout.LayoutParams(dp(24), ViewGroup.LayoutParams.MATCH_PARENT).apply {
                         marginStart = dp(2)
@@ -356,11 +351,11 @@ class ToolbarIntegration(
         TextView(context).apply {
             text = "+"
             gravity = android.view.Gravity.CENTER
-            setTextColor(Color.WHITE)
+            setTextColor(Color.rgb(95, 99, 104))
             textSize = 22f
             includeFontPadding = false
             typeface = Typeface.DEFAULT_BOLD
-            background = roundedTabBackground(Color.rgb(36, 36, 36))
+            background = roundedTabBackground(Color.rgb(224, 227, 231))
             layoutParams = LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT).apply {
                 setMargins(dp(2), dp(4), dp(6), 0)
             }

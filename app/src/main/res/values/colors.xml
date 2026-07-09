@@ -3,14 +3,15 @@
    - License, v. 2.0. If a copy of the MPL was not distributed with this
    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <color name="dark">#ff212121</color>
-    <color name="evenDarker">#ff1a1a1a</color>
-    <color name="accent">#ff00BCD4</color>
+    <!-- White/light Chrome-style theme. Names kept for compatibility. -->
+    <color name="dark">#ffffffff</color>
+    <color name="evenDarker">#fff1f3f4</color>
+    <color name="accent">#ff1a73e8</color>
 
-    <color name="toolbarBackgroundColor">@color/evenDarker</color>
-    <color name="toolbarUrlBoxColor">#333333</color>
+    <color name="toolbarBackgroundColor">#ffffffff</color>
+    <color name="toolbarUrlBoxColor">#fff1f3f4</color>
 
-    <color name="icons">#ffffffff</color>
+    <color name="icons">#ff202124</color>
 
     <!-- Overriding color of tab counter icon in toolbar -->
     <color name="mozac_ui_tabcounter_default_tint" tools:ignore="UnusedResources">@color/icons</color>

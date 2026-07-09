@@ -145,6 +145,23 @@ fun ChatScreen(
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 96.dp),
                 )
             }
+            // ChatGPT-style top fade: a soft white→transparent wash so content scrolling
+            // underneath is washed out at the very top and gradually clears toward the middle.
+            // (Approximates the frosted top bar; a true backdrop blur isn't cheap here.)
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .height(118.dp)
+                    .background(
+                        androidx.compose.ui.graphics.Brush.verticalGradient(
+                            0.0f to Color.White.copy(alpha = 0.96f),
+                            0.35f to Color.White.copy(alpha = 0.72f),
+                            0.7f to Color.White.copy(alpha = 0.28f),
+                            1.0f to Color.Transparent,
+                        ),
+                    ),
+            )
             ChatTopBar(
                 state = state,
                 onOpenDrawer = onOpenDrawer,
@@ -758,23 +775,23 @@ private fun SendStopButton(generating: Boolean, onSend: () -> Unit, onStop: () -
 private fun UploadSheet(onPick: (AgentAttachmentKind) -> Unit) {
     Column(
         modifier = Modifier
-            .width(137.dp)
+            .width(103.dp)
             .clip(AgentShapes.Sheet)
             .background(Color.White)
             .border(1.dp, AgentColors.HairlineFaint, AgentShapes.Sheet)
-            .padding(vertical = 4.dp),
+            .padding(vertical = 3.dp),
     ) {
         UploadRow("相机", AgentAttachmentKind.Camera, onPick) {
-            CameraIcon(color = AgentColors.TextPrimary, size = 14.dp)
+            CameraIcon(color = AgentColors.TextPrimary, size = 12.dp)
         }
         UploadRow("图片", AgentAttachmentKind.Image, onPick) {
-            ImageLandscapeIcon(size = 16.dp)
+            ImageLandscapeIcon(color = AgentColors.TextPrimary, size = 13.dp)
         }
         UploadRow("文件", AgentAttachmentKind.File, onPick) {
-            SpiralClipIcon(color = AgentColors.TextPrimary, size = 15.dp)
+            SpiralClipIcon(color = AgentColors.TextPrimary, size = 12.dp)
         }
         UploadRow("插件", AgentAttachmentKind.Plugin, onPick) {
-            PluginPlugIcon(color = AgentColors.TextPrimary, size = 15.dp)
+            PluginPlugIcon(color = AgentColors.TextPrimary, size = 12.dp)
         }
     }
 }
@@ -790,19 +807,19 @@ private fun UploadRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onPick(kind) }
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(horizontal = 6.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(width = 29.dp, height = 24.dp)
-                .clip(RoundedCornerShape(9.dp))
-                .background(AgentColors.Control),
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(AgentColors.Control.copy(alpha = 0.6f)),
             contentAlignment = Alignment.Center,
         ) {
             icon()
         }
-        Spacer(Modifier.width(8.dp))
-        BasicText(label, style = AgentText.Body.copy(fontSize = 10.5.sp))
+        Spacer(Modifier.width(6.dp))
+        BasicText(label, style = AgentText.Body.copy(fontSize = 9.sp))
     }
 }

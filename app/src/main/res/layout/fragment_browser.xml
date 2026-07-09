@@ -64,11 +64,11 @@
         android:layout_width="match_parent"
         android:layout_height="56dp"
         android:layout_gravity="bottom"
-        android:background="#000000"
-        mozac:findInPageQueryTextColor="#ffffff"
-        mozac:findInPageQueryHintTextColor="#dddddd"
-        mozac:findInPageResultCountTextColor="#ff88ff"
-        mozac:findInPageButtonsTint="#ff88ff"
+        android:background="#ffffffff"
+        mozac:findInPageQueryTextColor="#202124"
+        mozac:findInPageQueryHintTextColor="#5f6368"
+        mozac:findInPageResultCountTextColor="#1a73e8"
+        mozac:findInPageButtonsTint="#1a73e8"
         android:visibility="gone"
         app:layout_behavior="org.mozilla.reference.browser.browser.FindInPageBarBehavior" />
 
@@ -93,30 +93,6 @@
             android:padding="8dp"
             android:scaleType="center"
             android:src="@drawable/ic_home_24"
-            android:tint="@color/icons" />
-
-        <ImageButton
-            android:id="@+id/navBackButton"
-            android:layout_width="40dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="2dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="后退"
-            android:padding="8dp"
-            android:scaleType="center"
-            android:src="@drawable/ic_back_24"
-            android:tint="@color/icons" />
-
-        <ImageButton
-            android:id="@+id/navForwardButton"
-            android:layout_width="40dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="2dp"
-            android:background="?android:attr/selectableItemBackgroundBorderless"
-            android:contentDescription="前进"
-            android:padding="8dp"
-            android:scaleType="center"
-            android:src="@drawable/ic_forward_24"
             android:tint="@color/icons" />
 
         <mozilla.components.browser.toolbar.BrowserToolbar

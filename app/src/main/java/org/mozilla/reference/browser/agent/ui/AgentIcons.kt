@@ -120,48 +120,55 @@ fun CameraIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color = C
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
-        val sw = this.size.minDimension * 0.09f
+        val sw = this.size.minDimension * 0.085f
+        val join = androidx.compose.ui.graphics.StrokeJoin.Round
+        // Rounded viewfinder bump on the top, centered slightly left.
         drawRoundRect(
             color = color,
-            topLeft = Offset(w * 0.14f, h * 0.30f),
-            size = Size(w * 0.72f, h * 0.48f),
-            cornerRadius = CornerRadius(w * 0.13f, w * 0.13f),
-            style = Stroke(width = sw),
+            topLeft = Offset(w * 0.30f, h * 0.22f),
+            size = Size(w * 0.22f, h * 0.14f),
+            cornerRadius = CornerRadius(w * 0.06f, w * 0.06f),
+            style = Stroke(width = sw, join = join),
         )
-        drawLine(color, Offset(w * 0.34f, h * 0.30f), Offset(w * 0.40f, h * 0.20f), sw, StrokeCap.Round)
-        drawLine(color, Offset(w * 0.40f, h * 0.20f), Offset(w * 0.60f, h * 0.20f), sw, StrokeCap.Round)
-        drawLine(color, Offset(w * 0.60f, h * 0.20f), Offset(w * 0.66f, h * 0.30f), sw, StrokeCap.Round)
-        drawCircle(color, w * 0.15f, Offset(w * 0.50f, h * 0.54f), style = Stroke(width = sw))
+        // Wide rounded body (width > height).
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(w * 0.12f, h * 0.32f),
+            size = Size(w * 0.76f, h * 0.44f),
+            cornerRadius = CornerRadius(w * 0.15f, w * 0.15f),
+            style = Stroke(width = sw, join = join),
+        )
+        // Centered hollow lens (~1/3 of body height).
+        drawCircle(color, h * 0.12f, Offset(w * 0.50f, h * 0.54f), style = Stroke(width = sw))
     }
 }
 
 @Composable
-fun ImageLandscapeIcon(modifier: Modifier = Modifier, size: Dp = 22.dp) {
+fun ImageLandscapeIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color = Color(0xFF111111)) {
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
-        val gold = Color(0xFFD4A017)
-        val ink = Color(0xFF111111)
-        val sw = this.size.minDimension * 0.08f
+        val sw = this.size.minDimension * 0.085f
+        val join = androidx.compose.ui.graphics.StrokeJoin.Round
+        // Near-square hollow rounded photo frame, no fill.
         drawRoundRect(
-            color = gold,
-            topLeft = Offset(w * 0.08f, h * 0.20f),
-            size = Size(w * 0.84f, h * 0.60f),
-            cornerRadius = CornerRadius(w * 0.13f, w * 0.13f),
+            color = color,
+            topLeft = Offset(w * 0.14f, h * 0.18f),
+            size = Size(w * 0.72f, h * 0.64f),
+            cornerRadius = CornerRadius(w * 0.17f, w * 0.17f),
+            style = Stroke(width = sw, join = join),
         )
-        drawCircle(Color(0xFFFFE08A), w * 0.09f, Offset(w * 0.68f, h * 0.38f))
+        // Hollow sun near the top-right, kept off the edge.
+        drawCircle(color, w * 0.075f, Offset(w * 0.65f, h * 0.37f), style = Stroke(width = sw))
+        // Mountain line filling the lower half only.
         val mountain = Path().apply {
-            moveTo(w * 0.17f, h * 0.70f)
+            moveTo(w * 0.20f, h * 0.72f)
             lineTo(w * 0.39f, h * 0.50f)
-            lineTo(w * 0.53f, h * 0.63f)
-            lineTo(w * 0.63f, h * 0.55f)
-            lineTo(w * 0.84f, h * 0.70f)
+            lineTo(w * 0.52f, h * 0.63f)
+            lineTo(w * 0.61f, h * 0.54f)
+            lineTo(w * 0.80f, h * 0.72f)
         }
-        drawPath(
-            mountain,
-            ink,
-            style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round),
-        )
+        drawPath(mountain, color, style = Stroke(width = sw, cap = StrokeCap.Round, join = join))
     }
 }
 
@@ -170,16 +177,19 @@ fun SpiralClipIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
-        val sw = this.size.minDimension * 0.09f
-        val path = Path().apply {
-            moveTo(w * 0.68f, h * 0.25f)
-            cubicTo(w * 0.88f, h * 0.38f, w * 0.82f, h * 0.78f, w * 0.48f, h * 0.80f)
-            cubicTo(w * 0.20f, h * 0.82f, w * 0.12f, h * 0.52f, w * 0.34f, h * 0.42f)
-            cubicTo(w * 0.56f, h * 0.32f, w * 0.70f, h * 0.54f, w * 0.54f, h * 0.64f)
-            cubicTo(w * 0.39f, h * 0.73f, w * 0.27f, h * 0.57f, w * 0.39f, h * 0.48f)
+        val sw = this.size.minDimension * 0.095f
+        // Tall, slim vertical paperclip: outer arm up, over the top, down the far arm,
+        // round the bottom, then a shorter inner tongue back up.
+        val clip = Path().apply {
+            moveTo(w * 0.40f, h * 0.74f)
+            lineTo(w * 0.40f, h * 0.26f)
+            cubicTo(w * 0.40f, h * 0.14f, w * 0.62f, h * 0.14f, w * 0.62f, h * 0.26f)
+            lineTo(w * 0.62f, h * 0.72f)
+            cubicTo(w * 0.62f, h * 0.84f, w * 0.46f, h * 0.84f, w * 0.46f, h * 0.70f)
+            lineTo(w * 0.46f, h * 0.36f)
         }
         drawPath(
-            path,
+            clip,
             color,
             style = Stroke(width = sw, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round),
         )
@@ -191,18 +201,33 @@ fun PluginPlugIcon(modifier: Modifier = Modifier, size: Dp = 22.dp, color: Color
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
-        val sw = this.size.minDimension * 0.08f
-        drawCircle(color, w * 0.40f, Offset(w * 0.50f, h * 0.50f), style = Stroke(width = sw))
-        drawLine(color, Offset(w * 0.42f, h * 0.36f), Offset(w * 0.42f, h * 0.54f), sw, StrokeCap.Round)
-        drawLine(color, Offset(w * 0.58f, h * 0.36f), Offset(w * 0.58f, h * 0.54f), sw, StrokeCap.Round)
-        drawRoundRect(
+        val sw = this.size.minDimension * 0.085f
+        val cx = w * 0.50f
+        val cy = h * 0.50f
+        val join = androidx.compose.ui.graphics.StrokeJoin.Round
+        // Broken outer ring (gap at the bottom-right) suggesting a "connecting" loop.
+        drawArc(
             color = color,
-            topLeft = Offset(w * 0.36f, h * 0.50f),
-            size = Size(w * 0.28f, h * 0.22f),
-            cornerRadius = CornerRadius(w * 0.07f, w * 0.07f),
-            style = Stroke(width = sw),
+            startAngle = 20f,
+            sweepAngle = 285f,
+            useCenter = false,
+            topLeft = Offset(w * 0.13f, h * 0.13f),
+            size = Size(w * 0.74f, h * 0.74f),
+            style = Stroke(width = sw, cap = StrokeCap.Round),
         )
-        drawLine(color, Offset(w * 0.50f, h * 0.72f), Offset(w * 0.50f, h * 0.86f), sw, StrokeCap.Round)
+        // Small tilted plug at the center, pointing from bottom-right toward top-left.
+        androidx.compose.ui.graphics.drawscope.rotate(-45f, Offset(cx, cy)) {
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(cx - w * 0.10f, cy - h * 0.02f),
+                size = Size(w * 0.20f, h * 0.20f),
+                cornerRadius = CornerRadius(w * 0.05f, w * 0.05f),
+                style = Stroke(width = sw, join = join),
+            )
+            drawLine(color, Offset(cx - w * 0.045f, cy - h * 0.02f), Offset(cx - w * 0.045f, cy - h * 0.13f), sw, StrokeCap.Round)
+            drawLine(color, Offset(cx + w * 0.045f, cy - h * 0.02f), Offset(cx + w * 0.045f, cy - h * 0.13f), sw, StrokeCap.Round)
+            drawLine(color, Offset(cx, cy + h * 0.18f), Offset(cx, cy + h * 0.27f), sw, StrokeCap.Round)
+        }
     }
 }
 

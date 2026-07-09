@@ -3,7 +3,7 @@
    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
 
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="AppThemeNotActionBar" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="AppThemeNotActionBar" parent="Theme.Material3.Light.NoActionBar">
         <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
 
         <item name="colorPrimary">@color/dark</item>
@@ -12,10 +12,12 @@
 
         <item name="android:navigationBarColor">@color/evenDarker</item>
         <item name="android:windowBackground">@color/dark</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
         <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
     </style>
 
-    <style name="AppTheme" parent="Theme.Material3.Dark">
+    <style name="AppTheme" parent="Theme.Material3.Light">
         <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
 
         <item name="colorPrimary">@color/dark</item>
@@ -24,6 +26,8 @@
 
         <item name="android:navigationBarColor">@color/evenDarker</item>
         <item name="android:windowBackground">@color/dark</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
         <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
     </style>
 
